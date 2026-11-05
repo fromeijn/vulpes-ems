@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use vulpes_core::{ForecastPoint, SeriesKind, Store};
 use vulpes_sources::{Location, energyzero, open_meteo};
 
+mod load;
 mod solar;
 
 #[derive(Parser)]
@@ -109,6 +110,49 @@ enum Cmd {
         #[arg(long)]
         no_shading: bool,
     },
+    /// Reconstruct hourly house load (excluding the battery) into series `load.house`.
+    BuildLoad {
+        #[arg(long)]
+        from: NaiveDate,
+        /// Grid import energy series (kWh/h), highest priority first.
+        #[arg(long, value_delimiter = ',', required = true)]
+        grid_import: Vec<String>,
+        /// Grid export energy series (kWh/h), same order as --grid-import.
+        #[arg(long, value_delimiter = ',', required = true)]
+        grid_export: Vec<String>,
+        /// PV power series (W, hourly mean).
+        #[arg(long)]
+        pv: String,
+        /// Battery charge / discharge energy series (kWh/h), AC side.
+        #[arg(long)]
+        battery_in: Option<String>,
+        #[arg(long)]
+        battery_out: Option<String>,
+        /// Battery power series (W) used where the energy counters are missing.
+        #[arg(long)]
+        battery_power: Option<String>,
+        /// +1 if --battery-power is positive when charging, -1 if positive when discharging.
+        #[arg(long, default_value_t = 1.0, allow_hyphen_values = true)]
+        battery_power_sign: f64,
+    },
+    /// Evaluate day-ahead load forecasts (issued 12:00 UTC the day before).
+    EvalLoad {
+        #[arg(long)]
+        from: NaiveDate,
+        #[arg(long)]
+        to: NaiveDate,
+        #[arg(long, default_value = "Europe/Amsterdam")]
+        tz: chrono_tz::Tz,
+        /// Public-holiday calendar: none or nl.
+        #[arg(long, default_value = "nl")]
+        country: String,
+        /// Weather source for the target day's temperature (day-ahead forecast).
+        #[arg(long, default_value = "open-meteo-day1:knmi_harmonie_arome_netherlands")]
+        temp_forecast: String,
+        /// Weather source for reference days' temperature.
+        #[arg(long, default_value = "open-meteo-archive:knmi_harmonie_arome_netherlands")]
+        temp_history: String,
+    },
     /// Show what the store contains.
     Stats,
 }
@@ -172,6 +216,43 @@ fn main() -> Result<()> {
             weeks,
             no_shading,
         } => solar::evaluate(&store, lat, lon, from, to, &planes, lead_days, weeks, !no_shading),
+        Cmd::BuildLoad {
+            from,
+            grid_import,
+            grid_export,
+            pv,
+            battery_in,
+            battery_out,
+            battery_power,
+            battery_power_sign,
+        } => {
+            let src = load::LoadSources {
+                grid_import,
+                grid_export,
+                energy_kwh: true,
+                pv,
+                battery_in,
+                battery_out,
+                battery_power,
+                battery_power_sign,
+            };
+            load::build(&mut store, &src, from)
+        }
+        Cmd::EvalLoad {
+            from,
+            to,
+            tz,
+            country,
+            temp_forecast,
+            temp_history,
+        } => {
+            let country = match country.as_str() {
+                "nl" => vulpes_load::Country::Netherlands,
+                "none" => vulpes_load::Country::None,
+                c => bail!("unknown country '{c}' (supported: none, nl)"),
+            };
+            load::evaluate(&store, from, to, tz, country, &temp_forecast, &temp_history)
+        }
         Cmd::Stats => stats(&store),
     }
 }
