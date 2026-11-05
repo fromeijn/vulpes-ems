@@ -10,6 +10,7 @@ use serde_json::Value;
 
 const FORECAST_URL: &str = "https://api.open-meteo.com/v1/forecast";
 const HISTORICAL_FORECAST_URL: &str = "https://historical-forecast-api.open-meteo.com/v1/forecast";
+const PREVIOUS_RUNS_URL: &str = "https://previous-runs-api.open-meteo.com/v1/forecast";
 const STEP_S: i64 = 900;
 
 /// Variables needed for the PV physics chain and ML features.
@@ -43,46 +44,69 @@ pub struct Request<'a> {
 pub enum Range {
     /// Live forecast for the coming days (max 16).
     Forecast { days: u8 },
-    /// Archived forecasts for an inclusive date range, `YYYY-MM-DD`.
+    /// Archived forecasts for an inclusive date range, `YYYY-MM-DD`, stitched
+    /// from the freshest run for each hour (short lead time).
     Historical {
         start: chrono::NaiveDate,
         end: chrono::NaiveDate,
+    },
+    /// Archived forecasts as they stood `lead_days` (1..=7) before the valid time.
+    PreviousRuns {
+        start: chrono::NaiveDate,
+        end: chrono::NaiveDate,
+        lead_days: u8,
     },
 }
 
 pub fn fetch(req: &Request<'_>) -> Result<Vec<WeatherSeries>> {
     let loc = req.location.rounded();
-    let (url, range_params) = match req.range {
-        Range::Forecast { days } => (FORECAST_URL, vec![("forecast_days", days.to_string())]),
-        Range::Historical { start, end } => (
-            HISTORICAL_FORECAST_URL,
-            vec![
-                ("start_date", start.to_string()),
-                ("end_date", end.to_string()),
-            ],
+    let dates = |start: chrono::NaiveDate, end: chrono::NaiveDate| {
+        vec![("start_date", start.to_string()), ("end_date", end.to_string())]
+    };
+    let (url, range_params, suffix) = match req.range {
+        Range::Forecast { days } => (
+            FORECAST_URL,
+            vec![("forecast_days", days.to_string())],
+            String::new(),
+        ),
+        Range::Historical { start, end } => (HISTORICAL_FORECAST_URL, dates(start, end), String::new()),
+        Range::PreviousRuns {
+            start,
+            end,
+            lead_days,
+        } => (
+            PREVIOUS_RUNS_URL,
+            dates(start, end),
+            format!("_previous_day{lead_days}"),
         ),
     };
+    let requested: Vec<String> = req.vars.iter().map(|v| format!("{v}{suffix}")).collect();
     let mut r = crate::agent()
         .get(url)
         .query("latitude", loc.lat.to_string())
         .query("longitude", loc.lon.to_string())
-        .query("minutely_15", req.vars.join(","))
+        .query("minutely_15", requested.join(","))
         .query("models", req.models.join(","))
         .query("timeformat", "unixtime")
-        .query("timezone", "UTC");
+        .query("timezone", "UTC")
+        .query("wind_speed_unit", "ms");
     for (k, v) in range_params {
         r = r.query(k, v);
     }
     let body: Value = r.call()?.body_mut().read_json()?;
-    parse(&body, req.models, req.vars)
+    parse(&body, req.models, req.vars, &suffix)
 }
 
-pub(crate) fn parse(body: &Value, models: &[&str], vars: &[&str]) -> Result<Vec<WeatherSeries>> {
+/// `suffix` is appended to variable names in the response (e.g. `_previous_day1`);
+/// returned series use the plain variable name.
+pub(crate) fn parse(
+    body: &Value,
+    models: &[&str],
+    vars: &[&str],
+    suffix: &str,
+) -> Result<Vec<WeatherSeries>> {
     if body.get("error").and_then(Value::as_bool) == Some(true) {
-        return Err(Error::Parse(format!(
-            "open-meteo error: {}",
-            body["reason"]
-        )));
+        return Err(Error::Parse(format!("open-meteo error: {}", body["reason"])));
     }
     let block = body
         .get("minutely_15")
@@ -91,10 +115,7 @@ pub(crate) fn parse(body: &Value, models: &[&str], vars: &[&str]) -> Result<Vec<
         .as_array()
         .ok_or_else(|| Error::Parse("missing time array".into()))?
         .iter()
-        .map(|t| {
-            t.as_i64()
-                .ok_or_else(|| Error::Parse("non-integer time".into()))
-        })
+        .map(|t| t.as_i64().ok_or_else(|| Error::Parse("non-integer time".into())))
         .collect::<Result<_>>()?;
 
     let mut out = Vec::new();
@@ -102,9 +123,9 @@ pub(crate) fn parse(body: &Value, models: &[&str], vars: &[&str]) -> Result<Vec<
         for &var in vars {
             // With a single model Open-Meteo omits the `_<model>` suffix.
             let key = if models.len() == 1 {
-                var.to_string()
+                format!("{var}{suffix}")
             } else {
-                format!("{var}_{model}")
+                format!("{var}{suffix}_{model}")
             };
             let Some(values) = block.get(&key).and_then(Value::as_array) else {
                 continue;
@@ -150,6 +171,7 @@ mod tests {
             &body,
             &["m1", "m2"],
             &["shortwave_radiation", "temperature_2m"],
+            "",
         )
         .unwrap();
         assert_eq!(s.len(), 3); // m2 has no temperature
@@ -161,13 +183,20 @@ mod tests {
     #[test]
     fn single_model_has_no_suffix() {
         let body = json!({"minutely_15": {"time": [900], "temperature_2m": [1.5]}});
-        let s = parse(&body, &["m1"], &["temperature_2m"]).unwrap();
+        let s = parse(&body, &["m1"], &["temperature_2m"], "").unwrap();
         assert_eq!(s[0].points, vec![(900, 1.5)]);
+    }
+
+    #[test]
+    fn strips_previous_run_suffix() {
+        let body = json!({"minutely_15": {"time": [900], "temperature_2m_previous_day1_m1": [3.0], "temperature_2m_previous_day1_m2": [4.0]}});
+        let s = parse(&body, &["m1", "m2"], &["temperature_2m"], "_previous_day1").unwrap();
+        assert_eq!((s[0].var.as_str(), s[1].points[0].1), ("temperature_2m", 4.0));
     }
 
     #[test]
     fn reports_api_errors() {
         let body = json!({"error": true, "reason": "bad model"});
-        assert!(parse(&body, &["x"], &["y"]).is_err());
+        assert!(parse(&body, &["x"], &["y"], "").is_err());
     }
 }

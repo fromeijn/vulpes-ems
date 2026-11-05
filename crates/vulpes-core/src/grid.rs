@@ -15,9 +15,7 @@ impl TimeGrid {
     /// Grid starting at the slot containing `now`, aligned to `step_s`.
     pub fn aligned(now: i64, step_s: i64, len: usize) -> crate::Result<Self> {
         if step_s <= 0 || len == 0 {
-            return Err(crate::Error::Config(
-                "step and length must be positive".into(),
-            ));
+            return Err(crate::Error::Config("step and length must be positive".into()));
         }
         Ok(Self {
             start: now.div_euclid(step_s) * step_s,

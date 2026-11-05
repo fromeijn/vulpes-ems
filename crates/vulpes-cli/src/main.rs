@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use vulpes_core::{ForecastPoint, SeriesKind, Store};
 use vulpes_sources::{Location, energyzero, open_meteo};
 
+mod solar;
+
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
@@ -45,6 +47,10 @@ enum Cmd {
             default_value = "knmi_harmonie_arome_netherlands,icon_d2"
         )]
         models: Vec<String>,
+        /// Fetch forecasts as issued this many days before the valid time (1..=7)
+        /// instead of the short-lead archive. Stored as `open-meteo-day<N>:<model>`.
+        #[arg(long)]
+        lead_days: Option<u8>,
     },
     /// Backfill hourly NL day-ahead prices from EnergyZero.
     BackfillPrices {
@@ -52,6 +58,46 @@ enum Cmd {
         from: NaiveDate,
         #[arg(long)]
         to: NaiveDate,
+    },
+    /// Calibrate per-panel PV planes (azimuth, tilt, capacity) from history.
+    CalibrateSolar {
+        #[arg(long, allow_hyphen_values = true)]
+        lat: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        lon: f64,
+        #[arg(long)]
+        from: NaiveDate,
+        #[arg(long)]
+        to: NaiveDate,
+        /// Panel list: one `<serial> <name>` per line; actuals are read from series `pv.inv.<serial>`.
+        #[arg(long, default_value = "local/panels.txt")]
+        panels: PathBuf,
+        /// Open-Meteo model whose archive drives the fit.
+        #[arg(long, default_value = "knmi_harmonie_arome_netherlands")]
+        model: String,
+        #[arg(long, default_value = "local/solar-planes.json")]
+        out: PathBuf,
+        /// Use only days in even or odd ISO weeks (hold the other half out for evaluation).
+        #[arg(long, value_enum, default_value_t = solar::Weeks::All)]
+        weeks: solar::Weeks,
+    },
+    /// Evaluate daily PV forecasts against actuals and the Solar Forecast ML benchmark.
+    EvalSolar {
+        #[arg(long, allow_hyphen_values = true)]
+        lat: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        lon: f64,
+        #[arg(long)]
+        from: NaiveDate,
+        #[arg(long)]
+        to: NaiveDate,
+        #[arg(long, default_value = "local/solar-planes.json")]
+        planes: PathBuf,
+        /// Weather lead time in days (source `open-meteo-day<N>`); 0 = short-lead archive.
+        #[arg(long, default_value_t = 1)]
+        lead_days: u8,
+        #[arg(long, value_enum, default_value_t = solar::Weeks::All)]
+        weeks: solar::Weeks,
     },
     /// Show what the store contains.
     Stats,
@@ -62,8 +108,7 @@ fn main() -> Result<()> {
     if let Some(dir) = cli.store.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
-    let mut store =
-        Store::open(&cli.store).with_context(|| format!("opening {}", cli.store.display()))?;
+    let mut store = Store::open(&cli.store).with_context(|| format!("opening {}", cli.store.display()))?;
     match cli.cmd {
         Cmd::ImportHa { ha_db, map } => import_ha(&mut store, &ha_db, &map),
         Cmd::BackfillWeather {
@@ -72,7 +117,8 @@ fn main() -> Result<()> {
             from,
             to,
             models,
-        } => backfill_weather(&mut store, Location { lat, lon }, from, to, &models),
+            lead_days,
+        } => backfill_weather(&mut store, Location { lat, lon }, from, to, &models, lead_days),
         Cmd::BackfillPrices { from, to } => {
             store.ensure_series(PRICE_KEY, "EUR/kWh", SeriesKind::Mean)?;
             let prices = energyzero::fetch_hourly(from, to)?;
@@ -80,15 +126,33 @@ fn main() -> Result<()> {
             println!("{PRICE_KEY}: {n} hourly prices");
             Ok(())
         }
+        Cmd::CalibrateSolar {
+            lat,
+            lon,
+            from,
+            to,
+            panels,
+            model,
+            out,
+            weeks,
+        } => solar::calibrate(&store, lat, lon, from, to, &panels, &model, &out, weeks),
+        Cmd::EvalSolar {
+            lat,
+            lon,
+            from,
+            to,
+            planes,
+            lead_days,
+            weeks,
+        } => solar::evaluate(&store, lat, lon, from, to, &planes, lead_days, weeks),
         Cmd::Stats => stats(&store),
     }
 }
 
 const PRICE_KEY: &str = "price.wholesale.nl";
 
-fn read_map(path: &Path) -> Result<Vec<(String, String)>> {
-    let text =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+pub(crate) fn read_map(path: &Path) -> Result<Vec<(String, String)>> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let mut out = Vec::new();
     for (i, line) in text.lines().enumerate() {
         let line = line.split('#').next().unwrap_or("").trim();
@@ -128,7 +192,9 @@ fn import_ha(store: &mut Store, ha_db: &Path, map: &Path) -> Result<()> {
         };
         let unit = unit.unwrap_or_default();
         let rows: Vec<(i64, Option<f64>, Option<f64>)> = ha
-            .prepare("SELECT CAST(start_ts AS INTEGER), mean, sum FROM statistics WHERE metadata_id = ?1 ORDER BY start_ts")?
+            // Fall back to the hourly state snapshot when no mean was recorded
+            // (happens when an integration changes its sensor's state class).
+            .prepare("SELECT CAST(start_ts AS INTEGER), COALESCE(mean, state), sum FROM statistics WHERE metadata_id = ?1 ORDER BY start_ts")?
             .query_map([meta_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<Result<_, _>>()?;
         let (kind, samples) = if has_sum {
@@ -136,9 +202,7 @@ fn import_ha(store: &mut Store, ha_db: &Path, map: &Path) -> Result<()> {
         } else {
             (
                 SeriesKind::Mean,
-                rows.iter()
-                    .filter_map(|&(t, m, _)| m.map(|m| (t, m)))
-                    .collect(),
+                rows.iter().filter_map(|&(t, m, _)| m.map(|m| (t, m))).collect(),
             )
         };
         store.ensure_series(&key, &unit, kind)?;
@@ -167,7 +231,11 @@ fn backfill_weather(
     from: NaiveDate,
     to: NaiveDate,
     models: &[String],
+    lead_days: Option<u8>,
 ) -> Result<()> {
+    if lead_days.is_some_and(|d| !(1..=7).contains(&d)) {
+        bail!("--lead-days must be between 1 and 7");
+    }
     let models: Vec<&str> = models.iter().map(String::as_str).collect();
     let mut start = from;
     while start <= to {
@@ -176,22 +244,33 @@ fn backfill_weather(
             location: loc,
             models: &models,
             vars: open_meteo::DEFAULT_VARS,
-            range: open_meteo::Range::Historical { start, end },
+            range: match lead_days {
+                None => open_meteo::Range::Historical { start, end },
+                Some(lead_days) => open_meteo::Range::PreviousRuns {
+                    start,
+                    end,
+                    lead_days,
+                },
+            },
         })?;
+        let (prefix, lead_s) = match lead_days {
+            None => ("open-meteo-archive".to_string(), 0),
+            Some(d) => (format!("open-meteo-day{d}"), i64::from(d) * 86_400),
+        };
         let mut n = 0;
         for s in series {
-            // Archived forecasts are stitched from the freshest run per hour, so
-            // they are marked as issued at the valid time ("short lead").
+            // The short-lead archive is stitched from the freshest run per hour,
+            // so it is marked as issued at the valid time.
             let pts: Vec<_> = s
                 .points
                 .iter()
                 .map(|&(t, v)| ForecastPoint {
                     valid_ts: t,
-                    issued_ts: t,
+                    issued_ts: t - lead_s,
                     value: v,
                 })
                 .collect();
-            n += store.put_forecasts(&format!("open-meteo-archive:{}", s.model), &s.var, &pts)?;
+            n += store.put_forecasts(&format!("{prefix}:{}", s.model), &s.var, &pts)?;
         }
         println!("{start}..{end}: {n} forecast values");
         start = end + chrono::Duration::days(1);

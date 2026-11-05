@@ -96,11 +96,9 @@ impl Store {
     fn init(conn: Connection) -> crate::Result<Self> {
         conn.execute_batch(SCHEMA)?;
         let version: Option<i64> = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'schema_version'",
-                [],
-                |r| r.get::<_, String>(0),
-            )
+            .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| {
+                r.get::<_, String>(0)
+            })
             .optional()?
             .and_then(|v| v.parse().ok());
         match version {
@@ -124,11 +122,9 @@ impl Store {
     pub fn ensure_series(&self, key: &str, unit: &str, kind: SeriesKind) -> crate::Result<i64> {
         let existing: Option<(i64, String, String)> = self
             .conn
-            .query_row(
-                "SELECT id, unit, kind FROM series WHERE key = ?1",
-                [key],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
+            .query_row("SELECT id, unit, kind FROM series WHERE key = ?1", [key], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
             .optional()?;
         match existing {
             Some((id, u, k)) if u == unit && k == kind.as_str() => Ok(id),
@@ -154,12 +150,7 @@ impl Store {
     }
 
     /// Insert or replace samples of an existing series. Returns rows written.
-    pub fn put_samples(
-        &mut self,
-        key: &str,
-        step_s: i64,
-        samples: &[(i64, f64)],
-    ) -> crate::Result<usize> {
+    pub fn put_samples(&mut self, key: &str, step_s: i64, samples: &[(i64, f64)]) -> crate::Result<usize> {
         let id = self
             .series_id(key)?
             .ok_or_else(|| crate::Error::Config(format!("unknown series '{key}'")))?;
@@ -177,22 +168,14 @@ impl Store {
     }
 
     /// Samples with `from <= ts < to`, ordered by time.
-    pub fn samples(
-        &self,
-        key: &str,
-        step_s: i64,
-        from: i64,
-        to: i64,
-    ) -> crate::Result<Vec<(i64, f64)>> {
+    pub fn samples(&self, key: &str, step_s: i64, from: i64, to: i64) -> crate::Result<Vec<(i64, f64)>> {
         let Some(id) = self.series_id(key)? else {
             return Ok(Vec::new());
         };
         let mut stmt = self.conn.prepare_cached(
             "SELECT ts, value FROM samples WHERE series_id = ?1 AND step_s = ?2 AND ts >= ?3 AND ts < ?4 ORDER BY ts",
         )?;
-        let rows = stmt.query_map(params![id, step_s, from, to], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?;
+        let rows = stmt.query_map(params![id, step_s, from, to], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -321,12 +304,7 @@ mod tests {
         s.put_forecasts(
             "om",
             "ghi",
-            &[
-                p(100, 0, 1.0),
-                p(100, 50, 2.0),
-                p(100, 90, 3.0),
-                p(200, 10, 7.0),
-            ],
+            &[p(100, 0, 1.0), p(100, 50, 2.0), p(100, 90, 3.0), p(200, 10, 7.0)],
         )
         .unwrap();
         assert_eq!(
@@ -337,11 +315,7 @@ mod tests {
             s.forecasts_asof("om", "ghi", 0, 300, 5).unwrap(),
             vec![(100, 1.0)]
         );
-        assert!(
-            s.forecasts_asof("om", "ghi", 0, 300, -1)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(s.forecasts_asof("om", "ghi", 0, 300, -1).unwrap().is_empty());
     }
 
     #[test]

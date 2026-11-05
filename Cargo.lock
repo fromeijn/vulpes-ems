@@ -1143,8 +1143,10 @@ dependencies = [
  "chrono",
  "clap",
  "rusqlite",
+ "serde_json",
  "vulpes-core",
  "vulpes-opt",
+ "vulpes-solar",
  "vulpes-sources",
 ]
 
@@ -1198,6 +1200,7 @@ dependencies = [
 name = "vulpes-solar"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "vulpes-core",
 ]
 
