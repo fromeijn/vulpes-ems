@@ -3,3 +3,10 @@
 /.venv
 __pycache__/
 *.so
+# Local/private data: never commit
+/local/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
