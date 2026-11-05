@@ -9,3 +9,4 @@ rust-version.workspace = true
 
 [dependencies]
 vulpes-core.workspace = true
+serde.workspace = true

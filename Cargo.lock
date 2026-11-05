@@ -1181,7 +1181,9 @@ dependencies = [
  "serde_json",
  "vulpes-core",
  "vulpes-load",
+ "vulpes-ml",
  "vulpes-opt",
+ "vulpes-price",
  "vulpes-solar",
  "vulpes-sources",
 ]
@@ -1222,6 +1224,7 @@ dependencies = [
 name = "vulpes-price"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "vulpes-core",
 ]
 

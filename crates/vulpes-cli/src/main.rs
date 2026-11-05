@@ -9,6 +9,7 @@ use vulpes_core::{ForecastPoint, SeriesKind, Store};
 use vulpes_sources::{Location, energyzero, open_meteo};
 
 mod load;
+mod price;
 mod solar;
 
 #[derive(Parser)]
@@ -52,6 +53,12 @@ enum Cmd {
         /// instead of the short-lead archive. Stored as `open-meteo-day<N>:<model>`.
         #[arg(long)]
         lead_days: Option<u8>,
+        /// Variables to fetch (default: the PV/temperature set).
+        #[arg(long, value_delimiter = ',')]
+        vars: Vec<String>,
+        /// Label for a reference point; stored as `<source>:<model>@<label>`.
+        #[arg(long)]
+        label: Option<String>,
     },
     /// Backfill hourly NL day-ahead prices from EnergyZero.
     BackfillPrices {
@@ -153,6 +160,34 @@ enum Cmd {
         #[arg(long, default_value = "open-meteo-archive:knmi_harmonie_arome_netherlands")]
         temp_history: String,
     },
+    /// Fit the consumer tariff `all_in = a · wholesale + b` per calendar year.
+    FitTariff {
+        /// `<cost_series>:<energy_series>` pairs (EUR and kWh per hour), e.g. import and export.
+        #[arg(long = "pair", required = true)]
+        pairs: Vec<String>,
+        #[arg(long, default_value = PRICE_KEY)]
+        wholesale: String,
+        /// Ignore steps with less energy (kWh); rounded supplier costs make them noisy.
+        #[arg(long, default_value_t = 0.0)]
+        min_energy: f64,
+    },
+    /// Evaluate day-ahead wholesale price forecasts (issued 10:00 UTC the day before).
+    EvalPrice {
+        #[arg(long)]
+        from: NaiveDate,
+        #[arg(long)]
+        to: NaiveDate,
+        #[arg(long, default_value = "Europe/Amsterdam")]
+        tz: chrono_tz::Tz,
+        /// Weather sources with `wind_speed_100m` at wind reference points.
+        #[arg(long, value_delimiter = ',', required = true)]
+        wind: Vec<String>,
+        /// Weather sources with `shortwave_radiation` at solar reference points.
+        #[arg(long, value_delimiter = ',', required = true)]
+        solar: Vec<String>,
+        #[arg(long, default_value = PRICE_KEY)]
+        wholesale: String,
+    },
     /// Show what the store contains.
     Stats,
 }
@@ -172,7 +207,20 @@ fn main() -> Result<()> {
             to,
             models,
             lead_days,
-        } => backfill_weather(&mut store, Location { lat, lon }, from, to, &models, lead_days),
+            vars,
+            label,
+        } => backfill_weather(
+            &mut store,
+            WeatherBackfill {
+                loc: Location { lat, lon },
+                from,
+                to,
+                models,
+                lead_days,
+                vars,
+                label,
+            },
+        ),
         Cmd::BackfillPrices { from, to } => {
             store.ensure_series(PRICE_KEY, "EUR/kWh", SeriesKind::Mean)?;
             let prices = energyzero::fetch_hourly(from, to)?;
@@ -253,6 +301,35 @@ fn main() -> Result<()> {
             };
             load::evaluate(&store, from, to, tz, country, &temp_forecast, &temp_history)
         }
+        Cmd::FitTariff {
+            pairs,
+            wholesale,
+            min_energy,
+        } => {
+            let pairs = pairs
+                .iter()
+                .map(|p| match p.split_once(':') {
+                    Some((c, e)) => Ok((c.to_string(), e.to_string())),
+                    None => bail!("--pair must be <cost_series>:<energy_series>, got '{p}'"),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            price::fit_tariff(&store, &pairs, &wholesale, min_energy)
+        }
+        Cmd::EvalPrice {
+            from,
+            to,
+            tz,
+            wind,
+            solar,
+            wholesale,
+        } => price::evaluate(
+            &store,
+            from,
+            to,
+            tz,
+            &price::PricePoints { wind, solar },
+            &wholesale,
+        ),
         Cmd::Stats => stats(&store),
     }
 }
@@ -333,25 +410,44 @@ fn hourly_deltas(rows: &[(i64, Option<f64>, Option<f64>)]) -> Vec<(i64, f64)> {
         .collect()
 }
 
-fn backfill_weather(
-    store: &mut Store,
+struct WeatherBackfill {
     loc: Location,
     from: NaiveDate,
     to: NaiveDate,
-    models: &[String],
+    models: Vec<String>,
     lead_days: Option<u8>,
-) -> Result<()> {
+    vars: Vec<String>,
+    /// Appended to the source as `@<label>`, to keep reference points apart from the site.
+    label: Option<String>,
+}
+
+fn backfill_weather(store: &mut Store, req: WeatherBackfill) -> Result<()> {
+    let WeatherBackfill {
+        loc,
+        from,
+        to,
+        models,
+        lead_days,
+        vars,
+        label,
+    } = req;
     if lead_days.is_some_and(|d| !(1..=7).contains(&d)) {
         bail!("--lead-days must be between 1 and 7");
     }
     let models: Vec<&str> = models.iter().map(String::as_str).collect();
+    let vars: Vec<&str> = if vars.is_empty() {
+        open_meteo::DEFAULT_VARS.to_vec()
+    } else {
+        vars.iter().map(String::as_str).collect()
+    };
+    let suffix = label.map(|l| format!("@{l}")).unwrap_or_default();
     let mut start = from;
     while start <= to {
         let end = (start + chrono::Duration::days(30)).min(to);
         let series = open_meteo::fetch(&open_meteo::Request {
             location: loc,
             models: &models,
-            vars: open_meteo::DEFAULT_VARS,
+            vars: &vars,
             range: match lead_days {
                 None => open_meteo::Range::Historical { start, end },
                 Some(lead_days) => open_meteo::Range::PreviousRuns {
@@ -378,7 +474,7 @@ fn backfill_weather(
                     value: v,
                 })
                 .collect();
-            n += store.put_forecasts(&format!("{prefix}:{}", s.model), &s.var, &pts)?;
+            n += store.put_forecasts(&format!("{prefix}:{}{suffix}", s.model), &s.var, &pts)?;
         }
         println!("{start}..{end}: {n} forecast values");
         start = end + chrono::Duration::days(1);

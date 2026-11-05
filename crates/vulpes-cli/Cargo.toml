@@ -16,6 +16,8 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde_json = "1.0.154"
 vulpes-core = { version = "0.1.0", path = "../vulpes-core" }
 vulpes-load = { version = "0.1.0", path = "../vulpes-load" }
+vulpes-ml = { version = "0.1.0", path = "../vulpes-ml" }
 vulpes-opt.workspace = true
+vulpes-price = { version = "0.1.0", path = "../vulpes-price" }
 vulpes-solar = { version = "0.1.0", path = "../vulpes-solar" }
 vulpes-sources = { version = "0.1.0", path = "../vulpes-sources" }
