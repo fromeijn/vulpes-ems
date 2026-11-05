@@ -2,17 +2,22 @@ use serde::{Deserialize, Serialize};
 
 /// What a user-defined ESS mode physically does. The optimizer reasons about
 /// these behaviours; the HA integration maps each mode to concrete actions.
+/// Powers are AC-side in W; grid power is positive when importing.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Behaviour {
-    /// Charge the battery at up to `max_w` (from PV and/or grid).
-    ForceCharge { max_w: f64 },
-    /// Battery idle; grid covers any deficit, PV surplus is exported.
-    Idle,
-    /// Battery covers deficits / absorbs surplus to keep grid power near zero.
+    /// Hold grid power at `w` (e.g. Victron ESS setpoint). The battery takes
+    /// whatever balances it: `battery = w + pv − load`. Positive `w` charges
+    /// from the grid, negative `w` exports from the battery.
+    GridSetpoint { w: f64 },
+    /// Hold grid power at 0: the battery covers deficits and absorbs surplus.
     SelfConsume,
-    /// Discharge the battery at up to `max_w`, exporting what the house does not use.
-    ForceDischarge { max_w: f64 },
+    /// Never discharge; PV surplus may still charge the battery.
+    NoDischarge,
+    /// Battery idle; the grid covers deficits and takes surplus.
+    Idle,
+    /// Fixed battery power (positive = charge), for inverters controlled that way.
+    BatteryPower { w: f64 },
 }
 
 /// A named mode as the user knows it (e.g. "Net Zero").

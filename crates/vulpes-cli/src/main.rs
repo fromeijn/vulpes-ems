@@ -10,6 +10,7 @@ use vulpes_sources::{Location, energyzero, open_meteo};
 
 mod load;
 mod price;
+mod replay;
 mod solar;
 
 #[derive(Parser)]
@@ -188,6 +189,30 @@ enum Cmd {
         #[arg(long, default_value = PRICE_KEY)]
         wholesale: String,
     },
+    /// Replay history hour by hour, comparing control strategies on actual data.
+    Replay {
+        #[arg(long, default_value = "local/site.json")]
+        site: PathBuf,
+        #[arg(long, default_value = "local/solar-planes.json")]
+        planes: PathBuf,
+        #[arg(long)]
+        from: NaiveDate,
+        #[arg(long)]
+        to: NaiveDate,
+        #[arg(long, default_value = "Europe/Amsterdam")]
+        tz: chrono_tz::Tz,
+        #[arg(long, allow_hyphen_values = true)]
+        lat: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        lon: f64,
+        #[arg(long, default_value_t = 36)]
+        horizon_h: usize,
+        #[arg(long, default_value = PRICE_KEY)]
+        wholesale: String,
+        /// Scenario: override export pricing with `<a>,<b>` (export = a·wholesale + b).
+        #[arg(long, allow_hyphen_values = true)]
+        export: Option<String>,
+    },
     /// Show what the store contains.
     Stats,
 }
@@ -329,6 +354,36 @@ fn main() -> Result<()> {
             tz,
             &price::PricePoints { wind, solar },
             &wholesale,
+        ),
+        Cmd::Replay {
+            site,
+            planes,
+            from,
+            to,
+            tz,
+            lat,
+            lon,
+            horizon_h,
+            wholesale,
+            export,
+        } => replay::run(
+            &store,
+            &replay::ReplayArgs {
+                site: &site,
+                planes: &planes,
+                from,
+                to,
+                tz,
+                lat,
+                lon,
+                horizon_h,
+                wholesale: &wholesale,
+                export_override: match export.as_deref().map(|e| e.split_once(',')) {
+                    None => None,
+                    Some(Some((a, b))) => Some((a.trim().parse()?, b.trim().parse()?)),
+                    Some(None) => bail!("--export must be <a>,<b>"),
+                },
+            },
         ),
         Cmd::Stats => stats(&store),
     }

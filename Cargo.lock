@@ -1178,6 +1178,7 @@ dependencies = [
  "chrono-tz",
  "clap",
  "rusqlite",
+ "serde",
  "serde_json",
  "vulpes-core",
  "vulpes-load",

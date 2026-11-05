@@ -6,7 +6,7 @@ pub mod grid;
 pub mod mode;
 pub mod store;
 
-pub use battery::BatteryParams;
+pub use battery::{BatteryParams, GridLimits};
 pub use grid::TimeGrid;
 pub use mode::{Behaviour, ModeDef};
 pub use store::{ForecastPoint, SeriesKind, Store};

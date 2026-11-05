@@ -291,10 +291,10 @@ pub(crate) fn calibrate(
     Ok(())
 }
 
-type Plane = (String, PlaneParams, Option<ShadingMap>);
+pub(crate) type Plane = (String, PlaneParams, Option<ShadingMap>);
 
 /// Load calibrated planes (and shading maps, unless disabled) written by `calibrate-solar`.
-fn load_planes(path: &Path, shading: bool) -> Result<Vec<Plane>> {
+pub(crate) fn load_planes(path: &Path, shading: bool) -> Result<Vec<Plane>> {
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
     let obj = v.as_object().context("planes file must be a JSON object")?;
     obj.iter()
@@ -309,7 +309,7 @@ fn load_planes(path: &Path, shading: bool) -> Result<Vec<Plane>> {
 }
 
 /// Plant AC power (W, hourly mean) per hour start.
-fn plant_hourly(planes: &[Plane], data: &HourlyInputs) -> HashMap<i64, f64> {
+pub(crate) fn plant_hourly(planes: &[Plane], data: &HourlyInputs) -> HashMap<i64, f64> {
     let per_plane: Vec<Vec<f64>> = planes
         .iter()
         .map(|(_, p, map)| simulate_hours_shaded(p, map.as_ref(), &data.inputs))

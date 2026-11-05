@@ -13,6 +13,7 @@ chrono = "0.4.45"
 chrono-tz = "0.10.4"
 clap = { version = "4.6.7", features = ["derive"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0.154"
 vulpes-core = { version = "0.1.0", path = "../vulpes-core" }
 vulpes-load = { version = "0.1.0", path = "../vulpes-load" }

@@ -32,3 +32,10 @@ impl BatteryParams {
         Ok(())
     }
 }
+
+/// Grid connection limits (W).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GridLimits {
+    pub max_import_w: f64,
+    pub max_export_w: f64,
+}
