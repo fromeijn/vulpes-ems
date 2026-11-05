@@ -5,6 +5,7 @@
 pub mod calibrate;
 pub mod irradiance;
 pub mod model;
+pub mod shading;
 pub mod solpos;
 
 pub use model::{PlaneParams, Weather, plane_ac_power};

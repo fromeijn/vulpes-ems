@@ -7,6 +7,7 @@ use std::path::Path;
 use vulpes_core::Store;
 use vulpes_solar::calibrate::{FitOptions, GroupMember, HourInput, fit_group};
 use vulpes_solar::model::{PlaneParams, Weather};
+use vulpes_solar::shading::{ShadingMap, ShadingOptions, fit_shading, refit_pdc0, simulate_hours_shaded};
 use vulpes_solar::{SunPosition, sun_position};
 
 /// Split days by ISO week parity, for calibrating on one half and evaluating on the other.
@@ -140,6 +141,7 @@ pub(crate) fn calibrate(
     model: &str,
     out: &Path,
     weeks: Weeks,
+    shading_prior: Option<f64>,
 ) -> Result<()> {
     let ts = |d: NaiveDate| {
         d.and_hms_opt(0, 0, 0)
@@ -221,8 +223,8 @@ pub(crate) fn calibrate(
     groups.dedup();
     let mut results = serde_json::Map::new();
     println!(
-        "{:18} {:10} {:>7} {:>5} {:>6} {:>6} {:>8} {:>6}",
-        "panel", "group", "azimuth", "tilt", "pdc0", "ac_max", "rmse(W)", "hours"
+        "{:18} {:10} {:>7} {:>5} {:>6} {:>6} {:>8} {:>6} {:>9}",
+        "panel", "group", "azimuth", "tilt", "pdc0", "ac_max", "rmse(W)", "hours", "shaded<0.7"
     );
     for g in groups {
         let idx: Vec<usize> = (0..list.len()).filter(|&i| list[i].group == g).collect();
@@ -247,14 +249,40 @@ pub(crate) fn calibrate(
             })
             .collect();
         for (&i, fit) in idx.iter().zip(fit_group(&members, FitOptions::default())) {
-            let (p, q) = (&list[i], &fit.params);
+            let p = &list[i];
+            // Optionally learn shading on top of the fitted geometry, then refit capacity with it.
+            let (q, map) = match shading_prior {
+                Some(prior) => {
+                    let opt = ShadingOptions {
+                        prior_hours: prior,
+                        ..Default::default()
+                    };
+                    let map = fit_shading(&fit.params, &p.inputs, &p.actual, opt);
+                    let trim = FitOptions::default().trim;
+                    let pdc0 = refit_pdc0(&fit.params, &map, &p.inputs, &p.actual, trim);
+                    (
+                        PlaneParams {
+                            pdc0,
+                            ..fit.params.clone()
+                        },
+                        Some(map),
+                    )
+                }
+                None => (fit.params.clone(), None),
+            };
+            let shaded_bins = map
+                .as_ref()
+                .map_or(0, |m| m.factors.iter().flatten().filter(|&&f| f < 0.7).count());
             println!(
-                "{:18} {:10} {:7.0} {:5.0} {:6.0} {:6.0} {:8.1} {:6}",
-                p.name, p.group, q.azimuth, q.tilt, q.pdc0, q.ac_max, fit.rmse, fit.hours_used
+                "{:18} {:10} {:7.0} {:5.0} {:6.0} {:6.0} {:8.1} {:6} {:>9}",
+                p.name, p.group, q.azimuth, q.tilt, q.pdc0, q.ac_max, fit.rmse, fit.hours_used, shaded_bins
             );
             results.insert(
                 p.name.clone(),
-                serde_json::json!({ "serial": p.serial, "group": p.group, "params": q, "rmse_w": fit.rmse, "hours": fit.hours_used }),
+                serde_json::json!({
+                    "serial": p.serial, "group": p.group, "params": q, "shading": map,
+                    "rmse_w": fit.rmse, "hours": fit.hours_used,
+                }),
             );
         }
     }
@@ -263,24 +291,40 @@ pub(crate) fn calibrate(
     Ok(())
 }
 
-/// Load calibrated planes written by `calibrate-solar`.
-fn load_planes(path: &Path) -> Result<Vec<(String, PlaneParams)>> {
+type Plane = (String, PlaneParams, Option<ShadingMap>);
+
+/// Load calibrated planes (and shading maps, unless disabled) written by `calibrate-solar`.
+fn load_planes(path: &Path, shading: bool) -> Result<Vec<Plane>> {
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
     let obj = v.as_object().context("planes file must be a JSON object")?;
     obj.iter()
-        .map(|(name, e)| Ok((name.clone(), serde_json::from_value(e["params"].clone())?)))
+        .map(|(name, e)| {
+            let map = match (&e["shading"], shading) {
+                (serde_json::Value::Null, _) | (_, false) => None,
+                (m, true) => Some(serde_json::from_value(m.clone())?),
+            };
+            Ok((name.clone(), serde_json::from_value(e["params"].clone())?, map))
+        })
         .collect()
 }
 
-/// Daily plant energy (kWh) per UTC day from hourly inputs.
-fn daily_forecast(planes: &[(String, PlaneParams)], data: &HourlyInputs) -> HashMap<i64, f64> {
-    let mut by_day: HashMap<i64, f64> = HashMap::new();
+/// Plant AC power (W, hourly mean) per hour start.
+fn plant_hourly(planes: &[Plane], data: &HourlyInputs) -> HashMap<i64, f64> {
     let per_plane: Vec<Vec<f64>> = planes
         .iter()
-        .map(|(_, p)| vulpes_solar::calibrate::simulate_hours(p, &data.inputs))
+        .map(|(_, p, map)| simulate_hours_shaded(p, map.as_ref(), &data.inputs))
         .collect();
-    for (i, &h) in data.hours.iter().enumerate() {
-        let w: f64 = per_plane.iter().map(|v| v[i]).sum();
+    data.hours
+        .iter()
+        .enumerate()
+        .map(|(i, &h)| (h, per_plane.iter().map(|v| v[i]).sum()))
+        .collect()
+}
+
+/// Daily energy (kWh) per UTC day from hourly mean power (W).
+fn daily(hourly: &HashMap<i64, f64>) -> HashMap<i64, f64> {
+    let mut by_day: HashMap<i64, f64> = HashMap::new();
+    for (&h, &w) in hourly {
         *by_day.entry(h - h.rem_euclid(86_400)).or_default() += w / 1000.0;
     }
     by_day
@@ -331,6 +375,7 @@ pub(crate) fn evaluate(
     planes_path: &Path,
     lead_days: u8,
     weeks: Weeks,
+    shading: bool,
 ) -> Result<()> {
     let ts = |d: NaiveDate| {
         d.and_hms_opt(0, 0, 0)
@@ -338,18 +383,19 @@ pub(crate) fn evaluate(
             .context("bad date")
     };
     let (from, to) = (ts(from)?, ts(to)? + 86_400);
-    let planes = load_planes(planes_path)?;
+    let planes = load_planes(planes_path, shading)?;
     let prefix = if lead_days == 0 {
         "open-meteo-archive".to_string()
     } else {
         format!("open-meteo-day{lead_days}")
     };
     let models = ["knmi_harmonie_arome_netherlands", "icon_d2"];
-    let mut ours = Vec::new();
+    let mut hourly = Vec::new();
     for m in models {
         let data = load_inputs(store, &format!("{prefix}:{m}"), lat, lon, from, to)?;
-        ours.push(daily_forecast(&planes, &data));
+        hourly.push(plant_hourly(&planes, &data));
     }
+    let ours: Vec<HashMap<i64, f64>> = hourly.iter().map(daily).collect();
     // Actual daily energy; only complete days (24 hourly means; W·h → kWh).
     let mut actual: HashMap<i64, (f64, usize)> = HashMap::new();
     for (t, w) in store.samples("pv.total.power", 3600, from, to)? {
@@ -398,5 +444,51 @@ pub(crate) fn evaluate(
         .filter(|d| sfml.contains_key(&(d - 86_400 + 19 * 3600)))
         .collect();
     report("Days with a Solar Forecast ML day-ahead value", &with_sf, true);
+
+    // Hourly skill on the evaluated days, daylight hours only (actual or forecast > 0).
+    let actual_h: HashMap<i64, f64> = store
+        .samples("pv.total.power", 3600, from, to)?
+        .into_iter()
+        .collect();
+    let (mut ens, mut pers, mut sum_a, mut n) = (Score::new(), Score::new(), 0.0, 0usize);
+    for d in &days {
+        for k in 0..24 {
+            let h = d + k * 3600;
+            let (Some(&a), Some(&f0), Some(&f1), Some(&y)) = (
+                actual_h.get(&h),
+                hourly[0].get(&h),
+                hourly[1].get(&h),
+                actual_h.get(&(h - 86_400)),
+            ) else {
+                continue;
+            };
+            let f = 0.5 * (f0 + f1);
+            if a <= 0.0 && f <= 0.0 {
+                continue;
+            }
+            ens.add(f, a);
+            pers.add(y, a);
+            sum_a += a;
+            n += 1;
+        }
+    }
+    let m = sum_a / n.max(1) as f64;
+    let w = |s: &Score| {
+        let k = s.n.max(1) as f64;
+        format!(
+            "MAE {:4.0} W ({:4.1}%)  RMSE {:4.0} W  bias {:+4.0} W",
+            s.abs / k,
+            100.0 * s.abs / k / m,
+            (s.sq / k).sqrt(),
+            s.bias / k
+        )
+    };
+    println!("\nHourly, daylight ({n} hours, mean actual {m:.0} W):");
+    println!("  {:28} {}", "vulpes physics (mean of 2)", w(&ens));
+    println!("  {:28} {}", "persistence (same hour -1d)", w(&pers));
+    println!(
+        "  skill vs persistence (RMSE): {:.0}%",
+        100.0 * (1.0 - (ens.sq / pers.sq).sqrt())
+    );
     Ok(())
 }

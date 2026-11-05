@@ -80,6 +80,13 @@ enum Cmd {
         /// Use only days in even or odd ISO weeks (hold the other half out for evaluation).
         #[arg(long, value_enum, default_value_t = solar::Weeks::All)]
         weeks: solar::Weeks,
+        /// Also learn a per-panel shading map (experimental: on hourly data it did not
+        /// improve held-out day-ahead accuracy, see docs/solar.md).
+        #[arg(long)]
+        shading: bool,
+        /// Pseudo-hours pulling each shading bin toward "unshaded"; higher = more evidence needed.
+        #[arg(long, default_value_t = 10.0)]
+        shading_prior: f64,
     },
     /// Evaluate daily PV forecasts against actuals and the Solar Forecast ML benchmark.
     EvalSolar {
@@ -98,6 +105,9 @@ enum Cmd {
         lead_days: u8,
         #[arg(long, value_enum, default_value_t = solar::Weeks::All)]
         weeks: solar::Weeks,
+        /// Ignore learned shading maps.
+        #[arg(long)]
+        no_shading: bool,
     },
     /// Show what the store contains.
     Stats,
@@ -135,7 +145,23 @@ fn main() -> Result<()> {
             model,
             out,
             weeks,
-        } => solar::calibrate(&store, lat, lon, from, to, &panels, &model, &out, weeks),
+            shading,
+            shading_prior,
+        } => {
+            let shading_prior = shading.then_some(shading_prior);
+            solar::calibrate(
+                &store,
+                lat,
+                lon,
+                from,
+                to,
+                &panels,
+                &model,
+                &out,
+                weeks,
+                shading_prior,
+            )
+        }
         Cmd::EvalSolar {
             lat,
             lon,
@@ -144,7 +170,8 @@ fn main() -> Result<()> {
             planes,
             lead_days,
             weeks,
-        } => solar::evaluate(&store, lat, lon, from, to, &planes, lead_days, weeks),
+            no_shading,
+        } => solar::evaluate(&store, lat, lon, from, to, &planes, lead_days, weeks, !no_shading),
         Cmd::Stats => stats(&store),
     }
 }
