@@ -1,0 +1,11 @@
+[package]
+name = "vulpes-price"
+description = "Electricity price forecasting and tariff fitting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vulpes-core.workspace = true

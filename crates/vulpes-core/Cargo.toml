@@ -1,0 +1,12 @@
+[package]
+name = "vulpes-core"
+description = "Core domain types, time grid and storage for vulpes-ems"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true

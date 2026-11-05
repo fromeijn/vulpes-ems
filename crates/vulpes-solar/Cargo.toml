@@ -1,0 +1,11 @@
+[package]
+name = "vulpes-solar"
+description = "Physics-based PV forecasting with ML residual correction"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vulpes-core.workspace = true

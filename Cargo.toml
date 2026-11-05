@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/fromeijn/vulpes-ems"
+rust-version = "1.85"
+
+[workspace.dependencies]
+vulpes-core = { path = "crates/vulpes-core" }
+vulpes-opt = { path = "crates/vulpes-opt" }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

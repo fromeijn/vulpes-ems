@@ -1,0 +1,11 @@
+[package]
+name = "vulpes-sources"
+description = "External data sources (Open-Meteo, ENTSO-E)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vulpes-core.workspace = true

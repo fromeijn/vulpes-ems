@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Vulpes EMS",
+        "description": "Set up Vulpes EMS. Sensors, PV planes and ESS modes are configured in the next steps."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Vulpes EMS is already configured."
+    }
+  }
+}
