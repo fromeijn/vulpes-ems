@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- ears -->
+  <polygon points="38,28 108,92 54,128" fill="#E8630A"/>
+  <polygon points="218,28 148,92 202,128" fill="#E8630A"/>
+  <polygon points="52,52 92,90 62,110" fill="#3A2416"/>
+  <polygon points="204,52 164,90 194,110" fill="#3A2416"/>
+  <!-- head -->
+  <polygon points="28,104 128,72 228,104 128,236" fill="#F57C1F"/>
+  <!-- white cheeks -->
+  <polygon points="28,104 128,236 82,150" fill="#FFF4E8"/>
+  <polygon points="228,104 128,236 174,150" fill="#FFF4E8"/>
+  <!-- eyes -->
+  <ellipse cx="94" cy="132" rx="9" ry="11" fill="#2B1A10"/>
+  <ellipse cx="162" cy="132" rx="9" ry="11" fill="#2B1A10"/>
+  <!-- nose -->
+  <polygon points="114,214 142,214 128,234" fill="#2B1A10"/>
+  <!-- energy bolt on forehead -->
+  <polygon points="134,84 112,124 128,124 120,152 146,108 130,108" fill="#FFD23F" stroke="#2B1A10" stroke-width="3" stroke-linejoin="round"/>
+</svg>
