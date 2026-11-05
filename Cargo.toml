@@ -12,6 +12,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 vulpes-core = { path = "crates/vulpes-core" }
 vulpes-opt = { path = "crates/vulpes-opt" }
+vulpes-engine = { path = "crates/vulpes-engine" }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 

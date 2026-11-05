@@ -1,0 +1,21 @@
+[package]
+name = "vulpes-engine"
+description = "High-level planning engine for vulpes-ems: forecasts + optimizer behind a JSON API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+chrono-tz = "0.10.4"
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0.154"
+thiserror.workspace = true
+vulpes-core.workspace = true
+vulpes-load = { version = "0.1.0", path = "../vulpes-load" }
+vulpes-opt.workspace = true
+vulpes-price = { version = "0.1.0", path = "../vulpes-price" }
+vulpes-solar = { version = "0.1.0", path = "../vulpes-solar" }
+vulpes-sources = { version = "0.1.0", path = "../vulpes-sources" }

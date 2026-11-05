@@ -2,12 +2,106 @@
   "config": {
     "step": {
       "user": {
-        "title": "Vulpes EMS",
-        "description": "Set up Vulpes EMS. Sensors, PV planes and ESS modes are configured in the next steps."
+        "title": "Data sources",
+        "description": "Sensors for the battery and prices. The energy statistics are prefilled from the Energy Dashboard. Remove duplicates, for example two grid sources that measure the same meter. House load is computed as import − export + solar + battery discharge − battery charge.",
+        "data": {
+          "soc_entity": "Battery state of charge (%)",
+          "mode_entity": "Current ESS mode (input_select or select)",
+          "price_entity": "Electricity price sensor (with today/tomorrow price attributes)",
+          "grid_import": "Grid import energy",
+          "grid_export": "Grid export energy",
+          "solar_energy": "Solar energy",
+          "battery_charge": "Energy into the battery",
+          "battery_discharge": "Energy out of the battery",
+          "wholesale_source": "Wholesale price history (for prices not yet published)"
+        }
+      },
+      "battery": {
+        "title": "Battery and grid",
+        "data": {
+          "capacity_kwh": "Usable capacity",
+          "max_charge_w": "Maximum charge power",
+          "max_discharge_w": "Maximum discharge power",
+          "charge_eff": "Charge efficiency",
+          "discharge_eff": "Discharge efficiency",
+          "min_soc": "Minimum state of charge",
+          "max_soc": "Maximum state of charge",
+          "wear_cost": "Battery wear cost per kWh throughput",
+          "max_import_w": "Maximum grid import",
+          "max_export_w": "Maximum grid export"
+        }
+      },
+      "tariff": {
+        "title": "Tariff",
+        "description": "Prices for hours not yet published are estimated as a × wholesale + b. While net metering applies, export is paid at the import price. Otherwise export is paid as export a × wholesale + export b.",
+        "data": {
+          "tariff_a": "Import a (usually the VAT factor)",
+          "tariff_b": "Import b (energy tax + markup, incl. VAT)",
+          "net_metering": "Net metering (export paid at import price)",
+          "export_a": "Export a",
+          "export_b": "Export b"
+        }
+      },
+      "modes": {
+        "title": "ESS modes",
+        "description": "For each mode, choose what the inverter does. Use grid_setpoint for a Victron ESS-style grid target in W (positive = import, so the battery charges from the grid; negative = export). Use battery_power for a fixed battery power in W (positive = charge). The power value is ignored for the other behaviours."
+      },
+      "solar": {
+        "title": "Solar planes",
+        "description": "Paste a JSON list of planes (azimuth, tilt, pdc0, ac_max), or the output of `vulpes-cli calibrate-solar`.",
+        "data": { "planes": "Planes (JSON)" }
       }
     },
+    "error": { "invalid_planes": "Invalid planes JSON: each plane needs azimuth, tilt, pdc0 and ac_max." },
     "abort": {
-      "single_instance_allowed": "Vulpes EMS is already configured."
+      "single_instance_allowed": "Vulpes EMS is already configured.",
+      "no_mode_options": "The mode entity has no options."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Data sources",
+        "data": {
+          "soc_entity": "Battery state of charge (%)",
+          "mode_entity": "Current ESS mode",
+          "price_entity": "Electricity price sensor",
+          "grid_import": "Grid import energy",
+          "grid_export": "Grid export energy",
+          "solar_energy": "Solar energy",
+          "battery_charge": "Energy into the battery",
+          "battery_discharge": "Energy out of the battery",
+          "wholesale_source": "Wholesale price history"
+        }
+      },
+      "battery": { "title": "Battery and grid" },
+      "tariff": { "title": "Tariff" },
+      "modes": { "title": "ESS modes" },
+      "solar": { "title": "Solar planes", "data": { "planes": "Planes (JSON)" } }
+    },
+    "error": { "invalid_planes": "Invalid planes JSON: each plane needs azimuth, tilt, pdc0 and ac_max." },
+    "abort": { "no_mode_options": "The mode entity has no options." }
+  },
+  "selector": {
+    "wholesale_source": { "options": { "energyzero": "EnergyZero (NL)", "none": "None" } },
+    "behaviour": {
+      "options": {
+        "grid_setpoint": "Grid setpoint",
+        "self_consume": "Self-consume (grid at 0)",
+        "no_discharge": "No discharge (charge from surplus only)",
+        "idle": "Battery idle",
+        "battery_power": "Fixed battery power"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "planned_mode": { "name": "Planned mode" },
+      "pv_forecast_24h": { "name": "PV forecast next 24h" },
+      "load_forecast_24h": { "name": "Load forecast next 24h" },
+      "plan_cost": { "name": "Plan cost" },
+      "agreement_today": { "name": "Agreement with current mode today" }
+    },
+    "binary_sensor": { "agrees_with_plan": { "name": "Current mode matches plan" } }
   }
 }

@@ -1,28 +1,38 @@
 """Vulpes EMS: forecasting and ESS mode optimization for Home Assistant.
 
-The heavy lifting (forecasts, optimizer, storage) lives in the Rust core,
-shipped as the `vulpes-ems` wheel and imported as `vulpes_ems`.
+Shadow mode: the integration only reads Home Assistant data and publishes its
+own entities with the plan. It never changes any other entity.
 """
 
 from __future__ import annotations
 
-import logging
-
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
-_LOGGER = logging.getLogger(__name__)
+from .coordinator import VulpesCoordinator
+
+PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR]
+
+type VulpesConfigEntry = ConfigEntry[VulpesCoordinator]
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: VulpesConfigEntry) -> bool:
     """Set up Vulpes EMS from a config entry."""
-    import vulpes_ems  # noqa: PLC0415  (wheel installed from manifest requirements)
-
-    _LOGGER.info("Vulpes EMS core %s loaded", vulpes_ems.__version__)
-    entry.runtime_data = None
+    coordinator = VulpesCoordinator(hass, entry)
+    await coordinator.async_config_entry_first_refresh()
+    coordinator.start_schedule()
+    entry.runtime_data = coordinator
+    entry.async_on_unload(entry.add_update_listener(_async_reload))
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def _async_reload(hass: HomeAssistant, entry: VulpesConfigEntry) -> None:
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: VulpesConfigEntry) -> bool:
     """Unload a config entry."""
-    return True
+    entry.runtime_data.stop_schedule()
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
