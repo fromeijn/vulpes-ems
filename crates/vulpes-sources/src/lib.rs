@@ -4,6 +4,7 @@
 //! Privacy: locations are rounded to 0.01° (~1 km) before being sent anywhere.
 
 pub mod energyzero;
+pub mod entsoe;
 pub mod open_meteo;
 
 use std::time::Duration;

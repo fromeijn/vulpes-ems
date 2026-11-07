@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use vulpes_core::{ForecastPoint, SeriesKind, Store};
 use vulpes_sources::{Location, energyzero, open_meteo};
 
+mod entsoe;
 mod load;
 mod price;
 mod replay;
@@ -213,6 +214,17 @@ enum Cmd {
         #[arg(long, allow_hyphen_values = true)]
         export: Option<String>,
     },
+    /// Backfill ENTSO-E day-ahead prices and wind/solar/load forecasts for a zone.
+    /// Token: ENTSOE_TOKEN or local/entsoe.token.
+    BackfillEntsoe {
+        /// Bidding zone: NL or DE-LU.
+        #[arg(long, default_value = "NL")]
+        zone: String,
+        #[arg(long)]
+        from: NaiveDate,
+        #[arg(long)]
+        to: NaiveDate,
+    },
     /// Show what the store contains.
     Stats,
 }
@@ -385,6 +397,7 @@ fn main() -> Result<()> {
                 },
             },
         ),
+        Cmd::BackfillEntsoe { zone, from, to } => entsoe::backfill(&mut store, &zone, from, to),
         Cmd::Stats => stats(&store),
     }
 }
