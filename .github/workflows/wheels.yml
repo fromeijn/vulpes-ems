@@ -8,9 +8,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         target: [x86_64, aarch64]
-        manylinux: [auto, musllinux_1_2]
+        # manylinux_2_28 (GCC 12): ring's aarch64 assembly does not build with
+        # the manylinux2014 cross toolchain. musllinux is what HA OS/Container use.
+        manylinux: ["2_28", musllinux_1_2]
     steps:
       - uses: actions/checkout@v4
       - uses: PyO3/maturin-action@v1
