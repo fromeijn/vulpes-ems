@@ -1,4 +1,4 @@
-"""Config flow for Vulpes EMS: sources, battery, tariff, modes, solar planes."""
+"""Config flow for Vulpes EMS: sources, battery, tariff, modes, comparison, solar planes."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import selector
 
 from .const import (
-    BEHAVIOURS,
     CONF_BATTERY_CHARGE,
     CONF_BATTERY_DISCHARGE,
     CONF_CAPACITY_KWH,
@@ -28,8 +27,6 @@ from .const import (
     CONF_MAX_IMPORT_W,
     CONF_MAX_SOC,
     CONF_MIN_SOC,
-    CONF_MODE_ENTITY,
-    CONF_MODES,
     CONF_NET_METERING,
     CONF_PLANES,
     CONF_PRICE_ENTITY,
@@ -42,16 +39,27 @@ from .const import (
     DOMAIN,
     WHOLESALE_SOURCES,
 )
+from .modes import (
+    CONF_CHARGE_W,
+    CONF_DISCHARGE_W,
+    CONF_MODE_ENTITY,
+    CONF_MODE_MAP,
+    CONF_POWER_CONTROL,
+    CONF_PV_CURTAIL,
+    MODES,
+    POWER_CONTROLS,
+    enabled_modes,
+    settings,
+)
 
 _SENSORS = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", multiple=True))
 
 
-def _num(minimum: float, maximum: float, step: float, unit: str | None = None) -> selector.NumberSelector:
-    return selector.NumberSelector(
-        selector.NumberSelectorConfig(
-            min=minimum, max=maximum, step=step, unit_of_measurement=unit, mode=selector.NumberSelectorMode.BOX
-        )
-    )
+def _num(minimum: float, maximum: float, step: float | str, unit: str | None = None) -> selector.NumberSelector:
+    config = selector.NumberSelectorConfig(min=minimum, max=maximum, step=step, mode=selector.NumberSelectorMode.BOX)
+    if unit is not None:  # HA 2026.11 rejects an explicit None
+        config["unit_of_measurement"] = unit
+    return selector.NumberSelector(config)
 
 
 async def energy_dashboard_defaults(hass: HomeAssistant) -> dict[str, list[str]]:
@@ -92,9 +100,6 @@ def _sources_schema(d: dict[str, Any]) -> vol.Schema:
             vol.Required(CONF_SOC_ENTITY, default=d.get(CONF_SOC_ENTITY, vol.UNDEFINED)): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             ),
-            vol.Required(CONF_MODE_ENTITY, default=d.get(CONF_MODE_ENTITY, vol.UNDEFINED)): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain=["input_select", "select"])
-            ),
             vol.Required(
                 CONF_PRICE_ENTITY, default=d.get(CONF_PRICE_ENTITY, vol.UNDEFINED)
             ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
@@ -132,44 +137,46 @@ def _battery_schema(d: dict[str, Any]) -> vol.Schema:
 def _tariff_schema(d: dict[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
-            vol.Required(CONF_TARIFF_A, default=d.get(CONF_TARIFF_A, 1.21)): _num(0, 5, 0.0001),
-            vol.Required(CONF_TARIFF_B, default=d.get(CONF_TARIFF_B, 0.13)): _num(-1, 2, 0.0001, "€/kWh"),
+            vol.Required(CONF_TARIFF_A, default=d.get(CONF_TARIFF_A, 1.21)): _num(0, 5, "any"),
+            vol.Required(CONF_TARIFF_B, default=d.get(CONF_TARIFF_B, 0.13)): _num(-1, 2, "any", "€/kWh"),
             vol.Required(CONF_NET_METERING, default=d.get(CONF_NET_METERING, True)): selector.BooleanSelector(),
-            vol.Required(CONF_EXPORT_A, default=d.get(CONF_EXPORT_A, 1.21)): _num(0, 5, 0.0001),
-            vol.Required(CONF_EXPORT_B, default=d.get(CONF_EXPORT_B, 0.0)): _num(-1, 2, 0.0001, "€/kWh"),
+            vol.Required(CONF_EXPORT_A, default=d.get(CONF_EXPORT_A, 1.21)): _num(0, 5, "any"),
+            vol.Required(CONF_EXPORT_B, default=d.get(CONF_EXPORT_B, 0.0)): _num(-1, 2, "any", "€/kWh"),
         }
     )
 
 
-def _mode_options(hass: HomeAssistant, entity_id: str) -> list[str]:
-    state = hass.states.get(entity_id)
+def _mode_options(hass: HomeAssistant, entity_id: str | None) -> list[str]:
+    state = hass.states.get(entity_id) if entity_id else None
     return list(state.attributes.get("options", [])) if state else []
 
 
-def _modes_schema(options: list[str], current: list[dict[str, Any]]) -> vol.Schema:
-    by_name = {m["name"]: m for m in current}
-    fields: dict[Any, Any] = {}
-    for opt in options:
-        b = by_name.get(opt, {}).get("behaviour", {"type": "self_consume"})
-        fields[vol.Required(f"{opt}::type", default=b.get("type", "self_consume"))] = selector.SelectSelector(
-            selector.SelectSelectorConfig(options=BEHAVIOURS, translation_key="behaviour")
-        )
-        fields[vol.Required(f"{opt}::w", default=b.get("w", 0))] = _num(-50000, 50000, 1, "W")
-        fields[vol.Required(f"{opt}::curtail", default=by_name.get(opt, {}).get("pv_curtail", False))] = (
-            selector.BooleanSelector()
-        )
+def _modes_schema(d: dict[str, Any]) -> vol.Schema:
+    fields: dict[Any, Any] = {
+        vol.Required(CONF_POWER_CONTROL, default=d.get(CONF_POWER_CONTROL, "grid_setpoint")): selector.SelectSelector(
+            selector.SelectSelectorConfig(options=POWER_CONTROLS, translation_key=CONF_POWER_CONTROL)
+        ),
+    }
+    for key, default in MODES.items():
+        fields[vol.Required(key, default=d.get(key, default))] = selector.BooleanSelector()
+        if key == "charge":
+            fields[vol.Required(CONF_CHARGE_W, default=d.get(CONF_CHARGE_W, 3000))] = _num(0, 50000, 1, "W")
+        if key == "discharge":
+            fields[vol.Required(CONF_DISCHARGE_W, default=d.get(CONF_DISCHARGE_W, 3000))] = _num(0, 50000, 1, "W")
+    fields[vol.Required(CONF_PV_CURTAIL, default=d.get(CONF_PV_CURTAIL, False))] = selector.BooleanSelector()
+    mode_entity = vol.Optional(CONF_MODE_ENTITY, description={"suggested_value": d.get(CONF_MODE_ENTITY)})
+    fields[mode_entity] = selector.EntitySelector(selector.EntitySelectorConfig(domain=["input_select", "select"]))
     return vol.Schema(fields)
 
 
-def _modes_from_input(options: list[str], user_input: dict[str, Any]) -> list[dict[str, Any]]:
-    modes = []
-    for opt in options:
-        kind = user_input[f"{opt}::type"]
-        behaviour: dict[str, Any] = {"type": kind}
-        if kind in ("grid_setpoint", "battery_power"):
-            behaviour["w"] = float(user_input[f"{opt}::w"])
-        modes.append({"name": opt, "behaviour": behaviour, "pv_curtail": bool(user_input[f"{opt}::curtail"])})
-    return modes
+def _compare_schema(modes: list[str], options: list[str], current: dict[str, str]) -> vol.Schema:
+    choice = selector.SelectSelector(selector.SelectSelectorConfig(options=options))
+    return vol.Schema(
+        {
+            vol.Optional(key, description={"suggested_value": current.get(key) if current.get(key) in options else None}): choice
+            for key in modes
+        }
+    )
 
 
 def parse_planes(text: str) -> list[dict[str, Any]]:
@@ -218,14 +225,34 @@ class _Steps:
         return self.async_show_form(step_id="tariff", data_schema=_tariff_schema(self.data))  # type: ignore[attr-defined]
 
     async def async_step_modes(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        options = _mode_options(self.hass, self.data[CONF_MODE_ENTITY])
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            # An optional field left empty is absent from the input: clear the old value.
+            self.data.pop(CONF_MODE_ENTITY, None)
+            self.data.update(user_input)
+            if not enabled_modes(self.data):
+                errors["base"] = "no_modes"
+            elif self.data.get(CONF_MODE_ENTITY):
+                return await self.async_step_compare()
+            else:
+                self.data[CONF_MODE_MAP] = {}
+                return await self.async_step_solar()
+        return self.async_show_form(  # type: ignore[attr-defined]
+            step_id="modes", data_schema=_modes_schema(self.data), errors=errors
+        )
+
+    async def async_step_compare(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        options = _mode_options(self.hass, self.data.get(CONF_MODE_ENTITY))
         if not options:
             return self.async_abort(reason="no_mode_options")  # type: ignore[attr-defined]
+        modes = enabled_modes(self.data)
         if user_input is not None:
-            self.data[CONF_MODES] = _modes_from_input(options, user_input)
+            self.data[CONF_MODE_MAP] = {k: v for k, v in user_input.items() if k in modes and v}
             return await self.async_step_solar()
         return self.async_show_form(  # type: ignore[attr-defined]
-            step_id="modes", data_schema=_modes_schema(options, self.data.get(CONF_MODES, []))
+            step_id="compare",
+            data_schema=_compare_schema(modes, options, self.data.get(CONF_MODE_MAP, {})),
+            description_placeholders={"entity": self.data[CONF_MODE_ENTITY]},
         )
 
     async def async_step_solar(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
@@ -243,7 +270,7 @@ class _Steps:
 class VulpesEmsConfigFlow(_Steps, ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Vulpes EMS."""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self) -> None:
         self.data: dict[str, Any] = {}
@@ -265,14 +292,14 @@ class VulpesEmsConfigFlow(_Steps, ConfigFlow, domain=DOMAIN):
 
 
 class VulpesEmsOptionsFlow(_Steps, OptionsFlow):
-    """Edit any setting after setup; stored as options (merged over data)."""
+    """Edit any setting after setup; the complete settings are stored as options."""
 
     def __init__(self) -> None:
         self.data: dict[str, Any] = {}
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if not self.data:
-            self.data = {**self.config_entry.data, **self.config_entry.options}
+            self.data = settings(self.config_entry.data, self.config_entry.options)
         if user_input is not None:
             self.data.update(user_input)
             return await self.async_step_battery()

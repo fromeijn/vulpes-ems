@@ -6,7 +6,6 @@ DOMAIN = "vulpes_ems"
 
 # Sources (step "user")
 CONF_SOC_ENTITY = "soc_entity"
-CONF_MODE_ENTITY = "mode_entity"
 CONF_PRICE_ENTITY = "price_entity"
 CONF_GRID_IMPORT = "grid_import"
 CONF_GRID_EXPORT = "grid_export"
@@ -34,11 +33,9 @@ CONF_NET_METERING = "net_metering"
 CONF_EXPORT_A = "export_a"
 CONF_EXPORT_B = "export_b"
 
-# Modes (step "modes") and solar (step "solar")
-CONF_MODES = "modes"
+# Solar (step "solar"); mode settings live in modes.py
 CONF_PLANES = "planes"
 
-BEHAVIOURS = ["grid_setpoint", "self_consume", "no_discharge", "idle", "battery_power"]
 WHOLESALE_SOURCES = ["energyzero", "none"]
 
 LOAD_HISTORY_DAYS = 60

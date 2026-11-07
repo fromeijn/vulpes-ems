@@ -2,7 +2,17 @@
 
 ## Modes as behaviours
 
-The optimizer reasons about physical behaviours. The Home Assistant integration maps each user-defined mode to concrete actions.
+The optimizer reasons about physical behaviours. The Home Assistant integration offers a fixed set of modes and translates each enabled one into a behaviour:
+
+| Integration mode | Behaviour |
+|---|---|
+| Charge from grid | `grid_setpoint { +charge power }` or `battery_power { +charge power }` |
+| Hold | `no_discharge` |
+| Self-consume | `self_consume` |
+| Idle | `idle` |
+| Discharge to grid | `grid_setpoint { −discharge power }` or `battery_power { −discharge power }` |
+
+"How power is set" chooses between grid setpoint and battery power. If solar can be switched off, each mode also gets a variant with `pv_curtail`.
 
 | Behaviour | Effect (AC side, grid positive = import) |
 |---|---|

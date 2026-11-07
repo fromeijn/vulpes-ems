@@ -5,7 +5,7 @@ Open-source home energy management for Home Assistant. It's written in Rust and 
 vulpes-ems does two things:
 
 - **It forecasts** your solar production, household load and electricity prices. Each forecast starts from a physics or statistical baseline that works without training data. Machine learning then corrects the remaining errors.
-- **It decides** every 15 minutes which battery (ESS) mode to run over the next 48 hours. Modes are defined by you and mapped to Home Assistant actions.
+- **It decides** every 15 minutes which battery (ESS) mode to run over the next 48 hours. You pick which of its battery modes your system supports.
 
 > Status: early development (phase 1, skeleton). Not usable yet.
 
@@ -17,7 +17,7 @@ vulpes-ems does two things:
 | Load | Weighted similar-day profile + GBDT residual (calendar, temperature, lags). Heating loads such as AC get a separate model. |
 | Price | Day-ahead wholesale forecast (ENTSO-E fundamentals: wind, solar, load; plus gas) with an auto-fitted consumer tariff. Known published prices always take precedence. |
 | Optimizer | Dynamic programming over slot × SOC × mode. The objective is import cost − export revenue + battery wear − terminal SOC value. A probabilistic night-reserve constraint guards against running empty. |
-| Modes | Generic behaviours (`force_charge`, `idle`, `self_consume`, `force_discharge`, plus a PV-curtail flag). Each one is mapped to HA actions. |
+| Modes | Vulpes's own modes: charge from grid, hold (no discharge), self-consume, idle, discharge to grid, each optionally with solar switched off. You tick the ones your system supports and set their power. An existing mode entity (such as an `input_select`) can be mapped to them to compare the plan with what the house does. |
 | Safety | Starts in shadow mode, with agreement and cost comparison against your current automation. An explicit *active* switch hands over control, and a watchdog falls back to a safe mode. |
 
 ## Layout

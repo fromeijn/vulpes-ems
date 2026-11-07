@@ -34,8 +34,6 @@ from .const import (
     CONF_MAX_IMPORT_W,
     CONF_MAX_SOC,
     CONF_MIN_SOC,
-    CONF_MODE_ENTITY,
-    CONF_MODES,
     CONF_NET_METERING,
     CONF_PLANES,
     CONF_PRICE_ENTITY,
@@ -50,6 +48,7 @@ from .const import (
     LOAD_HISTORY_DAYS,
     WHOLESALE_HISTORY_DAYS,
 )
+from .modes import CONF_MODE_ENTITY, engine_modes, settings, mode_of_state, split_mode
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -123,7 +122,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @property
     def cfg(self) -> dict[str, Any]:
-        return {**self.config_entry.data, **self.config_entry.options}
+        return settings(self.config_entry.data, self.config_entry.options)
 
     def start_schedule(self) -> None:
         self._unsub = async_track_time_change(self.hass, self._tick, minute=[0, 15, 30, 45], second=20)
@@ -202,7 +201,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "wear_cost_per_kwh": float(cfg[CONF_WEAR_COST]),
             },
             "grid": {"max_import_w": float(cfg[CONF_MAX_IMPORT_W]), "max_export_w": float(cfg[CONF_MAX_EXPORT_W])},
-            "modes": cfg[CONF_MODES],
+            "modes": engine_modes(cfg),
             "soc_wh": soc_pct / 100.0 * cap_wh,
             "planes": cfg[CONF_PLANES],
             "load_history": load,
@@ -240,18 +239,24 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except ValueError as err:
             raise UpdateFailed(f"planning failed: {err}") from err
         plan = json.loads(raw)
+        for s in plan["slots"]:
+            s["mode"], s["pv_off"] = split_mode(s["mode"])
+        plan["summary"]["mode_now"], plan["summary"]["pv_off_now"] = split_mode(plan["summary"]["mode_now"])
         plan["inputs"] = {"load_hours": len(load), "known_price_slots": len(known), "wholesale_hours": len(wholesale)}
         self._track_agreement(plan)
         return plan
 
     def _track_agreement(self, plan: dict[str, Any]) -> None:
-        mode_state = self.hass.states.get(self.cfg[CONF_MODE_ENTITY])
+        """Compare the plan with the user's own mode entity, if one is mapped."""
+        entity_id = self.cfg.get(CONF_MODE_ENTITY)
+        mode_state = self.hass.states.get(entity_id) if entity_id else None
         today = dt_util.now().date().isoformat()
         if today != self.agreement_day:
             self.agreement_day, self.agree, self.compared = today, 0, 0
         if not mode_state or mode_state.state in ("unknown", "unavailable"):
             self.agrees_now = None
             return
-        self.agrees_now = mode_state.state == plan["summary"]["mode_now"]
+        # A state that is not mapped to any Vulpes mode counts as disagreement.
+        self.agrees_now = mode_of_state(self.cfg, mode_state.state) == plan["summary"]["mode_now"]
         self.compared += 1
         self.agree += int(self.agrees_now)

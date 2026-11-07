@@ -6,7 +6,6 @@
         "description": "Sensors for the battery and prices. The energy statistics are prefilled from the Energy Dashboard. Remove duplicates, for example two grid sources that measure the same meter. House load is computed as import − export + solar + battery discharge − battery charge.",
         "data": {
           "soc_entity": "Battery state of charge (%)",
-          "mode_entity": "Current ESS mode (input_select or select)",
           "price_entity": "Electricity price sensor (with today/tomorrow price attributes)",
           "grid_import": "Grid import energy",
           "grid_export": "Grid export energy",
@@ -43,19 +42,47 @@
         }
       },
       "modes": {
-        "title": "ESS modes",
-        "description": "For each mode, choose what the inverter does. Use grid_setpoint for a Victron ESS-style grid target in W (positive = import, so the battery charges from the grid; negative = export). Use battery_power for a fixed battery power in W (positive = charge). The power value is ignored for the other behaviours."
+        "title": "Battery modes",
+        "description": "Tick the modes your system can do; Vulpes plans only with these. With grid setpoint (Victron ESS-style), charging holds grid import at the charge power and discharging holds grid export at the discharge power; with battery power, the battery itself runs at that power. Optionally pick the entity your current automation uses (for example an input_select) to compare the plan with what the house does.",
+        "data": {
+          "power_control": "How charge and discharge power is set",
+          "charge": "Charge from grid",
+          "charge_w": "Charge power",
+          "hold": "Hold (charge from solar surplus only, never discharge)",
+          "self_consume": "Self-consume (battery keeps the grid at zero)",
+          "idle": "Battery idle",
+          "discharge": "Discharge to grid",
+          "discharge_w": "Discharge power",
+          "pv_curtail": "Solar can be switched off (for negative prices)",
+          "mode_entity": "Compare with an existing mode entity (optional)"
+        }
       },
       "solar": {
         "title": "Solar planes",
         "description": "Paste a JSON list of planes (azimuth, tilt, pdc0, ac_max), or the output of `vulpes-cli calibrate-solar`.",
-        "data": { "planes": "Planes (JSON)" }
+        "data": {
+          "planes": "Planes (JSON)"
+        }
+      },
+      "compare": {
+        "title": "Compare with {entity}",
+        "description": "For each Vulpes mode, choose the state of {entity} that means the same. Leave empty if there is none; that state then counts as disagreeing with the plan.",
+        "data": {
+          "charge": "Charge from grid",
+          "hold": "Hold (charge from solar only, no discharge)",
+          "self_consume": "Self-consume (grid at zero)",
+          "idle": "Battery idle",
+          "discharge": "Discharge to grid"
+        }
       }
     },
-    "error": { "invalid_planes": "Invalid planes JSON: each plane needs azimuth, tilt, pdc0 and ac_max." },
+    "error": {
+      "invalid_planes": "Invalid planes JSON: each plane needs azimuth, tilt, pdc0 and ac_max.",
+      "no_modes": "Enable at least one mode."
+    },
     "abort": {
       "single_instance_allowed": "Vulpes EMS is already configured.",
-      "no_mode_options": "The mode entity has no options."
+      "no_mode_options": "The selected mode entity has no options."
     }
   },
   "options": {
@@ -64,7 +91,6 @@
         "title": "Data sources",
         "data": {
           "soc_entity": "Battery state of charge (%)",
-          "mode_entity": "Current ESS mode",
           "price_entity": "Electricity price sensor",
           "grid_import": "Grid import energy",
           "grid_export": "Grid export energy",
@@ -74,34 +100,106 @@
           "wholesale_source": "Wholesale price history"
         }
       },
-      "battery": { "title": "Battery and grid" },
-      "tariff": { "title": "Tariff" },
-      "modes": { "title": "ESS modes" },
-      "solar": { "title": "Solar planes", "data": { "planes": "Planes (JSON)" } }
+      "battery": {
+        "title": "Battery and grid"
+      },
+      "tariff": {
+        "title": "Tariff"
+      },
+      "modes": {
+        "title": "Battery modes",
+        "description": "Tick the modes your system can do; Vulpes plans only with these. With grid setpoint (Victron ESS-style), charging holds grid import at the charge power and discharging holds grid export at the discharge power; with battery power, the battery itself runs at that power. Optionally pick the entity your current automation uses (for example an input_select) to compare the plan with what the house does.",
+        "data": {
+          "power_control": "How charge and discharge power is set",
+          "charge": "Charge from grid",
+          "charge_w": "Charge power",
+          "hold": "Hold (charge from solar surplus only, never discharge)",
+          "self_consume": "Self-consume (battery keeps the grid at zero)",
+          "idle": "Battery idle",
+          "discharge": "Discharge to grid",
+          "discharge_w": "Discharge power",
+          "pv_curtail": "Solar can be switched off (for negative prices)",
+          "mode_entity": "Compare with an existing mode entity (optional)"
+        }
+      },
+      "solar": {
+        "title": "Solar planes",
+        "data": {
+          "planes": "Planes (JSON)"
+        }
+      },
+      "compare": {
+        "title": "Compare with {entity}",
+        "description": "For each Vulpes mode, choose the state of {entity} that means the same. Leave empty if there is none; that state then counts as disagreeing with the plan.",
+        "data": {
+          "charge": "Charge from grid",
+          "hold": "Hold (charge from solar only, no discharge)",
+          "self_consume": "Self-consume (grid at zero)",
+          "idle": "Battery idle",
+          "discharge": "Discharge to grid"
+        }
+      }
     },
-    "error": { "invalid_planes": "Invalid planes JSON: each plane needs azimuth, tilt, pdc0 and ac_max." },
-    "abort": { "no_mode_options": "The mode entity has no options." }
+    "error": {
+      "invalid_planes": "Invalid planes JSON: each plane needs azimuth, tilt, pdc0 and ac_max.",
+      "no_modes": "Enable at least one mode."
+    },
+    "abort": {
+      "no_mode_options": "The selected mode entity has no options."
+    }
   },
   "selector": {
-    "wholesale_source": { "options": { "energyzero": "EnergyZero (NL)", "none": "None" } },
-    "behaviour": {
+    "wholesale_source": {
+      "options": {
+        "energyzero": "EnergyZero (NL)",
+        "none": "None"
+      }
+    },
+    "power_control": {
       "options": {
         "grid_setpoint": "Grid setpoint",
-        "self_consume": "Self-consume (grid at 0)",
-        "no_discharge": "No discharge (charge from surplus only)",
-        "idle": "Battery idle",
-        "battery_power": "Fixed battery power"
+        "battery_power": "Battery power"
       }
     }
   },
   "entity": {
     "sensor": {
-      "planned_mode": { "name": "Planned mode" },
-      "pv_forecast_24h": { "name": "PV forecast next 24h" },
-      "load_forecast_24h": { "name": "Load forecast next 24h" },
-      "plan_cost": { "name": "Plan cost" },
-      "agreement_today": { "name": "Agreement with current mode today" }
+      "planned_mode": {
+        "name": "Planned mode",
+        "state": {
+          "charge": "Charge from grid",
+          "hold": "Hold",
+          "self_consume": "Self-consume",
+          "idle": "Battery idle",
+          "discharge": "Discharge to grid"
+        }
+      },
+      "pv_forecast_24h": {
+        "name": "PV forecast next 24h"
+      },
+      "load_forecast_24h": {
+        "name": "Load forecast next 24h"
+      },
+      "plan_cost": {
+        "name": "Plan cost"
+      },
+      "agreement_today": {
+        "name": "Agreement with current mode today"
+      },
+      "planned_battery_power": {
+        "name": "Planned battery power"
+      },
+      "planned_grid_power": {
+        "name": "Planned grid power"
+      }
     },
-    "binary_sensor": { "agrees_with_plan": { "name": "Current mode matches plan" } }
+    "binary_sensor": {
+      "agrees_with_plan": {
+        "name": "Current mode matches plan"
+      },
+      "pv_off_planned": {
+        "name": "Solar off planned"
+      }
+    }
   }
 }
