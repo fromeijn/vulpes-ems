@@ -73,4 +73,13 @@ mod tests {
             vec![(1_748_736_000, 0.08656), (1_748_739_600, -0.01)]
         );
     }
+
+    #[test]
+    fn bad_dates_are_errors_and_empty_is_fine() {
+        let r: Response =
+            serde_json::from_str(r#"{"Prices": [{"readingDate": "yesterday", "price": 0.1}]}"#).unwrap();
+        assert!(parse(r).is_err());
+        let r: Response = serde_json::from_str(r#"{"Prices": []}"#).unwrap();
+        assert!(parse(r).unwrap().is_empty());
+    }
 }

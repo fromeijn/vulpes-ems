@@ -59,4 +59,16 @@ mod tests {
         .rounded();
         assert_eq!((l.lat, l.lon), (52.12, 4.99));
     }
+
+    #[test]
+    fn rounding_handles_negative_coordinates() {
+        let r = Location {
+            lat: -33.86882,
+            lon: -151.20929,
+        }
+        .rounded();
+        assert_eq!((r.lat, r.lon), (-33.87, -151.21));
+        let same = Location { lat: 52.0, lon: 5.0 };
+        assert_eq!(same.rounded(), same);
+    }
 }

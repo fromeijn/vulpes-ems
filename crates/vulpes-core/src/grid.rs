@@ -62,4 +62,22 @@ mod tests {
         assert!(TimeGrid::aligned(0, 0, 10).is_err());
         assert!(TimeGrid::aligned(0, 900, 0).is_err());
     }
+
+    #[test]
+    fn slot_lookup() {
+        let g = TimeGrid::aligned(10_000, 900, 4).unwrap(); // starts at 9900
+        assert_eq!((g.start, g.slot_start(0), g.slot_start(3)), (9900, 9900, 12_600));
+        assert_eq!(g.index_of(9900), Some(0));
+        assert_eq!(g.index_of(10_799), Some(0));
+        assert_eq!(g.index_of(10_800), Some(1));
+        assert_eq!(g.index_of(13_499), Some(3));
+        assert_eq!(g.index_of(13_500), None, "past the end");
+        assert_eq!(g.index_of(9899), None, "before the start");
+        assert_eq!(g.step_hours(), 0.25);
+    }
+
+    #[test]
+    fn aligns_negative_timestamps_downwards() {
+        assert_eq!(TimeGrid::aligned(-1, 900, 1).unwrap().start, -900);
+    }
 }

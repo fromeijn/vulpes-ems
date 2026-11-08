@@ -245,4 +245,69 @@ mod tests {
         );
         assert!(plan.slots.last().unwrap().soc_wh > 9000.0, "refilled by PV");
     }
+
+    #[test]
+    fn empty_horizon_gives_an_empty_plan() {
+        let plan = solve(&[], 5000.0, 0.0, 0.0);
+        assert!(plan.slots.is_empty() && plan.cost == 0.0);
+    }
+
+    #[test]
+    fn a_single_mode_is_always_chosen() {
+        let (b, m) = (bat(0.0), vec![modes()[2].clone()]);
+        let s = vec![slot(500.0, 0.0, 0.3); 4];
+        let plan = optimize(&Problem {
+            slots: &s,
+            dt_h: 1.0,
+            modes: &m,
+            battery: &b,
+            grid: &GRID,
+            soc0_wh: 5000.0,
+            terminal_value_per_kwh: 0.0,
+            soc_step_wh: 100.0,
+        });
+        assert!(plan.slots.iter().all(|x| x.mode == 0));
+    }
+
+    #[test]
+    fn plan_cost_is_the_sum_of_slot_costs() {
+        let mut s = vec![slot(300.0, 0.0, 0.10); 3];
+        s.extend(vec![slot(1500.0, 2000.0, 0.50); 3]);
+        let plan = solve(&s, 3000.0, 0.02, 0.2);
+        let sum: f64 = plan.slots.iter().map(|x| x.cost).sum();
+        assert!((plan.cost - sum).abs() < 1e-9);
+    }
+
+    #[test]
+    fn start_soc_outside_the_limits_is_clamped() {
+        let b = bat(0.0);
+        let s = vec![slot(0.0, 0.0, 0.3); 2];
+        for soc0 in [-500.0, 20_000.0] {
+            let plan = solve(&s, soc0, 0.0, 0.0);
+            assert!(
+                plan.slots
+                    .iter()
+                    .all(|x| (b.min_soc * b.capacity_wh..=b.capacity_wh).contains(&x.soc_wh))
+            );
+        }
+    }
+
+    #[test]
+    fn quarter_hour_slots_scale_costs() {
+        let s = vec![slot(1000.0, 0.0, 0.40); 4];
+        let (b, m) = (bat(0.0), modes());
+        let idle_only = vec![m[1].clone()]; // no discharge: the grid supplies the load
+        let p = optimize(&Problem {
+            slots: &s,
+            dt_h: 0.25,
+            modes: &idle_only,
+            battery: &b,
+            grid: &GRID,
+            soc0_wh: 5000.0,
+            terminal_value_per_kwh: 0.0,
+            soc_step_wh: 100.0,
+        });
+        // 1 kW for one hour in four quarters at 0.40/kWh.
+        assert!((p.cost - 0.40).abs() < 1e-9, "{}", p.cost);
+    }
 }

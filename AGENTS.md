@@ -73,11 +73,9 @@ Rules:
 - **Python:** HA-independent code (like `modes.py`) gets pytest tests in `tests/`.
 
 Known coverage gaps to fill:
-- `vulpes-cli` modules;
-- `vulpes-solar` `model.rs`, `irradiance.rs` and `solpos.rs` (only covered by the pvlib comparison);
-- `vulpes-core` `battery.rs` (validation) and `mode.rs` (serde format);
-- `vulpes-engine` `types.rs` (serde format) and `lib.rs`;
-- `vulpes-py` (only exercised through the HA tests).
+- **`vulpes-cli` evaluation and calibration commands** (`eval-*`, `calibrate-solar`, `build-load`): their helpers are tested, but the day-by-day loops are not. Next step: move each loop into a function over in-memory data, as was done for `replay::simulate`.
+- **Network calls** (`open_meteo::fetch`, `entsoe::fetch`, `energyzero::fetch_hourly`): only the request building and response parsing are tested; there are no tests against live services by design.
+- **`vulpes-py`** is tested from Python (`tests/test_bindings.py`), against the built module. PyO3 functions can't be unit-tested from Rust because the extension module doesn't link libpython.
 
 ## Model changes
 

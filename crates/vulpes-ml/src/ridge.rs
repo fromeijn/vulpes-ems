@@ -84,4 +84,30 @@ mod tests {
         let m = Ridge::fit(&rows, 1.0).unwrap();
         assert!((m.coef[0] - 5.0).abs() < 1e-9);
     }
+
+    #[test]
+    fn empty_and_singular_inputs() {
+        assert!(Ridge::fit(&[], 1.0).is_none());
+        // Two identical features without regularisation: singular.
+        let rows: Vec<_> = (0..10)
+            .map(|i| (vec![i as f64, i as f64], i as f64, 1.0))
+            .collect();
+        assert!(Ridge::fit(&rows, 0.0).is_none());
+        // A little ridge makes it solvable and splits the weight evenly.
+        let m = Ridge::fit(&rows, 1e-6).unwrap();
+        assert!(
+            (m.coef[0] - m.coef[1]).abs() < 1e-6 && (m.coef[0] - 0.5).abs() < 1e-6,
+            "{:?}",
+            m.coef
+        );
+    }
+
+    #[test]
+    fn predict_is_the_dot_product() {
+        let m = Ridge {
+            coef: vec![2.0, -1.0, 0.5],
+        };
+        assert_eq!(m.predict(&[1.0, 3.0, 4.0]), 1.0);
+        assert_eq!(m.predict(&[]), 0.0);
+    }
 }

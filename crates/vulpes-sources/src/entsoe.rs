@@ -49,7 +49,36 @@ fn fmt(t: DateTime<Utc>) -> String {
 /// Fetch and parse. `[start, end)` must be at most one year; callers should
 /// chunk longer ranges. Returns no series when ENTSO-E has no data.
 pub fn fetch(token: &str, query: Query<'_>, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Vec<Series>> {
-    let mut params: Vec<(&str, String)> = match query {
+    let params = query_params(query, start, end);
+    let redact = |msg: String| redact(&msg, token);
+    let mut req = crate::agent().get(URL).query("securityToken", token);
+    for (k, v) in &params {
+        req = req.query(*k, v);
+    }
+    let body = match req.call() {
+        Ok(mut resp) => resp
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| Error::Parse(redact(e.to_string())))?,
+        // ENTSO-E answers "no data" with HTTP 400 and an acknowledgement document.
+        Err(ureq::Error::StatusCode(400)) => return Ok(Vec::new()),
+        Err(e) => return Err(Error::Parse(redact(format!("ENTSO-E request failed: {e}")))),
+    };
+    parse(&body)
+}
+
+/// Remove the security token from a message before it can be shown or logged.
+fn redact(msg: &str, token: &str) -> String {
+    if token.is_empty() {
+        msg.to_string()
+    } else {
+        msg.replace(token, "<redacted>")
+    }
+}
+
+/// Query parameters for a request, without the security token.
+fn query_params(query: Query<'_>, start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<(&'static str, String)> {
+    let mut params: Vec<(&'static str, String)> = match query {
         Query::DayAheadPrices { zone } => vec![
             ("documentType", "A44".into()),
             ("in_Domain", zone.into()),
@@ -70,21 +99,7 @@ pub fn fetch(token: &str, query: Query<'_>, start: DateTime<Utc>, end: DateTime<
     };
     params.push(("periodStart", fmt(start)));
     params.push(("periodEnd", fmt(end)));
-    let redact = |msg: String| msg.replace(token, "<redacted>");
-    let mut req = crate::agent().get(URL).query("securityToken", token);
-    for (k, v) in &params {
-        req = req.query(*k, v);
-    }
-    let body = match req.call() {
-        Ok(mut resp) => resp
-            .body_mut()
-            .read_to_string()
-            .map_err(|e| Error::Parse(redact(e.to_string())))?,
-        // ENTSO-E answers "no data" with HTTP 400 and an acknowledgement document.
-        Err(ureq::Error::StatusCode(400)) => return Ok(Vec::new()),
-        Err(e) => return Err(Error::Parse(redact(format!("ENTSO-E request failed: {e}")))),
-    };
-    parse(&body)
+    params
 }
 
 fn parse_time(s: &str) -> Result<i64> {
@@ -279,5 +294,58 @@ mod tests {
         let xml = PRICES_A03.replace("A03", "A01");
         let s = parse(&xml).unwrap();
         assert_eq!(s[0].points.len(), 2);
+    }
+
+    #[test]
+    fn token_is_redacted() {
+        let msg = "GET https://x/api?securityToken=abc-123&documentType=A44 failed: abc-123";
+        let out = redact(msg, "abc-123");
+        assert!(
+            !out.contains("abc-123") && out.matches("<redacted>").count() == 2,
+            "{out}"
+        );
+        assert_eq!(redact("no token here", ""), "no token here");
+    }
+
+    #[test]
+    fn request_parameters() {
+        use chrono::TimeZone;
+        let (s, e) = (
+            Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap(),
+        );
+        let get = |q| query_params(q, s, e);
+        let prices = get(Query::DayAheadPrices { zone: zone::NL });
+        assert!(prices.contains(&("documentType", "A44".into())));
+        assert!(
+            prices.contains(&("in_Domain", zone::NL.into()))
+                && prices.contains(&("out_Domain", zone::NL.into()))
+        );
+        assert!(
+            prices.contains(&("periodStart", "202601010000".into()))
+                && prices.contains(&("periodEnd", "202601020000".into()))
+        );
+        let ws = get(Query::WindSolarForecast { zone: zone::DE_LU });
+        assert!(ws.contains(&("documentType", "A69".into())) && ws.contains(&("processType", "A01".into())));
+        let load = get(Query::LoadForecast { zone: zone::NL });
+        assert!(
+            load.contains(&("documentType", "A65".into()))
+                && load.contains(&("outBiddingZone_Domain", zone::NL.into()))
+        );
+        for p in [prices, ws, load] {
+            assert!(p.iter().all(|(k, _)| *k != "securityToken"));
+        }
+    }
+
+    #[test]
+    fn times_and_resolutions() {
+        assert_eq!(parse_time("2026-11-05T23:00Z").unwrap(), 1_793_919_600);
+        assert_eq!(parse_time(" 2026-11-05T23:00Z ").unwrap(), 1_793_919_600);
+        assert!(parse_time("2026-11-05 23:00").is_err());
+        assert_eq!(parse_resolution("PT15M").unwrap(), 900);
+        assert_eq!(parse_resolution("PT30M").unwrap(), 1800);
+        assert_eq!(parse_resolution("PT60M").unwrap(), 3600);
+        assert_eq!(parse_resolution("PT1H").unwrap(), 3600);
+        assert!(parse_resolution("P1D").is_err());
     }
 }

@@ -100,4 +100,37 @@ mod tests {
         assert_eq!(day_type(d(2026, 5, 14), Country::None), DayType::Workday);
         assert_eq!(day_type(d(2026, 11, 7), nl), DayType::Saturday);
     }
+
+    #[test]
+    fn day_types() {
+        let nl = Country::Netherlands;
+        assert_eq!(day_type(d(2026, 11, 7), nl), DayType::Saturday);
+        assert_eq!(day_type(d(2026, 11, 8), nl), DayType::Sunday);
+        assert_eq!(day_type(d(2026, 11, 9), nl), DayType::Workday);
+        // Christmas 2025 is a Thursday: a holiday in NL, a workday without a calendar.
+        assert_eq!(day_type(d(2025, 12, 25), nl), DayType::Sunday);
+        assert_eq!(day_type(d(2025, 12, 25), Country::None), DayType::Workday);
+        assert!(!is_holiday(d(2025, 12, 25), Country::None));
+    }
+
+    #[test]
+    fn kings_day_moves_off_sunday() {
+        // 27 April 2025 is a Sunday, so King's Day is Saturday the 26th.
+        assert!(is_holiday(d(2025, 4, 26), Country::Netherlands));
+        assert!(!is_holiday(d(2025, 4, 27), Country::Netherlands));
+        assert_eq!(day_type(d(2025, 4, 26), Country::Netherlands), DayType::Sunday);
+        assert!(is_holiday(d(2026, 4, 27), Country::Netherlands));
+    }
+
+    #[test]
+    fn moving_holidays_and_liberation_day() {
+        let nl = Country::Netherlands;
+        // Easter 2026 is 5 April: Easter Monday, Ascension (+39) and Whit Monday (+50).
+        for date in [d(2026, 4, 6), d(2026, 5, 14), d(2026, 5, 25)] {
+            assert!(is_holiday(date, nl), "{date}");
+        }
+        assert!(!is_holiday(d(2026, 4, 3), nl), "Good Friday is not a day off");
+        assert!(is_holiday(d(2025, 5, 5), nl) && !is_holiday(d(2026, 5, 5), nl));
+        assert!(is_holiday(d(2030, 5, 5), nl));
+    }
 }

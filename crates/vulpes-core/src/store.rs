@@ -327,4 +327,87 @@ mod tests {
         assert_eq!(s.last_change_point("solar", 999).unwrap(), None);
         assert_eq!(s.last_change_point("load", 9999).unwrap(), None);
     }
+
+    fn temp_db(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("vulpes-store-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("store.db")
+    }
+
+    #[test]
+    fn data_persists_across_reopening_a_file() {
+        let path = temp_db("persist");
+        {
+            let mut s = Store::open(&path).unwrap();
+            s.ensure_series("x", "W", SeriesKind::Mean).unwrap();
+            s.put_samples("x", 3600, &[(0, 1.0)]).unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.samples("x", 3600, 0, 10).unwrap(), vec![(0, 1.0)]);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn unsupported_schema_version_is_rejected() {
+        let path = temp_db("schema");
+        Store::open(&path).unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute("UPDATE meta SET value = '99' WHERE key = 'schema_version'", [])
+            .unwrap();
+        let err = Store::open(&path)
+            .err()
+            .expect("version 99 must be rejected")
+            .to_string();
+        assert!(err.contains("schema version 99"), "{err}");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn samples_edge_cases() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert!(
+            s.put_samples("nope", 3600, &[(0, 1.0)]).is_err(),
+            "unknown series"
+        );
+        assert!(s.samples("nope", 3600, 0, 10).unwrap().is_empty());
+        s.ensure_series("x", "W", SeriesKind::Mean).unwrap();
+        // Non-finite values are skipped and not counted.
+        let n = s
+            .put_samples(
+                "x",
+                3600,
+                &[(0, 1.0), (3600, f64::NAN), (7200, f64::INFINITY), (10_800, 4.0)],
+            )
+            .unwrap();
+        assert_eq!(n, 2);
+        // The range is half-open, and steps are kept apart.
+        s.put_samples("x", 900, &[(0, 9.0)]).unwrap();
+        assert_eq!(s.samples("x", 3600, 0, 10_800).unwrap(), vec![(0, 1.0)]);
+        assert_eq!(
+            s.samples("x", 3600, 0, 10_801).unwrap(),
+            vec![(0, 1.0), (10_800, 4.0)]
+        );
+        assert_eq!(s.samples("x", 900, 0, 10_801).unwrap(), vec![(0, 9.0)]);
+        let info = s.summary().unwrap();
+        assert_eq!(info.len(), 2, "one row per series and step");
+    }
+
+    #[test]
+    fn non_finite_forecasts_are_skipped() {
+        let mut s = Store::open_in_memory().unwrap();
+        let p = |v| ForecastPoint {
+            valid_ts: 0,
+            issued_ts: -10,
+            value: v,
+        };
+        assert_eq!(s.put_forecasts("src", "t", &[p(1.0), p(f64::NAN)]).unwrap(), 1);
+        assert_eq!(s.forecasts_asof("src", "t", 0, 1, 0).unwrap(), vec![(0, 1.0)]);
+        assert!(
+            s.forecasts_asof("src", "t", 0, 1, -11).unwrap().is_empty(),
+            "not yet issued"
+        );
+        assert!(s.forecasts_asof("other", "t", 0, 1, 0).unwrap().is_empty());
+    }
 }

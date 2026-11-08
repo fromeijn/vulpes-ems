@@ -97,4 +97,50 @@ mod tests {
         assert!((f.tariff.a - 1.21).abs() < 0.02, "{f:?}");
         assert!((f.tariff.b - 0.135).abs() < 0.003, "{f:?}");
     }
+
+    #[test]
+    fn price_is_linear() {
+        let t = LinearTariff { a: 1.21, b: 0.13 };
+        assert!((t.price(0.10) - 0.251).abs() < 1e-12);
+        assert!(
+            (t.price(-0.05) - 0.0695).abs() < 1e-12,
+            "negative wholesale prices pass through"
+        );
+    }
+
+    #[test]
+    fn exact_data_fits_exactly() {
+        let samples: Vec<TariffSample> = (0..24)
+            .map(|h| {
+                let (e, w) = (0.5 + (h % 5) as f64, 0.05 + 0.01 * h as f64);
+                TariffSample {
+                    energy_kwh: e,
+                    wholesale: w,
+                    cost: e * (1.21 * w + 0.13),
+                }
+            })
+            .collect();
+        let f = fit(&samples).unwrap();
+        assert!((f.tariff.a - 1.21).abs() < 1e-9 && (f.tariff.b - 0.13).abs() < 1e-9);
+        assert!(f.rms_error < 1e-9);
+        assert_eq!(f.samples, 24);
+    }
+
+    #[test]
+    fn degenerate_inputs_give_no_fit() {
+        let s = |e: f64, w: f64| TariffSample {
+            energy_kwh: e,
+            wholesale: w,
+            cost: e * (w + 0.1),
+        };
+        assert!(fit(&[]).is_none());
+        assert!(fit(&[s(1.0, 0.1)]).is_none(), "one sample");
+        assert!(
+            fit(&[s(1.0, 0.1), s(2.0, 0.1), s(3.0, 0.1)]).is_none(),
+            "constant wholesale price"
+        );
+        // Hours without energy are ignored rather than dividing by zero.
+        let f = fit(&[s(0.0, 0.5), s(1.0, 0.1), s(2.0, 0.2)]).unwrap();
+        assert_eq!(f.samples, 2);
+    }
 }

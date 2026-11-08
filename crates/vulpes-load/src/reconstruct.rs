@@ -40,4 +40,15 @@ mod tests {
         };
         assert_eq!(jitter.load(), 0.0);
     }
+
+    #[test]
+    fn negative_balance_is_clipped() {
+        let b = Balance {
+            grid_import: 0.0,
+            grid_export: 500.0,
+            pv: 400.0,
+            battery_net_in: 0.0,
+        };
+        assert_eq!(b.load(), 0.0);
+    }
 }

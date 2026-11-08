@@ -116,4 +116,54 @@ mod tests {
         }; 10];
         assert_eq!(Correction::fit(&few, 1.0), Correction::NONE);
     }
+
+    #[test]
+    fn degree_hours() {
+        let b = DegreeBases::default();
+        assert_eq!((b.cdh(25.0), b.cdh(18.0), b.cdh(5.0)), (7.0, 0.0, 0.0));
+        assert_eq!((b.hdh(2.0), b.hdh(12.0), b.hdh(30.0)), (10.0, 0.0, 0.0));
+        let c = Correction {
+            beta_cool: 30.0,
+            beta_heat: 8.0,
+        };
+        assert_eq!(c.apply(2.0, 0.5), 64.0);
+        assert_eq!(Correction::NONE.apply(5.0, 5.0), 0.0);
+    }
+
+    #[test]
+    fn coefficients_are_never_negative() {
+        // Load *drops* when it gets warmer: the fit must not learn a negative slope.
+        let samples: Vec<Sample> = (0..100)
+            .map(|i| {
+                let d = (i % 10) as f64 - 5.0;
+                Sample {
+                    error: -20.0 * d,
+                    d_cdh: d,
+                    d_hdh: 0.0,
+                }
+            })
+            .collect();
+        let c = Correction::fit(&samples, 1.0);
+        assert_eq!(c.beta_cool, 0.0);
+        assert!(c.beta_heat >= 0.0);
+    }
+
+    #[test]
+    fn heating_slope_is_learned_independently() {
+        let samples: Vec<Sample> = (0..200)
+            .map(|i| {
+                let (dc, dh) = (((i % 7) as f64 - 3.0).max(0.0), ((i % 5) as f64 - 2.0).max(0.0));
+                Sample {
+                    error: 40.0 * dc + 10.0 * dh,
+                    d_cdh: dc,
+                    d_hdh: dh,
+                }
+            })
+            .collect();
+        let c = Correction::fit(&samples, 1e-6);
+        assert!(
+            (c.beta_cool - 40.0).abs() < 0.01 && (c.beta_heat - 10.0).abs() < 0.01,
+            "{c:?}"
+        );
+    }
 }

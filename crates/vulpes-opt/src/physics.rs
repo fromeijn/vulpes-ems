@@ -187,4 +187,94 @@ mod tests {
         let r = step(&c, 200.0, 3000.0, 5000.0, &bat(), &GRID, 1.0);
         assert_eq!((r.grid_w, r.curtailed_w), (200.0, 3000.0));
     }
+
+    #[test]
+    fn idle_leaves_the_battery_alone() {
+        let lim = GridLimits {
+            max_import_w: 17_000.0,
+            max_export_w: 17_000.0,
+        };
+        let o = step(&mode(Behaviour::Idle), 800.0, 300.0, 5000.0, &bat(), &lim, 1.0);
+        assert_eq!(
+            (o.battery_w, o.grid_w, o.soc_wh, o.curtailed_w),
+            (0.0, 500.0, 5000.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn fixed_battery_power_is_clamped_to_the_limits() {
+        let b = bat();
+        let lim = GridLimits {
+            max_import_w: 17_000.0,
+            max_export_w: 17_000.0,
+        };
+        let up = step(
+            &mode(Behaviour::BatteryPower { w: 1e6 }),
+            0.0,
+            0.0,
+            5000.0,
+            &b,
+            &lim,
+            0.25,
+        );
+        assert_eq!(up.battery_w, b.max_charge_w);
+        let down = step(
+            &mode(Behaviour::BatteryPower { w: -1e6 }),
+            0.0,
+            0.0,
+            5000.0,
+            &b,
+            &lim,
+            0.25,
+        );
+        assert_eq!(down.battery_w, -b.max_discharge_w);
+        // The grid supplies or takes the battery power on top of the house balance.
+        assert_eq!(down.grid_w, -b.max_discharge_w);
+    }
+
+    #[test]
+    fn soc_stays_within_bounds_for_every_mode() {
+        let b = bat();
+        let lim = GridLimits {
+            max_import_w: 17_000.0,
+            max_export_w: 17_000.0,
+        };
+        let (lo, hi) = (b.min_soc * b.capacity_wh, b.max_soc * b.capacity_wh);
+        let behaviours = [
+            Behaviour::GridSetpoint { w: 5000.0 },
+            Behaviour::GridSetpoint { w: -5000.0 },
+            Behaviour::SelfConsume,
+            Behaviour::NoDischarge,
+            Behaviour::Idle,
+            Behaviour::BatteryPower { w: 3000.0 },
+            Behaviour::BatteryPower { w: -3000.0 },
+        ];
+        for beh in behaviours {
+            for soc in [lo, lo + 1.0, 0.5 * (lo + hi), hi - 1.0, hi] {
+                for (load, pv) in [(0.0, 0.0), (2000.0, 0.0), (300.0, 4000.0)] {
+                    let o = step(&mode(beh), load, pv, soc, &b, &lim, 1.0);
+                    assert!((lo..=hi).contains(&o.soc_wh), "{beh:?} soc {soc}: {o:?}");
+                    // Energy balance: grid = load − used PV + battery.
+                    let used_pv = pv - o.curtailed_w;
+                    assert!(
+                        (o.grid_w - (load - used_pv + o.battery_w)).abs() < 1e-9,
+                        "{beh:?}: {o:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shorter_slots_move_less_energy() {
+        let b = bat();
+        let lim = GridLimits {
+            max_import_w: 17_000.0,
+            max_export_w: 17_000.0,
+        };
+        let m = mode(Behaviour::BatteryPower { w: 2000.0 });
+        let hour = step(&m, 0.0, 0.0, 5000.0, &b, &lim, 1.0);
+        let quarter = step(&m, 0.0, 0.0, 5000.0, &b, &lim, 0.25);
+        assert!(((hour.soc_wh - 5000.0) - 4.0 * (quarter.soc_wh - 5000.0)).abs() < 1e-9);
+    }
 }

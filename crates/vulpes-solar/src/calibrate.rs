@@ -226,80 +226,23 @@ pub fn fit_group(members: &[GroupMember<'_>], opt: FitOptions) -> Vec<FitResult>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::solpos::sun_position;
+    use crate::testdata::{clear_hours, plane};
 
-    /// Synthetic clear-sky-ish data from a known plane must be recovered.
+    fn no_trim() -> FitOptions {
+        FitOptions {
+            trim: 0.0,
+            ..Default::default()
+        }
+    }
+
+    /// Synthetic clear-sky data from a known plane must be recovered.
     #[test]
     fn recovers_known_plane() {
-        let truth = PlaneParams {
-            azimuth: 225.0,
-            tilt: 35.0,
-            pdc0: 300.0,
-            ac_max: 290.0,
-            inverter_eff: 0.965,
-            gamma: -0.004,
-            iam_b0: 0.05,
-            albedo: 0.2,
-            u0: 25.0,
-            u1: 6.84,
-        };
-        let start = 1_750_000_000_i64 - 1_750_000_000 % 3600; // mid-June 2025
-        let mut inputs = Vec::new();
-        for h in 0..(24 * 20) {
-            let t0 = start + h * 3600;
-            let mut sun = [SunPosition {
-                zenith: 0.0,
-                azimuth: 0.0,
-            }; 4];
-            let mut weather = [Weather {
-                ghi: 0.0,
-                dni: 0.0,
-                dhi: 0.0,
-                temp_air: 20.0,
-                wind_speed: 2.0,
-            }; 4];
-            for k in 0..4 {
-                let s = sun_position((t0 + k as i64 * 900 + 450) as f64, 52.0, 5.0);
-                let cz = s.zenith.to_radians().cos().max(0.0);
-                let dni = if cz > 0.0 {
-                    850.0 * (-0.15 / cz.max(0.05)).exp()
-                } else {
-                    0.0
-                };
-                let dhi = 90.0 * cz;
-                sun[k] = s;
-                weather[k] = Weather {
-                    ghi: dni * cz + dhi,
-                    dni,
-                    dhi,
-                    temp_air: 20.0,
-                    wind_speed: 2.0,
-                };
-            }
-            if sun[2].zenith < 80.0 {
-                inputs.push(HourInput {
-                    sun,
-                    weather,
-                    day_of_year: 170,
-                });
-            }
-        }
+        let truth = plane(225.0, 35.0, 300.0, 290.0);
+        let inputs = clear_hours(20);
         let actual = simulate_hours(&truth, &inputs);
-        let base = PlaneParams {
-            azimuth: 180.0,
-            tilt: 30.0,
-            pdc0: 250.0,
-            ..truth.clone()
-        };
-        let fit = fit_plane(
-            &base,
-            &inputs,
-            &actual,
-            FitOptions {
-                trim: 0.0,
-                ..Default::default()
-            },
-        );
+        let base = plane(180.0, 30.0, 250.0, 290.0);
+        let fit = fit_plane(&base, &inputs, &actual, no_trim());
         assert!(
             (fit.params.azimuth - 225.0).abs() <= 1.0,
             "azimuth {}",
@@ -307,41 +250,144 @@ mod tests {
         );
         assert!((fit.params.tilt - 35.0).abs() <= 1.0, "tilt {}", fit.params.tilt);
         assert!((fit.params.pdc0 - 300.0).abs() < 3.0, "pdc0 {}", fit.params.pdc0);
+        assert_eq!(fit.params.ac_max, 290.0, "other fields come from the base");
+        assert_eq!(fit.hours_used, inputs.len());
+        assert!(fit.rmse < 2.0, "rmse {}", fit.rmse);
+    }
 
-        // A tent pair: the opposite panel (azimuth 45°) with a smaller capacity.
-        let twin = PlaneParams {
-            azimuth: 45.0,
-            pdc0: 250.0,
-            ..truth.clone()
-        };
-        let actual2 = simulate_hours(&twin, &inputs);
+    #[test]
+    fn tent_pair_shares_tilt_with_opposite_azimuths() {
+        let inputs = clear_hours(20);
+        let (east, west) = (plane(225.0, 35.0, 300.0, 290.0), plane(45.0, 35.0, 250.0, 290.0));
+        let (a1, a2) = (simulate_hours(&east, &inputs), simulate_hours(&west, &inputs));
+        let base = plane(180.0, 30.0, 250.0, 290.0);
         let members = [
             GroupMember {
                 inputs: &inputs,
-                actual: &actual,
+                actual: &a1,
                 azimuth_offset: 0.0,
                 base: base.clone(),
             },
             GroupMember {
                 inputs: &inputs,
-                actual: &actual2,
+                actual: &a2,
                 azimuth_offset: 180.0,
-                base: base.clone(),
+                base,
             },
         ];
-        let r = fit_group(
-            &members,
-            FitOptions {
-                trim: 0.0,
-                ..Default::default()
-            },
-        );
+        let r = fit_group(&members, no_trim());
         assert!((r[0].params.azimuth - 225.0).abs() <= 1.0 && (r[1].params.azimuth - 45.0).abs() <= 1.0);
         assert!((r[0].params.tilt - 35.0).abs() <= 1.0 && r[0].params.tilt == r[1].params.tilt);
         assert!(
             (r[1].params.pdc0 - 250.0).abs() < 3.0,
             "twin pdc0 {}",
             r[1].params.pdc0
+        );
+    }
+
+    #[test]
+    fn simulate_hours_is_the_mean_of_the_quarters() {
+        let p = plane(180.0, 35.0, 300.0, 1000.0);
+        let inputs = clear_hours(1);
+        let h = &inputs[3];
+        let quarters: f64 = (0..4)
+            .map(|k| plane_ac_power(&p, h.sun[k], h.weather[k], h.day_of_year, 1.0))
+            .sum();
+        assert!((simulate_hours(&p, &inputs)[3] - quarters / 4.0).abs() < 1e-9);
+        assert!(simulate_hours(&p, &[]).is_empty());
+    }
+
+    #[test]
+    fn closed_form_scale_and_mask() {
+        let truth = plane(180.0, 35.0, 420.0, 10_000.0);
+        let inputs = clear_hours(3);
+        let actual = simulate_hours(&truth, &inputs);
+        let all = vec![true; actual.len()];
+        let (pdc0, sse, _) = fit_scale(&truth, &inputs, &actual, &all);
+        assert!((pdc0 - 420.0).abs() < 1e-6 && sse < 1e-6, "{pdc0} {sse}");
+        let none = vec![false; actual.len()];
+        let (pdc0, sse, _) = fit_scale(&truth, &inputs, &actual, &none);
+        assert_eq!((pdc0, sse), (0.0, 0.0), "no hours selected");
+    }
+
+    #[test]
+    fn clipped_hours_do_not_bias_the_capacity() {
+        // The inverter clips at midday; the capacity must still come out right.
+        let truth = plane(180.0, 35.0, 400.0, 250.0);
+        let inputs = clear_hours(20);
+        let actual = simulate_hours(&truth, &inputs);
+        assert!(actual.iter().any(|&a| a >= 249.9), "test data should clip");
+        let fit = fit_plane(&plane(180.0, 30.0, 300.0, 250.0), &inputs, &actual, no_trim());
+        assert!((fit.params.pdc0 - 400.0).abs() < 5.0, "pdc0 {}", fit.params.pdc0);
+    }
+
+    #[test]
+    fn trimming_ignores_cloud_timing_errors() {
+        let truth = plane(200.0, 30.0, 300.0, 1000.0);
+        let inputs = clear_hours(20);
+        let mut actual = simulate_hours(&truth, &inputs);
+        // Every 7th hour was cloudy although the weather input said clear.
+        for a in actual.iter_mut().step_by(7) {
+            *a *= 0.2;
+        }
+        let fit = fit_plane(
+            &plane(180.0, 30.0, 250.0, 1000.0),
+            &inputs,
+            &actual,
+            FitOptions::default(),
+        );
+        assert!((fit.params.pdc0 - 300.0).abs() < 10.0, "pdc0 {}", fit.params.pdc0);
+        assert!(
+            (fit.params.azimuth - 200.0).abs() <= 2.0,
+            "azimuth {}",
+            fit.params.azimuth
+        );
+        assert_eq!(fit.hours_used, (0.8 * inputs.len() as f64).round() as usize);
+    }
+
+    #[test]
+    fn azimuth_near_north_wraps_around() {
+        let truth = plane(2.0, 20.0, 300.0, 1000.0);
+        let inputs = clear_hours(20);
+        let actual = simulate_hours(&truth, &inputs);
+        let fit = fit_plane(&plane(180.0, 30.0, 250.0, 1000.0), &inputs, &actual, no_trim());
+        let az = fit.params.azimuth;
+        assert!((0.0..360.0).contains(&az), "{az}");
+        assert!(az <= 3.0 || az >= 359.0, "azimuth {az}");
+    }
+
+    #[test]
+    fn tilt_is_bounded_by_the_option() {
+        let truth = plane(180.0, 45.0, 300.0, 1000.0);
+        let inputs = clear_hours(10);
+        let actual = simulate_hours(&truth, &inputs);
+        let opt = FitOptions {
+            trim: 0.0,
+            tilt_max: 20.0,
+        };
+        let fit = fit_plane(&plane(180.0, 10.0, 250.0, 1000.0), &inputs, &actual, opt);
+        assert!(fit.params.tilt <= 20.0, "tilt {}", fit.params.tilt);
+    }
+
+    #[test]
+    fn empty_input_does_not_panic() {
+        let fit = fit_plane(
+            &plane(180.0, 30.0, 250.0, 1000.0),
+            &[],
+            &[],
+            FitOptions::default(),
+        );
+        assert_eq!((fit.hours_used, fit.params.pdc0), (0, 0.0));
+    }
+
+    #[test]
+    #[should_panic]
+    fn mismatched_lengths_panic() {
+        fit_plane(
+            &plane(180.0, 30.0, 250.0, 1000.0),
+            &clear_hours(1),
+            &[1.0],
+            FitOptions::default(),
         );
     }
 }
