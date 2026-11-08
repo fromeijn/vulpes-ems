@@ -139,8 +139,8 @@ impl Measured {
         Some(sum)
     }
 
-    /// Whether plane `i`'s inverter was near its AC limit in hour `h`. Unknown
-    /// hours count as clipped, so they are left out of the fit.
+    /// Whether plane `i`'s inverter was near its AC limit in hour `h`. Hours
+    /// without any measurement count as clipped, so they are left out of the fit.
     fn clipped(&self, planes: &[PlaneParams], i: usize, h: i64) -> bool {
         let p = &planes[i];
         let group: Vec<usize> = match p.inverter {
@@ -149,17 +149,26 @@ impl Measured {
                 .filter(|&j| planes[j].inverter == Some(id))
                 .collect(),
         };
-        let from_strings: Option<f64> = group
+        let known: Vec<Option<f64>> = group
             .iter()
             .map(|&j| self.strings[j].get(&h).map(|w| w * planes[j].inverter_eff))
-            .sum();
-        // The total meter may cover more inverters than this one, which only
-        // makes the check more cautious.
-        let total = self.total.get(&h).copied();
-        match (from_strings, total) {
-            (None, None) => true,
-            (a, b) => a.unwrap_or(0.0).max(b.unwrap_or(0.0)) >= 0.9 * p.ac_max,
-        }
+            .collect();
+        let partial: f64 = known.iter().flatten().sum();
+        let ac = if known.iter().all(Option::is_some) {
+            // Every string on this inverter is measured: that is its output.
+            Some(partial)
+        } else if let Some(&t) = self.total.get(&h) {
+            // The total meter may cover more inverters than this one, which
+            // only makes the check more cautious.
+            Some(t.max(partial))
+        } else if known.iter().any(Option::is_some) {
+            // Unmeasured strings count as 0; the robust trim of the fit drops
+            // hours that were clipped anyway.
+            Some(partial)
+        } else {
+            None
+        };
+        ac.is_none_or(|w| w >= 0.9 * p.ac_max)
     }
 }
 
@@ -288,7 +297,12 @@ fn check_strings_vs_total(planes: &[PlaneParams], m: &Measured) -> Option<String
     let cap = ac_capacity(planes);
     let (mut s_sum, mut t_sum) = (0.0, 0.0);
     for (&h, &t) in &m.total {
-        if t < 0.2 * cap || m.strings.iter().any(|s| !s.contains_key(&h)) {
+        // Low output is noisy, and an inverter near its AC limit clips the
+        // total while its strings (DC) are not clipped: skip those hours.
+        if t < 0.2 * cap
+            || m.strings.iter().any(|s| !s.contains_key(&h))
+            || (0..planes.len()).any(|i| m.clipped(planes, i, h))
+        {
             continue;
         }
         s_sum += planes
@@ -813,6 +827,76 @@ mod tests {
         assert!(Weeks::Odd.includes(START) && !Weeks::Even.includes(START));
         assert!(Weeks::Even.includes(START + 7 * 86_400));
         assert!(Weeks::All.includes(START));
+    }
+
+    /// Measurements for hour START only: per-plane string DC power and an optional total.
+    fn measured(strings: &[Option<f64>], total: Option<f64>) -> Measured {
+        Measured {
+            strings: strings
+                .iter()
+                .map(|s| s.map(|w| (START, w)).into_iter().collect())
+                .collect(),
+            total: total.map(|t| (START, t)).into_iter().collect(),
+        }
+    }
+
+    fn plane(ac_max: f64, inverter: Option<u32>) -> PlaneParams {
+        PlaneParams {
+            inverter,
+            inverter_eff: 1.0,
+            ..PlaneParams::new(180.0, 35.0, 3000.0, ac_max)
+        }
+    }
+
+    #[test]
+    fn separate_inverters_are_judged_by_their_own_string() {
+        // Two 2 kW inverters at 1.5 kW each: the 3 kW total is not either inverter's output.
+        let planes = [plane(2000.0, None), plane(2000.0, None)];
+        let m = measured(&[Some(1500.0), Some(1500.0)], Some(3000.0));
+        assert!(!m.clipped(&planes, 0, START) && !m.clipped(&planes, 1, START));
+        let m = measured(&[Some(1900.0), Some(1500.0)], Some(3400.0));
+        assert!(m.clipped(&planes, 0, START) && !m.clipped(&planes, 1, START));
+    }
+
+    #[test]
+    fn shared_inverter_with_one_string_sensor_and_no_total() {
+        let planes = [plane(4000.0, Some(0)), plane(4000.0, Some(0))];
+        // Only plane 0 is measured: the unmeasured string counts as 0, so the hour is usable.
+        let m = measured(&[Some(1500.0), None], None);
+        assert!(!m.clipped(&planes, 0, START));
+        assert!(measured(&[Some(3800.0), None], None).clipped(&planes, 0, START));
+        // With a total, that is used for the unmeasured part.
+        assert!(measured(&[Some(1500.0), None], Some(3700.0)).clipped(&planes, 0, START));
+        // Nothing measured: unknown, left out.
+        assert!(measured(&[None, None], None).clipped(&planes, 0, START));
+        // Both measured: their sum is the inverter's output.
+        assert!(measured(&[Some(1900.0), Some(1900.0)], None).clipped(&planes, 1, START));
+        assert!(!measured(&[Some(1500.0), Some(1500.0)], Some(9000.0)).clipped(&planes, 1, START));
+    }
+
+    #[test]
+    fn clipped_hours_do_not_trigger_the_string_sum_warning() {
+        // 6 kWp DC on a 4 kW inverter: at midday the strings give 5.5 kW, the total 4 kW.
+        let planes = [plane(4000.0, Some(0)), plane(4000.0, Some(0))];
+        let hours = |n: i64, s: f64, t: f64| -> Vec<(i64, f64, f64)> {
+            (0..n).map(|k| (START + k * 3600, s, t)).collect()
+        };
+        let build = |rows: &[(i64, f64, f64)]| Measured {
+            strings: vec![
+                rows.iter().map(|&(h, s, _)| (h, s / 2.0)).collect(),
+                rows.iter().map(|&(h, s, _)| (h, s / 2.0)).collect(),
+            ],
+            total: rows.iter().map(|&(h, _, t)| (h, t)).collect(),
+        };
+        let mut rows = hours(10, 2000.0, 2000.0);
+        rows.extend(
+            hours(30, 5500.0, 4000.0)
+                .into_iter()
+                .map(|(h, s, t)| (h + 10 * 3600, s, t)),
+        );
+        assert_eq!(check_strings_vs_total(&planes, &build(&rows)), None);
+        // A wrong sensor still warns: strings at twice the total in unclipped hours.
+        assert!(check_strings_vs_total(&planes, &build(&hours(10, 3000.0, 1500.0))).is_some());
     }
 
     #[test]

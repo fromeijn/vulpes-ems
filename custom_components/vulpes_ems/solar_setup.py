@@ -202,6 +202,27 @@ def apply_proposal(planes: list[dict[str, Any]], result: dict[str, Any]) -> list
     return out
 
 
+def calibration_status(
+    *, running: bool, error: bool, applied: bool, proposal: bool, result: bool, stored: bool
+) -> str:
+    """Status of the solar calibration for its sensor.
+
+    A new proposal for applied planes is `done` (there is something to apply),
+    not `applied`.
+    """
+    if running:
+        return "running"
+    if error:
+        return "failed"
+    if proposal:
+        return "done"
+    if applied:
+        return "applied"
+    if result:
+        return "done"
+    return "stale" if stored else "not_run"
+
+
 def summarize(planes: list[dict[str, Any]], result: dict[str, Any]) -> str:
     """Markdown summary of a calibration result for the options flow."""
     lines = []

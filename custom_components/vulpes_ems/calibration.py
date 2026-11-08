@@ -27,6 +27,7 @@ from .solar_setup import (
     CONF_POWER_ENTITY,
     CONF_SOLAR_SETUP,
     calibration_request,
+    calibration_status,
     engine_planes,
     has_changes,
     hourly_series,
@@ -94,15 +95,14 @@ class SolarCalibration:
 
     @property
     def status(self) -> str:
-        if self.running:
-            return "running"
-        if self.error:
-            return "failed"
-        if self.applied:
-            return "applied"
-        if self.result:
-            return "done"
-        return "stale" if self._stored.get("result") else "not_run"
+        return calibration_status(
+            running=self.running,
+            error=bool(self.error),
+            applied=self.applied,
+            proposal=self.proposal is not None,
+            result=self.result is not None,
+            stored=bool(self._stored.get("result")),
+        )
 
     def improvement(self) -> float | None:
         """Forecast improvement of the last result in %; 0 when it changed nothing."""

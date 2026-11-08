@@ -159,3 +159,16 @@ def test_summary_lists_changes_scores_and_warnings():
     assert "⚠ planes without a string power sensor" in text
     assert "same data" in ss.summarize(PLANES, dict(RESULT, held_out=False))
     assert "RMSE" not in ss.summarize(PLANES, dict(RESULT, score_current=None))
+
+
+def test_calibration_status():
+    base = {"running": False, "error": False, "applied": False, "proposal": False, "result": False, "stored": False}
+    status = lambda **kw: ss.calibration_status(**{**base, **kw})  # noqa: E731
+    assert status() == "not_run"
+    assert status(stored=True) == "stale"
+    assert status(result=True, stored=True) == "done"
+    assert status(applied=True, result=True, stored=True) == "applied"
+    # A new run on the applied planes proposes more changes: there is something to apply again.
+    assert status(applied=True, proposal=True, result=True, stored=True) == "done"
+    assert status(error=True, proposal=True) == "failed"
+    assert status(running=True, error=True) == "running"
