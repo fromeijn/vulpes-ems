@@ -33,7 +33,7 @@ CONF_NET_METERING = "net_metering"
 CONF_EXPORT_A = "export_a"
 CONF_EXPORT_B = "export_b"
 
-# Solar (step "solar"); mode settings live in modes.py
+# Solar (steps "solar*"); mode settings live in modes.py, solar form keys in solar_setup.py
 CONF_PLANES = "planes"
 
 WHOLESALE_SOURCES = ["energyzero", "none"]
@@ -41,3 +41,6 @@ WHOLESALE_SOURCES = ["energyzero", "none"]
 LOAD_HISTORY_DAYS = 60
 WHOLESALE_HISTORY_DAYS = 35
 HORIZON_HOURS = 36
+CALIBRATION_HISTORY_DAYS = 120
+# First automatic calibration after setup: late enough not to slow down startup.
+CALIBRATION_DELAY_S = 600

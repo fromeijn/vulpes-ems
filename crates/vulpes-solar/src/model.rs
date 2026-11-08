@@ -1,6 +1,9 @@
 //! Per-plane PV model: plane-of-array irradiance → incidence-angle loss →
 //! cell temperature (Faiman) → DC power (PVWatts) → inverter efficiency and
 //! clipping. One plane = one orientation; with microinverters, one panel.
+//!
+//! Planes that share a string inverter carry the same `inverter` id: their DC
+//! power is summed before the shared AC limit is applied ([`combine_ac`]).
 
 use crate::irradiance::{cos_aoi, extra_dni, ground_diffuse, perez_sky_diffuse};
 use crate::solpos::SunPosition;
@@ -31,6 +34,51 @@ pub struct PlaneParams {
     pub u0: f64,
     #[serde(default = "defaults::u1")]
     pub u1: f64,
+    /// Planes with the same id share one inverter (and its `ac_max`); `None`
+    /// means the plane has an inverter of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inverter: Option<u32>,
+}
+
+impl PlaneParams {
+    /// A plane with default loss parameters and its own inverter.
+    pub fn new(azimuth: f64, tilt: f64, pdc0: f64, ac_max: f64) -> Self {
+        Self {
+            azimuth,
+            tilt,
+            pdc0,
+            ac_max,
+            inverter_eff: defaults::inverter_eff(),
+            gamma: defaults::gamma(),
+            iam_b0: defaults::iam_b0(),
+            albedo: defaults::albedo(),
+            u0: defaults::u0(),
+            u1: defaults::u1(),
+            inverter: None,
+        }
+    }
+}
+
+/// Check that planes sharing an inverter agree on its limit and efficiency,
+/// and that all values are finite and non-negative.
+pub fn validate_planes(planes: &[PlaneParams]) -> Result<(), String> {
+    for (i, p) in planes.iter().enumerate() {
+        let fields = [p.azimuth, p.tilt, p.pdc0, p.ac_max, p.inverter_eff];
+        if fields.iter().any(|x| !x.is_finite()) || p.pdc0 < 0.0 || p.ac_max < 0.0 || p.inverter_eff <= 0.0 {
+            return Err(format!(
+                "plane {i}: invalid azimuth/tilt/pdc0/ac_max/inverter_eff"
+            ));
+        }
+        let Some(id) = p.inverter else { continue };
+        if let Some(q) = planes[..i].iter().find(|q| q.inverter == Some(id))
+            && (q.ac_max != p.ac_max || q.inverter_eff != p.inverter_eff)
+        {
+            return Err(format!(
+                "planes on inverter {id} must have the same ac_max and inverter_eff"
+            ));
+        }
+    }
+    Ok(())
 }
 
 mod defaults {
@@ -116,9 +164,9 @@ pub fn cell_temp(poa_total: f64, temp_air: f64, wind_speed: f64, u0: f64, u1: f6
     temp_air + poa_total / (u0 + u1 * wind_speed.max(0.0))
 }
 
-/// AC power (W) of one plane, with `beam_factor` in 0..=1 scaling the beam
-/// component for shading (1 = unshaded).
-pub fn plane_ac_power(
+/// DC power (W, ≥ 0) of one plane, with `beam_factor` in 0..=1 scaling the
+/// beam component for shading (1 = unshaded).
+pub fn plane_dc_power(
     p: &PlaneParams,
     sun: SunPosition,
     w: Weather,
@@ -132,8 +180,48 @@ pub fn plane_ac_power(
         return 0.0;
     }
     let tc = cell_temp(g, w.temp_air, w.wind_speed, p.u0, p.u1);
-    let dc = p.pdc0 * g / 1000.0 * (1.0 + p.gamma * (tc - 25.0));
-    (dc * p.inverter_eff).clamp(0.0, p.ac_max)
+    (p.pdc0 * g / 1000.0 * (1.0 + p.gamma * (tc - 25.0))).max(0.0)
+}
+
+/// AC power (W) of one plane on its own inverter (its `inverter` id is ignored).
+pub fn plane_ac_power(
+    p: &PlaneParams,
+    sun: SunPosition,
+    w: Weather,
+    day_of_year: u32,
+    beam_factor: f64,
+) -> f64 {
+    (plane_dc_power(p, sun, w, day_of_year, beam_factor) * p.inverter_eff).clamp(0.0, p.ac_max)
+}
+
+/// Total AC power (W) of a system from per-plane DC power `dc` (same order as
+/// `planes`). Planes without an inverter id clip on their own; planes sharing
+/// an id are summed first and clipped once at their common `ac_max`.
+pub fn combine_ac(planes: &[PlaneParams], dc: &[f64]) -> f64 {
+    debug_assert_eq!(planes.len(), dc.len());
+    let mut total = 0.0;
+    // (inverter id, summed AC before clipping, limit); few inverters, so a Vec.
+    let mut shared: Vec<(u32, f64, f64)> = Vec::new();
+    for (p, &d) in planes.iter().zip(dc) {
+        let ac = d.max(0.0) * p.inverter_eff;
+        match p.inverter {
+            None => total += ac.min(p.ac_max),
+            Some(id) => match shared.iter_mut().find(|s| s.0 == id) {
+                Some(s) => s.1 += ac,
+                None => shared.push((id, ac, p.ac_max)),
+            },
+        }
+    }
+    total + shared.iter().map(|s| s.1.min(s.2)).sum::<f64>()
+}
+
+/// Total AC power (W) of all planes, unshaded.
+pub fn system_ac_power(planes: &[PlaneParams], sun: SunPosition, w: Weather, day_of_year: u32) -> f64 {
+    let dc: Vec<f64> = planes
+        .iter()
+        .map(|p| plane_dc_power(p, sun, w, day_of_year, 1.0))
+        .collect();
+    combine_ac(planes, &dc)
 }
 
 #[cfg(test)]
@@ -242,6 +330,101 @@ mod tests {
         );
         assert_eq!(shaded, clamped);
         assert_eq!(plane_ac_power(&p, sun(35.0), w, 172, 2.0), full);
+    }
+
+    #[test]
+    fn inverter_id_round_trips_and_is_optional() {
+        let p = plane();
+        assert_eq!(p.inverter, None);
+        assert!(!serde_json::to_string(&p).unwrap().contains("inverter\""));
+        let q: PlaneParams = serde_json::from_str(
+            r#"{"azimuth": 90, "tilt": 30, "pdc0": 400, "ac_max": 300, "inverter": 2, "label": "x"}"#,
+        )
+        .unwrap();
+        assert_eq!(q.inverter, Some(2));
+        let back: PlaneParams = serde_json::from_str(&serde_json::to_string(&q).unwrap()).unwrap();
+        assert_eq!(back, q);
+        assert_eq!(PlaneParams::new(180.0, 35.0, 400.0, 300.0), p);
+    }
+
+    #[test]
+    fn ac_is_dc_through_the_inverter() {
+        let mut p = plane();
+        p.ac_max = 1e9;
+        let w = weather(800.0, 700.0, 100.0, 15.0);
+        let dc = plane_dc_power(&p, sun(35.0), w, 172, 1.0);
+        assert!(dc > 0.0);
+        assert!((plane_ac_power(&p, sun(35.0), w, 172, 1.0) - dc * p.inverter_eff).abs() < 1e-9);
+        assert_eq!(plane_dc_power(&p, sun(100.0), w, 172, 1.0), 0.0);
+    }
+
+    #[test]
+    fn separate_inverters_clip_per_plane() {
+        let planes = [
+            PlaneParams::new(90.0, 30.0, 1000.0, 500.0),
+            PlaneParams::new(270.0, 30.0, 1000.0, 500.0),
+        ];
+        // 800 W DC on one plane, 100 W on the other.
+        let ac = combine_ac(&planes, &[800.0, 100.0]);
+        assert!((ac - (500.0 + 100.0 * 0.965)).abs() < 1e-9, "{ac}");
+        assert_eq!(combine_ac(&[], &[]), 0.0);
+        assert_eq!(
+            combine_ac(&planes, &[-5.0, 0.0]),
+            0.0,
+            "negative DC counts as zero"
+        );
+    }
+
+    #[test]
+    fn shared_inverter_clips_the_sum() {
+        let mut planes = vec![
+            PlaneParams::new(90.0, 30.0, 1000.0, 1000.0),
+            PlaneParams::new(270.0, 30.0, 1000.0, 1000.0),
+        ];
+        for p in &mut planes {
+            p.inverter = Some(0);
+        }
+        // Below the shared limit: plain sum.
+        assert!((combine_ac(&planes, &[300.0, 400.0]) - 700.0 * 0.965).abs() < 1e-9);
+        // Above it: one clip, although each plane alone is below the limit.
+        assert_eq!(combine_ac(&planes, &[800.0, 600.0]), 1000.0);
+        // A third plane on its own inverter adds separately.
+        planes.push(PlaneParams::new(180.0, 30.0, 500.0, 200.0));
+        assert_eq!(combine_ac(&planes, &[800.0, 600.0, 500.0]), 1200.0);
+    }
+
+    #[test]
+    fn system_power_equals_the_sum_without_shared_inverters() {
+        let w = weather(800.0, 700.0, 100.0, 15.0);
+        let planes = [
+            PlaneParams::new(135.0, 30.0, 2000.0, 1500.0),
+            PlaneParams::new(225.0, 20.0, 1500.0, 1000.0),
+        ];
+        let sum: f64 = planes
+            .iter()
+            .map(|p| plane_ac_power(p, sun(35.0), w, 172, 1.0))
+            .sum();
+        assert!((system_ac_power(&planes, sun(35.0), w, 172) - sum).abs() < 1e-9);
+    }
+
+    #[test]
+    fn validation() {
+        let mut planes = vec![
+            PlaneParams::new(90.0, 30.0, 1000.0, 1000.0),
+            PlaneParams::new(270.0, 30.0, 1000.0, 900.0),
+        ];
+        assert!(validate_planes(&planes).is_ok(), "separate inverters may differ");
+        planes[0].inverter = Some(1);
+        planes[1].inverter = Some(1);
+        let err = validate_planes(&planes).unwrap_err();
+        assert!(err.contains("inverter 1"), "{err}");
+        planes[1].ac_max = 1000.0;
+        assert!(validate_planes(&planes).is_ok());
+        planes[1].pdc0 = f64::NAN;
+        assert!(validate_planes(&planes).is_err());
+        planes[1].pdc0 = -1.0;
+        assert!(validate_planes(&planes).is_err());
+        assert!(validate_planes(&[]).is_ok());
     }
 
     #[test]

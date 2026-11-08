@@ -57,13 +57,6 @@
           "mode_entity": "Compare with an existing mode entity (optional)"
         }
       },
-      "solar": {
-        "title": "Solar planes",
-        "description": "Paste a JSON list of planes (azimuth, tilt, pdc0, ac_max), or the output of `vulpes-cli calibrate-solar`.",
-        "data": {
-          "planes": "Planes (JSON)"
-        }
-      },
       "compare": {
         "title": "Compare with {entity}",
         "description": "For each Vulpes mode, choose the state of {entity} that means the same. Leave empty if there is none; that state then counts as disagreeing with the plan.",
@@ -74,11 +67,56 @@
           "idle": "Battery idle",
           "discharge": "Discharge to grid"
         }
+      },
+      "solar": {
+        "title": "Solar arrays",
+        "description": "Describe your solar panels. Rough values are fine: calibration refines them from your history.{calibration}",
+        "menu_options": {
+          "solar_apply": "Apply calibration",
+          "solar_system": "Set up arrays (recommended)",
+          "solar_json": "Paste plane JSON (advanced: microinverters, several inverters)"
+        }
+      },
+      "solar_system": {
+        "title": "Solar inverter",
+        "description": "Group your panels into arrays: panels with the same direction and tilt. All arrays share one inverter. After setup, Vulpes compares these values with your solar history and proposes corrections: it does so once by itself, and any time you press **Calibrate solar** on the Vulpes EMS device. Map each array's string power sensor for the best result. Apply the result under Configure → Solar arrays.",
+        "data": {
+          "array_count": "Number of arrays",
+          "inverter_ac_w": "Inverter AC power limit"
+        },
+        "data_description": {
+          "array_count": "Usually one per roof side, or one per inverter input (MPPT).",
+          "inverter_ac_w": "The maximum AC output on the inverter's data sheet. For a hybrid inverter with a battery on the DC side, use the maximum PV input power instead: solar can then exceed the AC output while it charges the battery."
+        }
+      },
+      "solar_array": {
+        "title": "Solar array {index} of {count}",
+        "description": "Rough values are fine; calibration corrects them later.",
+        "data": {
+          "direction": "Direction the panels face",
+          "tilt": "Tilt",
+          "kwp": "Peak power",
+          "power_entity": "String power sensor (optional)"
+        },
+        "data_description": {
+          "direction": "Pick a compass direction or type degrees clockwise from north (180 = south).",
+          "tilt": "Degrees from horizontal: 0 = flat, 90 = vertical.",
+          "kwp": "Number of panels × watt-peak per panel, in kWp.",
+          "power_entity": "The inverter's DC power sensor for the input (MPPT) this array is connected to. With it, calibration can fit this array's direction and tilt; without it, only the total size is corrected."
+        }
+      },
+      "solar_json": {
+        "title": "Solar planes (JSON)",
+        "description": "Paste a JSON list of planes (azimuth, tilt, pdc0 in W, ac_max in W, optionally inverter), or the output of `vulpes-cli calibrate-solar`.",
+        "data": {
+          "planes": "Planes (JSON)"
+        }
       }
     },
     "error": {
       "invalid_planes": "Invalid planes JSON: each plane needs azimuth, tilt, pdc0 and ac_max.",
-      "no_modes": "Enable at least one mode."
+      "no_modes": "Enable at least one mode.",
+      "invalid_direction": "Pick a direction, or enter degrees between 0 and 360."
     },
     "abort": {
       "single_instance_allowed": "Vulpes EMS is already configured.",
@@ -122,12 +160,6 @@
           "mode_entity": "Compare with an existing mode entity (optional)"
         }
       },
-      "solar": {
-        "title": "Solar planes",
-        "data": {
-          "planes": "Planes (JSON)"
-        }
-      },
       "compare": {
         "title": "Compare with {entity}",
         "description": "For each Vulpes mode, choose the state of {entity} that means the same. Leave empty if there is none; that state then counts as disagreeing with the plan.",
@@ -138,14 +170,60 @@
           "idle": "Battery idle",
           "discharge": "Discharge to grid"
         }
+      },
+      "solar": {
+        "title": "Solar arrays",
+        "description": "Describe your solar panels. Rough values are fine: calibration refines them from your history.{calibration}",
+        "menu_options": {
+          "solar_apply": "Apply calibration",
+          "solar_system": "Set up arrays (recommended)",
+          "solar_json": "Paste plane JSON (advanced: microinverters, several inverters)"
+        }
+      },
+      "solar_system": {
+        "title": "Solar inverter",
+        "description": "Group your panels into arrays: panels with the same direction and tilt. All arrays share one inverter. After setup, Vulpes compares these values with your solar history and proposes corrections: it does so once by itself, and any time you press **Calibrate solar** on the Vulpes EMS device. Map each array's string power sensor for the best result. Apply the result under Configure → Solar arrays.",
+        "data": {
+          "array_count": "Number of arrays",
+          "inverter_ac_w": "Inverter AC power limit"
+        },
+        "data_description": {
+          "array_count": "Usually one per roof side, or one per inverter input (MPPT).",
+          "inverter_ac_w": "The maximum AC output on the inverter's data sheet. For a hybrid inverter with a battery on the DC side, use the maximum PV input power instead: solar can then exceed the AC output while it charges the battery."
+        }
+      },
+      "solar_array": {
+        "title": "Solar array {index} of {count}",
+        "description": "Rough values are fine; calibration corrects them later.",
+        "data": {
+          "direction": "Direction the panels face",
+          "tilt": "Tilt",
+          "kwp": "Peak power",
+          "power_entity": "String power sensor (optional)"
+        },
+        "data_description": {
+          "direction": "Pick a compass direction or type degrees clockwise from north (180 = south).",
+          "tilt": "Degrees from horizontal: 0 = flat, 90 = vertical.",
+          "kwp": "Number of panels × watt-peak per panel, in kWp.",
+          "power_entity": "The inverter's DC power sensor for the input (MPPT) this array is connected to. With it, calibration can fit this array's direction and tilt; without it, only the total size is corrected."
+        }
+      },
+      "solar_json": {
+        "title": "Solar planes (JSON)",
+        "description": "Paste a JSON list of planes (azimuth, tilt, pdc0 in W, ac_max in W, optionally inverter), or the output of `vulpes-cli calibrate-solar`.",
+        "data": {
+          "planes": "Planes (JSON)"
+        }
       }
     },
     "error": {
       "invalid_planes": "Invalid planes JSON: each plane needs azimuth, tilt, pdc0 and ac_max.",
-      "no_modes": "Enable at least one mode."
+      "no_modes": "Enable at least one mode.",
+      "invalid_direction": "Pick a direction, or enter degrees between 0 and 360."
     },
     "abort": {
-      "no_mode_options": "The selected mode entity has no options."
+      "no_mode_options": "The selected mode entity has no options.",
+      "no_calibration": "There is no calibration result to apply. Press Calibrate solar on the Vulpes EMS device first."
     }
   },
   "selector": {
@@ -159,6 +237,18 @@
       "options": {
         "grid_setpoint": "Grid setpoint",
         "battery_power": "Battery power"
+      }
+    },
+    "direction": {
+      "options": {
+        "n": "North",
+        "ne": "North-east",
+        "e": "East",
+        "se": "South-east",
+        "s": "South",
+        "sw": "South-west",
+        "w": "West",
+        "nw": "North-west"
       }
     }
   },
@@ -191,6 +281,9 @@
       },
       "planned_grid_power": {
         "name": "Planned grid power"
+      },
+      "solar_calibration": {
+        "name": "Solar calibration improvement"
       }
     },
     "binary_sensor": {
@@ -199,6 +292,11 @@
       },
       "pv_off_planned": {
         "name": "Solar off planned"
+      }
+    },
+    "button": {
+      "calibrate_solar": {
+        "name": "Calibrate solar"
       }
     }
   }

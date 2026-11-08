@@ -48,7 +48,9 @@ from .const import (
     LOAD_HISTORY_DAYS,
     WHOLESALE_HISTORY_DAYS,
 )
+from .calibration import SolarCalibration
 from .modes import CONF_MODE_ENTITY, engine_modes, settings, mode_of_state, split_mode
+from .solar_setup import engine_planes
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -119,6 +121,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.agree = 0
         self.compared = 0
         self.agrees_now: bool | None = None
+        self.calibration = SolarCalibration(hass, entry)
 
     @property
     def cfg(self) -> dict[str, Any]:
@@ -203,7 +206,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "grid": {"max_import_w": float(cfg[CONF_MAX_IMPORT_W]), "max_export_w": float(cfg[CONF_MAX_EXPORT_W])},
             "modes": engine_modes(cfg),
             "soc_wh": soc_pct / 100.0 * cap_wh,
-            "planes": cfg[CONF_PLANES],
+            "planes": engine_planes(cfg[CONF_PLANES]),
             "load_history": load,
             "known_prices": known,
             "tariff": {"a": float(cfg[CONF_TARIFF_A]), "b": float(cfg[CONF_TARIFF_B])},

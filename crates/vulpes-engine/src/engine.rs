@@ -4,12 +4,12 @@ use chrono_tz::Tz;
 use std::collections::HashMap;
 use vulpes_load::{Country, ProfileForecaster, ProfileOptions};
 use vulpes_opt::{Problem, SlotInput, optimize};
-use vulpes_solar::model::{Weather, plane_ac_power};
+use vulpes_solar::model::{Weather, system_ac_power, validate_planes};
 use vulpes_solar::sun_position;
 use vulpes_sources::open_meteo::WeatherSeries;
 use vulpes_sources::{Location as SrcLocation, open_meteo};
 
-const WEATHER_VARS: &[&str] = &[
+pub(crate) const WEATHER_VARS: &[&str] = &[
     "shortwave_radiation",
     "direct_normal_irradiance",
     "diffuse_radiation",
@@ -39,7 +39,7 @@ fn fetch_weather(req: &PlanRequest) -> Result<HashMap<i64, WeatherSlot>> {
 
 /// Combine per-model series into one weather slot per start time: the mean
 /// over the models that have all variables at that time.
-fn average_models(series: Vec<WeatherSeries>) -> HashMap<i64, WeatherSlot> {
+pub(crate) fn average_models(series: Vec<WeatherSeries>) -> HashMap<i64, WeatherSlot> {
     // (start, model) -> [ghi, dni, dhi, temp, wind]
     let mut per: HashMap<(i64, String), [Option<f64>; 5]> = HashMap::new();
     for s in series {
@@ -94,6 +94,7 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
     if req.step_s <= 0 || req.step_s % 900 != 0 {
         return Err(Error::Request("step_s must be a positive multiple of 900".into()));
     }
+    validate_planes(&req.planes).map_err(Error::Request)?;
     let tz: Tz = req
         .timezone
         .parse()
@@ -125,11 +126,7 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
                     temp_air: w.temp_air,
                     wind_speed: w.wind_speed,
                 };
-                total += req
-                    .planes
-                    .iter()
-                    .map(|p| plane_ac_power(p, sun, wx, doy, 1.0))
-                    .sum::<f64>();
+                total += system_ac_power(&req.planes, sun, wx, doy);
             }
             Some(total / ws.len() as f64)
         })
@@ -329,18 +326,7 @@ mod tests {
                 m("Discharging", Behaviour::GridSetpoint { w: -3000.0 }),
             ],
             soc_wh: 5000.0,
-            planes: vec![PlaneParams {
-                azimuth: 180.0,
-                tilt: 35.0,
-                pdc0: 3000.0,
-                ac_max: 2800.0,
-                inverter_eff: 0.965,
-                gamma: -0.004,
-                iam_b0: 0.05,
-                albedo: 0.2,
-                u0: 25.0,
-                u1: 6.84,
-            }],
+            planes: vec![PlaneParams::new(180.0, 35.0, 3000.0, 2800.0)],
             weather_models: vec![],
             load_history: (0..(24 * 30))
                 .map(|h| (now - 30 * 86_400 + h * 3600, 400.0))
@@ -381,6 +367,28 @@ mod tests {
             "{:?}",
             &resp.slots[..24]
         );
+    }
+
+    #[test]
+    fn planes_on_a_shared_inverter_clip_together() {
+        let mut r = request(1_781_000_000);
+        // East and west, each 3 kWp; separate 2 kW inverters vs one shared 2 kW inverter.
+        r.planes = vec![
+            PlaneParams::new(90.0, 35.0, 3000.0, 2000.0),
+            PlaneParams::new(270.0, 35.0, 3000.0, 2000.0),
+        ];
+        let separate = plan(&r).unwrap();
+        for p in &mut r.planes {
+            p.inverter = Some(0);
+        }
+        let shared = plan(&r).unwrap();
+        let peak = |resp: &PlanResponse| resp.slots.iter().map(|s| s.pv_w).fold(0.0, f64::max);
+        assert!(peak(&separate) > 2000.0, "{}", peak(&separate));
+        assert!(peak(&shared) <= 2000.0 + 1e-9, "{}", peak(&shared));
+        assert!(shared.summary.pv_kwh_24h < separate.summary.pv_kwh_24h);
+        r.planes[1].ac_max = 2500.0;
+        let err = plan(&r).unwrap_err().to_string();
+        assert!(err.contains("same ac_max"), "{err}");
     }
 
     #[test]

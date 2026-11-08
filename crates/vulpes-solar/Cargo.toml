@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 vulpes-core.workspace = true
 serde.workspace = true
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 serde_json = "1"

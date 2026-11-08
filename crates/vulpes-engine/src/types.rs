@@ -113,3 +113,69 @@ pub struct PlanResponse {
     pub slots: Vec<SlotPlan>,
     pub warnings: Vec<String>,
 }
+
+pub use vulpes_solar::calibrate::Score;
+
+/// Calibrate the PV planes from measured history (see `docs/solar.md`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalibrateRequest {
+    pub location: Location,
+    /// Current planes: the starting point, and the baseline the proposal is scored against.
+    pub planes: Vec<PlaneParams>,
+    /// Per plane, in the same order: hourly mean DC power `(hour_start, W)` of
+    /// the string that feeds only that plane. An empty list = not measured.
+    #[serde(default)]
+    pub strings: Vec<Vec<(i64, f64)>>,
+    /// Hourly mean AC power `(hour_start, W)` of the whole PV system.
+    #[serde(default)]
+    pub total: Vec<(i64, f64)>,
+    #[serde(default = "default_models")]
+    pub weather_models: Vec<String>,
+    /// Short-lead weather for fitting (tests, offline use); otherwise fetched
+    /// from the Open-Meteo historical-forecast API.
+    #[serde(default)]
+    pub weather: Option<Vec<WeatherSlot>>,
+    /// Day-ahead weather for scoring; otherwise fetched from the Open-Meteo
+    /// previous-runs API (`_previous_day1`).
+    #[serde(default)]
+    pub weather_day_ahead: Option<Vec<WeatherSlot>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FitMethod {
+    /// Orientation and capacity fitted to the plane's own string power.
+    String,
+    /// Capacity scaled to match the system total; orientation as entered.
+    TotalScale,
+    /// Not enough data: kept as entered.
+    Unchanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PlaneFit {
+    pub method: FitMethod,
+    /// Clear hours the fit used.
+    pub hours: usize,
+    /// Fit error on those hours (W).
+    pub rmse_w: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CalibrateResponse {
+    pub version: String,
+    /// Proposed planes, same order as the request.
+    pub planes: Vec<PlaneParams>,
+    pub fits: Vec<PlaneFit>,
+    /// Hourly forecast error of the current and the proposed planes, with
+    /// day-ahead weather. `None` without a measurement to score against.
+    pub score_current: Option<Score>,
+    pub score_proposed: Option<Score>,
+    /// Whether the scores are on held-out weeks (fit on even ISO weeks, scored
+    /// on odd ones). False when there was too little data to split.
+    pub held_out: bool,
+    /// Measured data range used, `[from, to)` in Unix seconds.
+    pub from: i64,
+    pub to: i64,
+    pub warnings: Vec<String>,
+}

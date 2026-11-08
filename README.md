@@ -13,7 +13,7 @@ vulpes-ems does two things:
 
 | Area | Approach |
 |---|---|
-| Solar | Open-Meteo multi-model GHI/DNI/DHI → solar position (SPA) → Perez transposition per plane → temperature/inverter model. Plane geometry and shading are auto-calibrated per panel group. A GBDT residual model and a weather-station nowcast correct the result. P10/P50/P90 come from the model ensemble. |
+| Solar | Open-Meteo multi-model GHI/DNI/DHI → solar position (SPA) → Perez transposition per plane → temperature/inverter model. Arrays are entered roughly (direction, tilt, kWp) and calibrated from Home Assistant history, per string when the inverter reports per-MPPT power. Arrays on one inverter share its limit. A GBDT residual model and a weather-station nowcast correct the result. P10/P50/P90 come from the model ensemble. |
 | Load | Weighted similar-day profile + GBDT residual (calendar, temperature, lags). Heating loads such as AC get a separate model. |
 | Price | Day-ahead wholesale forecast (ENTSO-E fundamentals: wind, solar, load; plus gas) with an auto-fitted consumer tariff. Known published prices always take precedence. |
 | Optimizer | Dynamic programming over slot × SOC × mode. The objective is import cost − export revenue + battery wear − terminal SOC value. A probabilistic night-reserve constraint guards against running empty. |

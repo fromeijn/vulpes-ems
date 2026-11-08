@@ -20,6 +20,15 @@ fn plan(py: Python<'_>, request_json: String) -> PyResult<String> {
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Calibrate solar planes from a JSON `CalibrateRequest`; returns a JSON
+/// `CalibrateResponse`. Runs without the GIL (it fetches archived weather and
+/// takes a few seconds of CPU).
+#[pyfunction]
+fn calibrate_solar(py: Python<'_>, request_json: String) -> PyResult<String> {
+    py.allow_threads(|| vulpes_engine::calibrate_json(&request_json))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 /// Hourly NL day-ahead wholesale prices `(hour_start, EUR/kWh excl. VAT)` from
 /// EnergyZero for an inclusive date range `YYYY-MM-DD`.
 #[pyfunction]
@@ -38,6 +47,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(quarter_hour_floor, m)?)?;
     m.add_function(wrap_pyfunction!(plan, m)?)?;
+    m.add_function(wrap_pyfunction!(calibrate_solar, m)?)?;
     m.add_function(wrap_pyfunction!(energyzero_hourly, m)?)?;
     Ok(())
 }

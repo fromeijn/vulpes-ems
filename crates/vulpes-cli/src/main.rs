@@ -99,6 +99,37 @@ enum Cmd {
         #[arg(long, default_value_t = 10.0)]
         shading_prior: f64,
     },
+    /// Calibrate a string-inverter system (what the Home Assistant integration
+    /// runs): fits each plane to its string's DC power, or scales all planes to
+    /// the total, and scores the result on held-out weeks. Fetches weather.
+    CalibrateSystem {
+        #[arg(long, allow_hyphen_values = true)]
+        lat: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        lon: f64,
+        #[arg(long)]
+        from: NaiveDate,
+        #[arg(long)]
+        to: NaiveDate,
+        /// JSON list of planes as entered (azimuth, tilt, pdc0, ac_max, inverter).
+        #[arg(long)]
+        planes: PathBuf,
+        /// Per plane, in order: the series with its string's DC power; `-` for none.
+        #[arg(long, value_delimiter = ',')]
+        strings: Vec<String>,
+        /// Series with the total PV output (hourly energy or mean power).
+        #[arg(long)]
+        total: Option<String>,
+        #[arg(
+            long,
+            value_delimiter = ',',
+            default_value = "knmi_harmonie_arome_netherlands,icon_d2"
+        )]
+        models: Vec<String>,
+        /// Write the proposed planes (JSON) here.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Evaluate daily PV forecasts against actuals and the Solar Forecast ML benchmark.
     EvalSolar {
         #[arg(long, allow_hyphen_values = true)]
@@ -302,6 +333,40 @@ fn main() -> Result<()> {
             weeks,
             no_shading,
         } => solar::evaluate(&store, lat, lon, from, to, &planes, lead_days, weeks, !no_shading),
+        Cmd::CalibrateSystem {
+            lat,
+            lon,
+            from,
+            to,
+            planes,
+            strings,
+            total,
+            models,
+            out,
+        } => {
+            let text =
+                std::fs::read_to_string(&planes).with_context(|| format!("reading {}", planes.display()))?;
+            let planes: Vec<vulpes_solar::PlaneParams> = serde_json::from_str(&text)?;
+            let inputs = solar::SystemInputs {
+                lat,
+                lon,
+                from,
+                to,
+                strings: &strings,
+                total: total.as_deref(),
+                models,
+            };
+            let req = solar::system_request(&store, planes, &inputs)?;
+            let resp = vulpes_engine::calibrate(&req)?;
+            for line in solar::system_report(&req.planes, &resp) {
+                println!("{line}");
+            }
+            if let Some(out) = out {
+                std::fs::write(&out, serde_json::to_string_pretty(&resp.planes)?)?;
+                println!("written to {}", out.display());
+            }
+            Ok(())
+        }
         Cmd::BuildLoad {
             from,
             grid_import,

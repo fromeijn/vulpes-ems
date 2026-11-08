@@ -12,7 +12,7 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower
+from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -109,9 +109,11 @@ async def async_setup_entry(
     compare = bool(coordinator.cfg.get(CONF_MODE_ENTITY))
     if not compare:
         remove_stale(hass, entry, "sensor", {"agreement_today"})
-    async_add_entities(
+    entities: list[SensorEntity] = [
         VulpesSensor(coordinator, entry, d) for d in SENSORS if compare or d.key != "agreement_today"
-    )
+    ]
+    entities.append(SolarCalibrationSensor(coordinator, entry))
+    async_add_entities(entities)
 
 
 class VulpesSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
@@ -167,3 +169,47 @@ class VulpesSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
         if key == "agreement_today":
             return {"compared": self.coordinator.compared, "agreed": self.coordinator.agree}
         return None
+
+
+class SolarCalibrationSensor(SensorEntity):
+    """How much the latest solar calibration improves the forecast (%), with the proposal."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "solar_calibration"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_suggested_display_precision = 0
+    _unrecorded_attributes = frozenset({"proposed", "fits", "score_current", "score_proposed", "warnings"})
+
+    def __init__(self, coordinator: VulpesCoordinator, entry: VulpesConfigEntry) -> None:
+        self._calibration = coordinator.calibration
+        self._attr_unique_id = f"{entry.entry_id}_solar_calibration"
+        self._attr_device_info = device_info(entry)
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(self._calibration.async_add_listener(self.async_write_ha_state))
+
+    @property
+    def native_value(self) -> float | None:
+        return self._calibration.improvement()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        c = self._calibration
+        attrs: dict[str, Any] = {"status": c.status, "last_run": c.last_run}
+        if c.error:
+            attrs["error"] = c.error
+        result = c.result
+        if result:
+            attrs.update(
+                held_out=result.get("held_out"),
+                proposed=[
+                    {"azimuth": round(p["azimuth"]), "tilt": round(p["tilt"]), "kwp": round(p["pdc0"] / 1000, 2)}
+                    for p in result["planes"]
+                ],
+                fits=result.get("fits"),
+                score_current=result.get("score_current"),
+                score_proposed=result.get("score_proposed"),
+                warnings=result.get("warnings"),
+            )
+        return attrs

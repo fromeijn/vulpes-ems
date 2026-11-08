@@ -3,12 +3,13 @@
 //! Machine-learned corrections are layered on top in later phases.
 
 pub mod calibrate;
+pub mod hours;
 pub mod irradiance;
 pub mod model;
 pub mod shading;
 pub mod solpos;
 
-pub use model::{PlaneParams, Weather, plane_ac_power};
+pub use model::{PlaneParams, Weather, combine_ac, plane_ac_power, plane_dc_power, system_ac_power};
 pub use solpos::{SunPosition, sun_position};
 
 /// Synthetic inputs shared by the unit tests.
@@ -22,18 +23,7 @@ pub(crate) mod testdata {
     pub const START: i64 = 1_750_000_000 - 1_750_000_000 % 3600;
 
     pub fn plane(azimuth: f64, tilt: f64, pdc0: f64, ac_max: f64) -> PlaneParams {
-        PlaneParams {
-            azimuth,
-            tilt,
-            pdc0,
-            ac_max,
-            inverter_eff: 0.965,
-            gamma: -0.004,
-            iam_b0: 0.05,
-            albedo: 0.2,
-            u0: 25.0,
-            u1: 6.84,
-        }
+        PlaneParams::new(azimuth, tilt, pdc0, ac_max)
     }
 
     /// Clear-sky-ish hours at 52° N, 5° E with the sun above 10° elevation.

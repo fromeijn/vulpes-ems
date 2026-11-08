@@ -5,9 +5,11 @@
 //! The API is JSON in / JSON out ([`plan_json`]) so bindings stay thin and
 //! requests can be saved and replayed for debugging.
 
+mod calibrate;
 mod engine;
 mod types;
 
+pub use calibrate::calibrate;
 pub use engine::plan;
 pub use types::*;
 
@@ -27,5 +29,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub fn plan_json(request: &str) -> Result<String> {
     let req: PlanRequest = serde_json::from_str(request).map_err(|e| Error::Request(e.to_string()))?;
     let resp = plan(&req)?;
+    serde_json::to_string(&resp).map_err(|e| Error::Request(e.to_string()))
+}
+
+/// JSON entry point: `request` is a [`CalibrateRequest`], the result a [`CalibrateResponse`].
+pub fn calibrate_json(request: &str) -> Result<String> {
+    let req: CalibrateRequest = serde_json::from_str(request).map_err(|e| Error::Request(e.to_string()))?;
+    let resp = calibrate(&req)?;
     serde_json::to_string(&resp).map_err(|e| Error::Request(e.to_string()))
 }

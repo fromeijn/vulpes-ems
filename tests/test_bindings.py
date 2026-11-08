@@ -92,3 +92,40 @@ def test_energyzero_rejects_bad_dates_before_any_request():
         vulpes_ems.energyzero_hourly("2026-13-01", "2026-01-02")
     with pytest.raises(ValueError, match="bad date"):
         vulpes_ems.energyzero_hourly("2026-01-01", "tomorrow")
+
+
+def test_calibrate_solar_with_supplied_weather():
+    # Two days of flat weather and a total that matches nothing in particular:
+    # too few clear hours, so the planes come back unchanged with a warning.
+    start = NOW - NOW % 86_400
+    weather = [
+        {"start": start + k * 900, "ghi": 300, "dni": 200, "dhi": 150, "temp_air": 15, "wind_speed": 2}
+        for k in range(2 * 96)
+    ]
+    planes = [{"azimuth": 90, "tilt": 30, "pdc0": 3000, "ac_max": 4000, "inverter": 0, "power_entity": "sensor.x"}]
+    req = {
+        "location": {"lat": 52.0, "lon": 5.0},
+        "planes": planes,
+        "total": [[start + h * 3600, 500.0] for h in range(48)],
+        "weather": weather,
+        "weather_day_ahead": weather,
+    }
+    resp = json.loads(vulpes_ems.calibrate_solar(json.dumps(req)))
+    assert resp["version"] == vulpes_ems.__version__
+    assert resp["planes"][0]["azimuth"] == 90 and resp["planes"][0]["inverter"] == 0
+    assert "power_entity" not in resp["planes"][0]
+    assert resp["fits"][0]["method"] == "unchanged"
+    assert any("clear hours" in w for w in resp["warnings"])
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "{",
+        json.dumps({"location": {"lat": 52.0, "lon": 5.0}, "planes": []}),
+        json.dumps({"location": {"lat": 52.0, "lon": 5.0}, "planes": [{"azimuth": 1, "tilt": 2, "pdc0": 3, "ac_max": 4}]}),
+    ],
+)
+def test_calibrate_solar_errors_raise_value_error(payload):
+    with pytest.raises(ValueError):
+        vulpes_ems.calibrate_solar(payload)

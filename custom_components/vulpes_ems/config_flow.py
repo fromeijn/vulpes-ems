@@ -1,4 +1,4 @@
-"""Config flow for Vulpes EMS: sources, battery, tariff, modes, comparison, solar planes."""
+"""Config flow for Vulpes EMS: sources, battery, tariff, modes, comparison, solar arrays."""
 
 from __future__ import annotations
 
@@ -50,6 +50,23 @@ from .modes import (
     POWER_CONTROLS,
     enabled_modes,
     settings,
+)
+from .solar_setup import (
+    CONF_ARRAY_COUNT,
+    CONF_DIRECTION,
+    CONF_INVERTER_W,
+    CONF_KWP,
+    CONF_POWER_ENTITY,
+    CONF_SOLAR_SETUP,
+    CONF_TILT,
+    DEFAULT_ARRAY,
+    DIRECTIONS,
+    MAX_ARRAYS,
+    apply_proposal,
+    fits_form,
+    form_defaults,
+    plane_from_array,
+    summarize,
 )
 
 _SENSORS = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", multiple=True))
@@ -192,13 +209,42 @@ def parse_planes(text: str) -> list[dict[str, Any]]:
     return data
 
 
-def _solar_schema(d: dict[str, Any]) -> vol.Schema:
+def _solar_json_schema(d: dict[str, Any]) -> vol.Schema:
     default = json.dumps(d.get(CONF_PLANES, []), indent=1) if d.get(CONF_PLANES) else ""
     return vol.Schema(
         {
             vol.Required(CONF_PLANES, default=default): selector.TextSelector(
                 selector.TextSelectorConfig(multiline=True)
             )
+        }
+    )
+
+
+def _solar_system_schema(count: int, inverter_w: float) -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Required(CONF_ARRAY_COUNT, default=count): _num(1, MAX_ARRAYS, 1),
+            vol.Required(CONF_INVERTER_W, default=inverter_w): _num(100, 100000, 1, "W"),
+        }
+    )
+
+
+def _solar_array_schema(d: dict[str, Any]) -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Required(CONF_DIRECTION, default=str(d.get(CONF_DIRECTION, "s"))): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=list(DIRECTIONS),
+                    custom_value=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                    translation_key=CONF_DIRECTION,
+                )
+            ),
+            vol.Required(CONF_TILT, default=d.get(CONF_TILT, 35)): _num(0, 90, 1, "°"),
+            vol.Required(CONF_KWP, default=d.get(CONF_KWP, 4.0)): _num(0.05, 100, 0.01, "kWp"),
+            vol.Optional(CONF_POWER_ENTITY, description={"suggested_value": d.get(CONF_POWER_ENTITY)}): (
+                selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", device_class="power"))
+            ),
         }
     )
 
@@ -255,7 +301,63 @@ class _Steps:
             description_placeholders={"entity": self.data[CONF_MODE_ENTITY]},
         )
 
+    def _calibration(self) -> Any:
+        """The solar calibration of the loaded entry (options flow only)."""
+        return None
+
     async def async_step_solar(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        options = ["solar_system", "solar_json"]
+        placeholders = {"calibration": ""}
+        calibration = self._calibration()
+        proposal = calibration.proposal if calibration else None
+        if proposal:
+            options.insert(0, "solar_apply")
+            placeholders["calibration"] = "\n\n**Calibration result**\n\n" + summarize(
+                self.data.get(CONF_PLANES, []), proposal
+            )
+        return self.async_show_menu(  # type: ignore[attr-defined]
+            step_id="solar", menu_options=options, description_placeholders=placeholders
+        )
+
+    async def async_step_solar_system(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        count, inverter_w, arrays = form_defaults(self.data.get(CONF_PLANES, []))
+        if user_input is not None:
+            self._array_count = int(user_input[CONF_ARRAY_COUNT])
+            self._inverter_w = float(user_input[CONF_INVERTER_W])
+            self._prefill = arrays
+            self._new_planes: list[dict[str, Any]] = []
+            return await self.async_step_solar_array()
+        return self.async_show_form(  # type: ignore[attr-defined]
+            step_id="solar_system", data_schema=_solar_system_schema(count, inverter_w)
+        )
+
+    async def async_step_solar_array(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        i = len(self._new_planes)
+        planes = self.data.get(CONF_PLANES, [])
+        existing = planes[i] if fits_form(planes) and i < len(planes) else None
+        defaults = self._prefill[i] if i < len(self._prefill) else DEFAULT_ARRAY
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                plane = plane_from_array(user_input, self._inverter_w, existing)
+            except ValueError:
+                errors[CONF_DIRECTION] = "invalid_direction"
+                defaults = user_input
+            else:
+                self._new_planes.append(plane)
+                if len(self._new_planes) < self._array_count:
+                    return await self.async_step_solar_array()
+                self.data[CONF_PLANES] = self._new_planes
+                self.data[CONF_SOLAR_SETUP] = "form"
+                return self._finish()
+        return self.async_show_form(  # type: ignore[attr-defined]
+            step_id="solar_array",
+            data_schema=_solar_array_schema(defaults),
+            errors=errors,
+            description_placeholders={"index": str(i + 1), "count": str(self._array_count)},
+        )
+
+    async def async_step_solar_json(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
             try:
@@ -263,8 +365,20 @@ class _Steps:
             except (ValueError, KeyError, TypeError):
                 errors[CONF_PLANES] = "invalid_planes"
             else:
+                self.data[CONF_SOLAR_SETUP] = "json"
                 return self._finish()
-        return self.async_show_form(step_id="solar", data_schema=_solar_schema(self.data), errors=errors)  # type: ignore[attr-defined]
+        return self.async_show_form(  # type: ignore[attr-defined]
+            step_id="solar_json", data_schema=_solar_json_schema(self.data), errors=errors
+        )
+
+    async def async_step_solar_apply(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        calibration = self._calibration()
+        proposal = calibration.proposal if calibration else None
+        if not proposal:
+            return self.async_abort(reason="no_calibration")  # type: ignore[attr-defined]
+        self.data[CONF_PLANES] = apply_proposal(self.data.get(CONF_PLANES, []), proposal)
+        await calibration.async_mark_applied(self.data[CONF_PLANES])
+        return self._finish()
 
 
 class VulpesEmsConfigFlow(_Steps, ConfigFlow, domain=DOMAIN):
@@ -307,3 +421,7 @@ class VulpesEmsOptionsFlow(_Steps, OptionsFlow):
 
     def _finish(self) -> ConfigFlowResult:
         return self.async_create_entry(data=self.data)
+
+    def _calibration(self) -> Any:
+        coordinator = getattr(self.config_entry, "runtime_data", None)
+        return getattr(coordinator, "calibration", None)

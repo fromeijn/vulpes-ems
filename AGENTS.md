@@ -17,7 +17,7 @@ A home energy manager for Home Assistant. A Rust core does the forecasting (sola
 | `crates/vulpes-price` | Tariff fit |
 | `crates/vulpes-ml` | Weighted ridge regression, recency weights |
 | `crates/vulpes-opt` | Slot physics (`step`) and DP optimizer |
-| `crates/vulpes-engine` | JSON request → forecasts → plan (what the integration calls) |
+| `crates/vulpes-engine` | JSON request → forecasts → plan, and solar calibration (what the integration calls) |
 | `crates/vulpes-py` | PyO3 bindings, built with maturin (`vulpes_ems._core`) |
 | `crates/vulpes-cli` | Backfill, calibration, evaluation and replay tools |
 | `custom_components/vulpes_ems` | Home Assistant integration |
@@ -42,7 +42,7 @@ python3 -m venv .venv && .venv/bin/pip install pytest maturin ziglang
 
 - **Rust edition 2024**, small crates, no async. HTTP uses `ureq` with ring + webpki-roots. Don't use reqwest/rustls defaults: aws-lc-sys breaks the zig/musl cross-builds.
 - **Wheels are abi3 (cp313+)**, built for manylinux_2_28 and musllinux_1_2 on x86_64 and aarch64. Home Assistant Container runs Python 3.14 on Alpine (musl).
-- **Engine API is JSON in, JSON out** (`vulpes_engine::plan_json`, exposed as `vulpes_ems.plan`). Python releases the GIL and calls it in the executor.
+- **Engine API is JSON in, JSON out** (`vulpes_engine::plan_json` and `calibrate_json`, exposed as `vulpes_ems.plan` and `vulpes_ems.calibrate_solar`). Python releases the GIL and calls it in the executor.
 - **Units:** power in W, energy in Wh (kWh at the HA boundary), prices in currency/kWh, timestamps in Unix seconds UTC. 15-minute slots start on the quarter hour.
 - **Signs:** battery power positive = charging; grid power positive = import.
 - **Information-time discipline:** evaluation and replay code may only use data that was available at decision time. Day-ahead weather comes from the Open-Meteo previous-runs API (`_previous_day1`).
@@ -52,7 +52,8 @@ python3 -m venv .venv && .venv/bin/pip install pytest maturin ziglang
 - **Integration and engine move together:** the manifest pins `vulpes-ems==x.y.z` exactly. A change to the JSON request/response needs a new wheel *and* a new integration version, released together.
 - **Never change entity `unique_id`s.** Users would lose entity history, customisations and dashboards.
 - **No blocking work on HA's event loop:** calls into Rust and all network or recorder access run in the executor (`async_add_executor_job`, the recorder's own executor).
-- Keep `modes.py` free of Home Assistant imports so it stays testable in `tests/`.
+- Keep `modes.py` and `solar_setup.py` free of Home Assistant imports so they stay testable in `tests/`.
+- **Solar setup:** the array form stores engine planes with `inverter: 0` plus integration-only keys (`power_entity`), stripped by `engine_planes()` before any engine call. `solar_setup` in the settings is `form` or `json`; setups from before 0.3.0 have neither and are treated as JSON. Calibration results live in `.storage/vulpes_ems.<entry_id>.calibration` and are only applied by the user, through the options flow.
 - `strings.json` and `translations/en.json` must stay identical.
 - **Licensing:** MIT OR Apache-2.0. No per-file license headers.
 
@@ -133,6 +134,7 @@ All three must be green before a release.
 ## Known gaps and parked ideas
 
 - `GridLimits::max_import_w` isn't applied in `vulpes_opt::step`; only the export limit is.
+- **Hybrid inverters:** PV behind a DC-coupled battery is limited by the PV input, not the AC output. The form's inverter limit is a single number; a separate AC limit for (PV − battery charge) is not modelled.
 - **Per-phase limits:** a single-phase inverter is limited by its phase fuse together with the house load on that phase. Not modelled; parked until needed.
 - **HTTP timeout** is 60 s (`vulpes-sources/src/lib.rs`). A hanging API can delay the integration's first refresh, so it should probably be about 20 s.
 

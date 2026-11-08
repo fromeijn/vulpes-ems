@@ -7,8 +7,8 @@ use std::path::Path;
 use vulpes_core::Store;
 use vulpes_solar::calibrate::{FitOptions, GroupMember, HourInput, fit_group};
 use vulpes_solar::model::{PlaneParams, Weather};
-use vulpes_solar::shading::{ShadingMap, ShadingOptions, fit_shading, refit_pdc0, simulate_hours_shaded};
-use vulpes_solar::{SunPosition, sun_position};
+use vulpes_solar::shading::{ShadingMap, ShadingOptions, fit_shading, refit_pdc0};
+use vulpes_solar::{combine_ac, plane_dc_power};
 
 /// Split days by ISO week parity, for calibrating on one half and evaluating on the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -29,23 +29,7 @@ impl Weeks {
     }
 }
 
-/// Hourly model inputs built from a weather archive, keyed by hour start.
-pub(crate) struct HourlyInputs {
-    pub hours: Vec<i64>,
-    pub inputs: Vec<HourInput>,
-    /// Forecast clearness: hourly GHI / clear-sky GHI.
-    pub kt: Vec<f64>,
-}
-
-/// Haurwitz clear-sky GHI (W/m²).
-fn clear_sky_ghi(zenith: f64) -> f64 {
-    let cz = zenith.to_radians().cos();
-    if cz <= 0.0 {
-        0.0
-    } else {
-        1098.0 * cz * (-0.057 / cz).exp()
-    }
-}
+pub(crate) use vulpes_solar::hours::HourlyInputs;
 
 pub(crate) fn load_inputs(
     store: &Store,
@@ -70,57 +54,22 @@ pub(crate) fn load_inputs(
     if ghi.is_empty() {
         bail!("no weather archive for source '{source}' in range; run backfill-weather first");
     }
-    let mut out = HourlyInputs {
-        hours: Vec::new(),
-        inputs: Vec::new(),
-        kt: Vec::new(),
-    };
-    let mut h = from - from.rem_euclid(3600);
-    while h < to {
-        let mut ok = true;
-        let mut sun = [SunPosition {
-            zenith: 0.0,
-            azimuth: 0.0,
-        }; 4];
-        let mut weather = [Weather {
-            ghi: 0.0,
-            dni: 0.0,
-            dhi: 0.0,
-            temp_air: 0.0,
-            wind_speed: 0.0,
-        }; 4];
-        let (mut g_sum, mut cs_sum) = (0.0, 0.0);
-        for k in 0..4 {
-            let t = h + k as i64 * 900;
-            match (ghi.get(&t), dni.get(&t), dhi.get(&t), temp.get(&t), wind.get(&t)) {
-                (Some(&g), Some(&b), Some(&d), Some(&ta), Some(&ws)) => {
-                    sun[k] = sun_position((t + 450) as f64, lat, lon);
-                    weather[k] = Weather {
-                        ghi: g,
-                        dni: b,
-                        dhi: d,
-                        temp_air: ta,
-                        wind_speed: ws,
-                    };
-                    g_sum += g;
-                    cs_sum += clear_sky_ghi(sun[k].zenith);
-                }
-                _ => ok = false,
-            }
-        }
-        if ok {
-            let doy = DateTime::from_timestamp(h, 0).map(|d| d.ordinal()).unwrap_or(1);
-            out.hours.push(h);
-            out.inputs.push(HourInput {
-                sun,
-                weather,
-                day_of_year: doy,
-            });
-            out.kt.push(if cs_sum > 0.0 { g_sum / cs_sum } else { 0.0 });
-        }
-        h += 3600;
-    }
-    Ok(out)
+    let weather: HashMap<i64, Weather> = ghi
+        .iter()
+        .filter_map(|(t, &g)| {
+            Some((
+                *t,
+                Weather {
+                    ghi: g,
+                    dni: *dni.get(t)?,
+                    dhi: *dhi.get(t)?,
+                    temp_air: *temp.get(t)?,
+                    wind_speed: *wind.get(t)?,
+                },
+            ))
+        })
+        .collect();
+    Ok(HourlyInputs::build(&weather, lat, lon, from, to))
 }
 
 fn quantile(mut v: Vec<f64>, q: f64) -> f64 {
@@ -173,10 +122,7 @@ fn parse_panels(text: &str) -> Result<Vec<PanelSpec>> {
 fn clear_hours(data: &HourlyInputs, actual: &HashMap<i64, f64>, weeks: Weeks) -> (Vec<HourInput>, Vec<f64>) {
     let (mut inputs, mut y) = (Vec::new(), Vec::new());
     for (i, h) in data.hours.iter().enumerate() {
-        if let (true, Some(&a)) = (
-            data.kt[i] >= 0.65 && data.inputs[i].sun[2].elevation() > 10.0 && weeks.includes(*h),
-            actual.get(h),
-        ) {
+        if let (true, Some(&a)) = (data.is_clear(i) && weeks.includes(*h), actual.get(h)) {
             inputs.push(data.inputs[i].clone());
             y.push(a);
         }
@@ -222,18 +168,7 @@ fn calibrate_panels<'a>(
     // Panels that never reach their inverter limit cannot reveal it; they get
     // the highest limit seen (same inverter type assumed).
     let global_clip = prepared.iter().map(|p| p.clip_q).fold(0.0, f64::max);
-    let base = PlaneParams {
-        azimuth: 180.0,
-        tilt: 30.0,
-        pdc0: 295.0,
-        ac_max: global_clip,
-        inverter_eff: 0.965,
-        gamma: -0.004,
-        iam_b0: 0.05,
-        albedo: 0.2,
-        u0: 25.0,
-        u1: 6.84,
-    };
+    let base = PlaneParams::new(180.0, 30.0, 295.0, global_clip);
     let mut groups: Vec<&str> = Vec::new();
     for p in panels {
         if !groups.contains(&p.group.as_str()) {
@@ -366,6 +301,122 @@ fn utc_range(from: NaiveDate, to: NaiveDate) -> Result<(i64, i64)> {
     Ok((ts(from)?, ts(to)? + 86_400))
 }
 
+/// What `calibrate-system` reads from the store.
+pub(crate) struct SystemInputs<'a> {
+    pub lat: f64,
+    pub lon: f64,
+    pub from: NaiveDate,
+    pub to: NaiveDate,
+    /// Per plane: series key of its string DC power, or `-`.
+    pub strings: &'a [String],
+    pub total: Option<&'a str>,
+    pub models: Vec<String>,
+}
+
+/// Hourly values of a stored series as mean power (W): energy per hour
+/// (`sum` series in Wh/kWh) and means in W/kW are converted.
+fn hourly_watts(store: &Store, key: &str, from: i64, to: i64) -> Result<Vec<(i64, f64)>> {
+    let info = store
+        .summary()?
+        .into_iter()
+        .find(|s| s.key == key && s.step_s == 3600)
+        .with_context(|| format!("no hourly series '{key}' in the store"))?;
+    let scale = watts_scale(info.kind, &info.unit)
+        .with_context(|| format!("series '{key}': can't use unit '{}' as power", info.unit))?;
+    Ok(store
+        .samples(key, 3600, from, to)?
+        .into_iter()
+        .map(|(t, v)| (t, v * scale))
+        .collect())
+}
+
+/// Factor from a stored hourly value to mean power in W.
+fn watts_scale(kind: vulpes_core::SeriesKind, unit: &str) -> Option<f64> {
+    use vulpes_core::SeriesKind::{Mean, Sum};
+    match (kind, unit) {
+        (Mean, "W") | (Sum, "Wh") => Some(1.0),
+        (Mean, "kW") | (Sum, "kWh") => Some(1000.0),
+        (Mean, "MW") | (Sum, "MWh") => Some(1e6),
+        _ => None,
+    }
+}
+
+/// The engine's calibration request from stored series.
+pub(crate) fn system_request(
+    store: &Store,
+    planes: Vec<PlaneParams>,
+    inp: &SystemInputs<'_>,
+) -> Result<vulpes_engine::CalibrateRequest> {
+    let (from, to) = utc_range(inp.from, inp.to)?;
+    if !inp.strings.is_empty() && inp.strings.len() != planes.len() {
+        bail!(
+            "--strings needs one entry per plane ({}), `-` for none",
+            planes.len()
+        );
+    }
+    let strings = inp
+        .strings
+        .iter()
+        .map(|k| match k.as_str() {
+            "-" | "" => Ok(Vec::new()),
+            k => hourly_watts(store, k, from, to),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let total = match inp.total {
+        Some(k) => hourly_watts(store, k, from, to)?,
+        None => Vec::new(),
+    };
+    Ok(vulpes_engine::CalibrateRequest {
+        location: vulpes_engine::Location {
+            lat: inp.lat,
+            lon: inp.lon,
+        },
+        planes,
+        strings,
+        total,
+        weather_models: inp.models.clone(),
+        weather: None,
+        weather_day_ahead: None,
+    })
+}
+
+/// Human-readable lines for a calibration result.
+pub(crate) fn system_report(before: &[PlaneParams], r: &vulpes_engine::CalibrateResponse) -> Vec<String> {
+    let mut out = vec![format!(
+        "{:6} {:>15} {:>15} {:>13} {:>12} {:>6} {:>8}",
+        "plane", "azimuth", "tilt", "kWp", "method", "hours", "rmse(W)"
+    )];
+    for (i, ((b, a), f)) in before.iter().zip(&r.planes).zip(&r.fits).enumerate() {
+        out.push(format!(
+            "{:6} {:>6.0} → {:>6.0} {:>6.0} → {:>6.0} {:>5.2} → {:>5.2} {:>12} {:>6} {:>8.0}",
+            i + 1,
+            b.azimuth,
+            a.azimuth,
+            b.tilt,
+            a.tilt,
+            b.pdc0 / 1000.0,
+            a.pdc0 / 1000.0,
+            format!("{:?}", f.method).to_lowercase(),
+            f.hours,
+            f.rmse_w
+        ));
+    }
+    let line = |name: &str, s: &vulpes_engine::Score| {
+        format!(
+            "{name:9} MAE {:5.0} W  RMSE {:5.0} W  bias {:+5.0} W  ({} hours)",
+            s.mae_w, s.rmse_w, s.bias_w, s.hours
+        )
+    };
+    if let (Some(c), Some(p)) = (&r.score_current, &r.score_proposed) {
+        let what = if r.held_out { "held-out weeks" } else { "in-sample" };
+        out.push(format!("Hourly error with day-ahead weather ({what}):"));
+        out.push(format!("  {}", line("current", c)));
+        out.push(format!("  {}", line("proposed", p)));
+    }
+    out.extend(r.warnings.iter().map(|w| format!("warning: {w}")));
+    out
+}
+
 pub(crate) type Plane = (String, PlaneParams, Option<ShadingMap>);
 
 /// Load calibrated planes (and shading maps, unless disabled) written by `calibrate-solar`.
@@ -389,16 +440,29 @@ fn parse_planes(text: &str, shading: bool) -> Result<Vec<Plane>> {
         .collect()
 }
 
-/// Plant AC power (W, hourly mean) per hour start.
+/// Plant AC power (W, hourly mean) per hour start; planes on a shared
+/// inverter clip together.
 pub(crate) fn plant_hourly(planes: &[Plane], data: &HourlyInputs) -> HashMap<i64, f64> {
-    let per_plane: Vec<Vec<f64>> = planes
-        .iter()
-        .map(|(_, p, map)| simulate_hours_shaded(p, map.as_ref(), &data.inputs))
-        .collect();
+    let params: Vec<PlaneParams> = planes.iter().map(|p| p.1.clone()).collect();
     data.hours
         .iter()
-        .enumerate()
-        .map(|(i, &h)| (h, per_plane.iter().map(|v| v[i]).sum()))
+        .zip(&data.inputs)
+        .map(|(&h, inp)| {
+            let mean = (0..4)
+                .map(|k| {
+                    let dc: Vec<f64> = planes
+                        .iter()
+                        .map(|(_, p, map)| {
+                            let f = map.as_ref().map_or(1.0, |m| m.factor(inp.sun[k]));
+                            plane_dc_power(p, inp.sun[k], inp.weather[k], inp.day_of_year, f)
+                        })
+                        .collect();
+                    combine_ac(&params, &dc)
+                })
+                .sum::<f64>()
+                / 4.0;
+            (h, mean)
+        })
         .collect()
 }
 
@@ -622,6 +686,7 @@ pub(crate) fn evaluate(
 mod tests {
     use super::*;
     use vulpes_core::ForecastPoint;
+    use vulpes_solar::{SunPosition, sun_position};
 
     // 2026-06-21 00:00 UTC (a Sunday, ISO week 25).
     const DAY: i64 = 1_782_000_000;
@@ -632,14 +697,6 @@ mod tests {
         assert!(Weeks::Odd.includes(DAY) && !Weeks::Even.includes(DAY) && Weeks::All.includes(DAY));
         let next_week = DAY + 86_400; // Monday, week 26
         assert!(Weeks::Even.includes(next_week) && !Weeks::Odd.includes(next_week));
-    }
-
-    #[test]
-    fn haurwitz_clear_sky() {
-        assert!((clear_sky_ghi(0.0) - 1098.0 * (-0.057f64).exp()).abs() < 1e-9);
-        assert!(clear_sky_ghi(60.0) < clear_sky_ghi(30.0));
-        assert_eq!(clear_sky_ghi(90.0), 0.0);
-        assert_eq!(clear_sky_ghi(120.0), 0.0);
     }
 
     #[test]
@@ -733,6 +790,119 @@ mod tests {
         // Midday in June at 52° N: 400 W/m² is well below clear sky.
         assert!(d.kt[0] > 0.3 && d.kt[0] < 0.6, "{}", d.kt[0]);
         assert!(load_inputs(&store, "other", 52.0, 5.0, DAY, DAY + 86_400).is_err());
+    }
+
+    #[test]
+    fn units_to_watts() {
+        use vulpes_core::SeriesKind::{Mean, Sum};
+        assert_eq!(watts_scale(Sum, "kWh"), Some(1000.0));
+        assert_eq!(watts_scale(Sum, "Wh"), Some(1.0));
+        assert_eq!(watts_scale(Mean, "W"), Some(1.0));
+        assert_eq!(watts_scale(Mean, "kW"), Some(1000.0));
+        assert_eq!(watts_scale(Mean, "kWh"), None, "an energy level is not power");
+        assert_eq!(watts_scale(Sum, "W"), None);
+        assert_eq!(watts_scale(Mean, "%"), None);
+    }
+
+    fn system_store() -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .ensure_series("pv.str1", "W", vulpes_core::SeriesKind::Mean)
+            .unwrap();
+        store
+            .ensure_series("pv.total", "kWh", vulpes_core::SeriesKind::Sum)
+            .unwrap();
+        store
+            .ensure_series("soc", "%", vulpes_core::SeriesKind::Mean)
+            .unwrap();
+        store
+            .put_samples("pv.str1", 3600, &[(DAY + 3600 * 12, 1500.0)])
+            .unwrap();
+        store
+            .put_samples("pv.total", 3600, &[(DAY + 3600 * 12, 2.5)])
+            .unwrap();
+        store.put_samples("soc", 3600, &[(DAY, 50.0)]).unwrap();
+        store
+    }
+
+    fn system_inputs<'a>(strings: &'a [String], total: Option<&'a str>) -> SystemInputs<'a> {
+        let day = DateTime::from_timestamp(DAY, 0).unwrap().date_naive();
+        SystemInputs {
+            lat: 52.0,
+            lon: 5.0,
+            from: day,
+            to: day,
+            strings,
+            total,
+            models: vec!["icon_d2".into()],
+        }
+    }
+
+    #[test]
+    fn system_request_from_the_store() {
+        let store = system_store();
+        let planes = vec![
+            PlaneParams::new(90.0, 30.0, 3000.0, 4000.0),
+            PlaneParams::new(270.0, 30.0, 3000.0, 4000.0),
+        ];
+        let strings = vec!["pv.str1".to_string(), "-".to_string()];
+        let req = system_request(&store, planes.clone(), &system_inputs(&strings, Some("pv.total"))).unwrap();
+        assert_eq!(req.strings, vec![vec![(DAY + 3600 * 12, 1500.0)], vec![]]);
+        assert_eq!(req.total, vec![(DAY + 3600 * 12, 2500.0)], "kWh per hour → W");
+        assert_eq!(req.weather_models, vec!["icon_d2"]);
+        assert!(req.weather.is_none());
+        // Errors: wrong count, unknown series, unusable unit.
+        let one = vec!["pv.str1".to_string()];
+        assert!(system_request(&store, planes.clone(), &system_inputs(&one, None)).is_err());
+        let unknown = vec!["nope".to_string(), "-".to_string()];
+        assert!(system_request(&store, planes.clone(), &system_inputs(&unknown, None)).is_err());
+        assert!(system_request(&store, planes.clone(), &system_inputs(&[], Some("soc"))).is_err());
+        let none = system_request(&store, planes, &system_inputs(&[], None)).unwrap();
+        assert!(none.strings.is_empty() && none.total.is_empty());
+    }
+
+    #[test]
+    fn system_report_lines() {
+        use vulpes_engine::{CalibrateResponse, FitMethod, PlaneFit, Score};
+        let before = vec![PlaneParams::new(90.0, 30.0, 3000.0, 4000.0)];
+        let score = |rmse_w| Score {
+            hours: 100,
+            mae_w: 50.0,
+            rmse_w,
+            bias_w: -10.0,
+        };
+        let resp = CalibrateResponse {
+            version: "x".into(),
+            planes: vec![PlaneParams::new(97.0, 24.0, 3210.0, 4000.0)],
+            fits: vec![PlaneFit {
+                method: FitMethod::String,
+                hours: 80,
+                rmse_w: 35.0,
+            }],
+            score_current: Some(score(200.0)),
+            score_proposed: Some(score(120.0)),
+            held_out: true,
+            from: 0,
+            to: 0,
+            warnings: vec!["careful".into()],
+        };
+        let lines = system_report(&before, &resp);
+        assert!(
+            lines[1].contains("90 →     97") && lines[1].contains("3.00 →  3.21"),
+            "{}",
+            lines[1]
+        );
+        assert!(lines[1].contains("string"), "{}", lines[1]);
+        assert!(lines[2].contains("held-out"));
+        assert!(lines[4].contains("RMSE   120"), "{}", lines[4]);
+        assert_eq!(lines.last().unwrap(), "warning: careful");
+        let bare = CalibrateResponse {
+            score_current: None,
+            score_proposed: None,
+            warnings: vec![],
+            ..resp
+        };
+        assert_eq!(system_report(&before, &bare).len(), 2);
     }
 
     #[test]
