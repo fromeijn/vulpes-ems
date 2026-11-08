@@ -13,6 +13,12 @@
           "battery_charge": "Energy into the battery",
           "battery_discharge": "Energy out of the battery",
           "wholesale_source": "Wholesale price history (for prices not yet published)"
+        },
+        "data_description": {
+          "soc_entity": "A sensor with the battery's state of charge in % (0–100).",
+          "price_entity": "A sensor whose attributes list today's (and tomorrow's) prices with their start times, such as the Nord Pool, EnergyZero, Tibber or Zonneplan integrations provide.",
+          "grid_import": "Total energy taken from the grid (kWh, a meter reading that only goes up).",
+          "grid_export": "Total energy fed into the grid (kWh)."
         }
       },
       "battery": {
@@ -28,17 +34,29 @@
           "wear_cost": "Battery wear cost per kWh throughput",
           "max_import_w": "Maximum grid import",
           "max_export_w": "Maximum grid export"
+        },
+        "data_description": {
+          "capacity_kwh": "The usable capacity, not the nominal one: what the battery delivers from full to empty.",
+          "charge_eff": "One-way efficiency from the grid into the battery (0.95 = 95%). Round trip is charge × discharge efficiency.",
+          "discharge_eff": "One-way efficiency from the battery to the house or grid.",
+          "min_soc": "The lowest state of charge the battery may reach. Must be below the maximum.",
+          "wear_cost": "Cost of battery wear per kWh that goes through the battery. Vulpes only cycles the battery when the price difference beats this. Battery price ÷ (usable capacity × expected full cycles); 0.02–0.05 is typical.",
+          "max_import_w": "From the main fuse, for example 3 × 25 A × 230 V = 17250 W.",
+          "max_export_w": "The maximum power you may feed into the grid; often the same as the import limit."
         }
       },
       "tariff": {
         "title": "Tariff",
-        "description": "Prices for hours not yet published are estimated as a × wholesale + b. While net metering applies, export is paid at the import price. Otherwise export is paid as export a × wholesale + export b.",
+        "description": "Prices for hours not yet published are estimated as a × wholesale + b. While net metering applies, export is paid at the import price. Otherwise export is paid as export a × wholesale + export b. Dutch net metering (saldering) ends on 1 January 2027.",
         "data": {
           "tariff_a": "Import a (usually the VAT factor)",
           "tariff_b": "Import b (energy tax + markup, incl. VAT)",
           "net_metering": "Net metering (export paid at import price)",
           "export_a": "Export a",
           "export_b": "Export b"
+        },
+        "data_description": {
+          "net_metering": "Turn off once net metering no longer applies to you; in the Netherlands from 1 January 2027."
         }
       },
       "modes": {
@@ -116,33 +134,93 @@
     "error": {
       "invalid_planes": "Invalid planes JSON: each plane needs azimuth, tilt, pdc0 and ac_max.",
       "no_modes": "Enable at least one mode.",
-      "invalid_direction": "Pick a direction, or enter degrees between 0 and 360."
+      "invalid_direction": "Pick a direction, or enter degrees between 0 and 360.",
+      "soc_unavailable": "This sensor doesn't report a state of charge between 0 and 100 right now.",
+      "no_prices": "This sensor has no price list in its attributes (a list of items with a start time and a price).",
+      "grid_import_required": "Select at least one grid import statistic.",
+      "duplicate_statistic": "Selected more than once: {statistic}. Each statistic may appear in only one field.",
+      "no_statistics": "No hourly statistics in the last 60 days for: {statistic}. It needs a state_class and some history.",
+      "no_complete_hours": "There is no hour in the last 60 days in which all selected statistics have data, so the house load can't be computed.",
+      "soc_range": "The minimum state of charge must be below the maximum.",
+      "charge_w_too_high": "The charge power is above the maximum charge power (battery power) or the maximum grid import (grid setpoint).",
+      "discharge_w_too_high": "The discharge power is above the maximum discharge power (battery power) or the maximum grid export (grid setpoint).",
+      "no_mode_options": "This entity has no options to compare with."
     },
     "abort": {
       "single_instance_allowed": "Vulpes EMS is already configured.",
-      "no_mode_options": "The selected mode entity has no options."
+      "no_mode_options": "The selected mode entity lost its options during setup."
     }
   },
   "options": {
     "step": {
       "init": {
+        "title": "Vulpes EMS settings",
+        "description": "Pick what to change. Each section is saved on its own.",
+        "menu_options": {
+          "sources": "Data sources",
+          "battery": "Battery and grid",
+          "tariff": "Tariff",
+          "modes": "Battery modes",
+          "solar": "Solar arrays"
+        }
+      },
+      "sources": {
         "title": "Data sources",
+        "description": "Sensors for the battery and prices. Remove duplicates, for example two grid sources that measure the same meter. House load is computed as import − export + solar + battery discharge − battery charge.",
         "data": {
           "soc_entity": "Battery state of charge (%)",
-          "price_entity": "Electricity price sensor",
+          "price_entity": "Electricity price sensor (with today/tomorrow price attributes)",
           "grid_import": "Grid import energy",
           "grid_export": "Grid export energy",
           "solar_energy": "Solar energy",
           "battery_charge": "Energy into the battery",
           "battery_discharge": "Energy out of the battery",
-          "wholesale_source": "Wholesale price history"
+          "wholesale_source": "Wholesale price history (for prices not yet published)"
+        },
+        "data_description": {
+          "soc_entity": "A sensor with the battery's state of charge in % (0–100).",
+          "price_entity": "A sensor whose attributes list today's (and tomorrow's) prices with their start times, such as the Nord Pool, EnergyZero, Tibber or Zonneplan integrations provide.",
+          "grid_import": "Total energy taken from the grid (kWh, a meter reading that only goes up).",
+          "grid_export": "Total energy fed into the grid (kWh)."
         }
       },
       "battery": {
-        "title": "Battery and grid"
+        "title": "Battery and grid",
+        "data": {
+          "capacity_kwh": "Usable capacity",
+          "max_charge_w": "Maximum charge power",
+          "max_discharge_w": "Maximum discharge power",
+          "charge_eff": "Charge efficiency",
+          "discharge_eff": "Discharge efficiency",
+          "min_soc": "Minimum state of charge",
+          "max_soc": "Maximum state of charge",
+          "wear_cost": "Battery wear cost per kWh throughput",
+          "max_import_w": "Maximum grid import",
+          "max_export_w": "Maximum grid export"
+        },
+        "data_description": {
+          "capacity_kwh": "The usable capacity, not the nominal one: what the battery delivers from full to empty.",
+          "charge_eff": "One-way efficiency from the grid into the battery (0.95 = 95%). Round trip is charge × discharge efficiency.",
+          "discharge_eff": "One-way efficiency from the battery to the house or grid.",
+          "min_soc": "The lowest state of charge the battery may reach. Must be below the maximum.",
+          "wear_cost": "Cost of battery wear per kWh that goes through the battery. Vulpes only cycles the battery when the price difference beats this. Battery price ÷ (usable capacity × expected full cycles); 0.02–0.05 is typical.",
+          "max_import_w": "From the main fuse, for example 3 × 25 A × 230 V = 17250 W.",
+          "max_export_w": "The maximum power you may feed into the grid; often the same as the import limit."
+        }
       },
       "tariff": {
-        "title": "Tariff"
+        "title": "Tariff",
+        "description": "Prices for hours not yet published are estimated as a × wholesale + b. While net metering applies, export is paid at the import price. Otherwise export is paid as export a × wholesale + export b. Dutch net metering (saldering) ends on 1 January 2027.",
+        "data": {
+          "tariff_a": "Import a (usually the VAT factor)",
+          "tariff_b": "Import b (energy tax + markup, incl. VAT)",
+          "net_metering": "Net metering (export paid at import price)",
+          "export_a": "Export a",
+          "export_b": "Export b"
+        },
+        "data_description": {
+          "net_metering": "Turn off once net metering no longer applies to you; in the Netherlands from 1 January 2027."
+        }
       },
       "modes": {
         "title": "Battery modes",
@@ -219,10 +297,20 @@
     "error": {
       "invalid_planes": "Invalid planes JSON: each plane needs azimuth, tilt, pdc0 and ac_max.",
       "no_modes": "Enable at least one mode.",
-      "invalid_direction": "Pick a direction, or enter degrees between 0 and 360."
+      "invalid_direction": "Pick a direction, or enter degrees between 0 and 360.",
+      "soc_unavailable": "This sensor doesn't report a state of charge between 0 and 100 right now.",
+      "no_prices": "This sensor has no price list in its attributes (a list of items with a start time and a price).",
+      "grid_import_required": "Select at least one grid import statistic.",
+      "duplicate_statistic": "Selected more than once: {statistic}. Each statistic may appear in only one field.",
+      "no_statistics": "No hourly statistics in the last 60 days for: {statistic}. It needs a state_class and some history.",
+      "no_complete_hours": "There is no hour in the last 60 days in which all selected statistics have data, so the house load can't be computed.",
+      "soc_range": "The minimum state of charge must be below the maximum.",
+      "charge_w_too_high": "The charge power is above the maximum charge power (battery power) or the maximum grid import (grid setpoint).",
+      "discharge_w_too_high": "The discharge power is above the maximum discharge power (battery power) or the maximum grid export (grid setpoint).",
+      "no_mode_options": "This entity has no options to compare with."
     },
     "abort": {
-      "no_mode_options": "The selected mode entity has no options.",
+      "no_mode_options": "The selected mode entity lost its options during setup.",
       "no_calibration": "There is no calibration result to apply. Press Calibrate solar on the Vulpes EMS device first."
     }
   },

@@ -52,9 +52,9 @@ python3 -m venv .venv && .venv/bin/pip install pytest maturin ziglang
 - **Integration and engine move together:** the manifest pins `vulpes-ems==x.y.z` exactly. A change to the JSON request/response needs a new wheel *and* a new integration version, released together.
 - **Never change entity `unique_id`s.** Users would lose entity history, customisations and dashboards.
 - **No blocking work on HA's event loop:** calls into Rust and all network or recorder access run in the executor (`async_add_executor_job`, the recorder's own executor).
-- Keep `modes.py` and `solar_setup.py` free of Home Assistant imports so they stay testable in `tests/`.
+- Keep `modes.py`, `solar_setup.py` and `setup_checks.py` free of Home Assistant imports so they stay testable in `tests/`. Flow input checks go in `setup_checks.py`.
 - **Solar setup:** the array form stores engine planes with `inverter: 0` plus integration-only keys (`power_entity`), stripped by `engine_planes()` before any engine call. `solar_setup` in the settings is `form` or `json`; setups from before 0.3.0 have neither and are treated as JSON. Calibration results live in `.storage/vulpes_ems.<entry_id>.calibration` and are only applied by the user, through the options flow.
-- `strings.json` and `translations/en.json` must stay identical.
+- `strings.json` and `translations/en.json` must stay identical, and each options step has the same labels as its config step (`tests/test_strings.py`). The options flow is a menu; each section saves the full settings copy.
 - **Licensing:** MIT OR Apache-2.0. No per-file license headers.
 
 ## Testing
