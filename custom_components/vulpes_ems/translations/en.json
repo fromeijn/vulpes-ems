@@ -16,7 +16,7 @@
         },
         "data_description": {
           "soc_entity": "A sensor with the battery's state of charge in % (0–100).",
-          "price_entity": "A sensor whose attributes list today's (and tomorrow's) prices with their start times, such as the Nord Pool, EnergyZero, Tibber or Zonneplan integrations provide.",
+          "price_entity": "A sensor whose attributes list today's (and tomorrow's) prices with their start times, such as the Nord Pool, EnergyZero, EPEX Spot, Tibber or Zonneplan integrations provide.",
           "grid_import": "Total energy taken from the grid (kWh, a meter reading that only goes up).",
           "grid_export": "Total energy fed into the grid (kWh)."
         }
@@ -182,7 +182,7 @@
         },
         "data_description": {
           "soc_entity": "A sensor with the battery's state of charge in % (0–100).",
-          "price_entity": "A sensor whose attributes list today's (and tomorrow's) prices with their start times, such as the Nord Pool, EnergyZero, Tibber or Zonneplan integrations provide.",
+          "price_entity": "A sensor whose attributes list today's (and tomorrow's) prices with their start times, such as the Nord Pool, EnergyZero, EPEX Spot, Tibber or Zonneplan integrations provide.",
           "grid_import": "Total energy taken from the grid (kWh, a meter reading that only goes up).",
           "grid_export": "Total energy fed into the grid (kWh)."
         }

@@ -45,6 +45,21 @@ def test_price_lists_in_cents_and_quarter_hours():
     assert prices[0]["import"] == pytest.approx(0.20)
 
 
+def test_epex_spot_hourly_price_list():
+    """EPEX Spot: `data` with start_time/end_time/price_per_kwh, plus a scalar price next to it."""
+    hour = lambda h: f"2026-11-08T{h:02d}:00:00+00:00"  # noqa: E731
+    attrs = {
+        "data": [
+            {"start_time": hour(h), "end_time": hour(h + 1), "price_per_kwh": 0.20 + h / 100} for h in range(3)
+        ],
+        "price_per_kwh": 0.20,
+        "unit_of_measurement": "€/kWh",
+    }
+    prices = sc.parse_price_attributes(attrs, "€/kWh")
+    assert [(p["start"] - T0, p["end"] - p["start"]) for p in prices] == [(0, 3600), (3600, 3600), (7200, 3600)]
+    assert [p["import"] for p in prices] == pytest.approx([0.20, 0.21, 0.22])
+
+
 def test_price_attributes_without_prices():
     assert sc.parse_price_attributes({}, None) == []
     assert sc.parse_price_attributes({"options": ["a", "b"], "list": [], "x": [{"foo": 1}]}, None) == []

@@ -30,7 +30,7 @@ CONF_MAX_SOC = "max_soc"
 ENERGY_KEYS = (CONF_GRID_IMPORT, CONF_GRID_EXPORT, CONF_SOLAR_ENERGY, CONF_BATTERY_CHARGE, CONF_BATTERY_DISCHARGE)
 
 _TIME_KEYS = ("startsAt", "start", "from", "start_time", "time", "datetime")
-_VALUE_KEYS = ("total", "value", "price", "price_eur")
+_VALUE_KEYS = ("total", "value", "price", "price_eur", "price_per_kwh")
 
 
 def _ts(value: Any) -> float | None:
