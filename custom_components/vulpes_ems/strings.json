@@ -73,6 +73,9 @@
           "discharge_w": "Discharge power",
           "pv_curtail": "Solar can be switched off (for negative prices)",
           "mode_entity": "Compare with an existing mode entity (optional)"
+        },
+        "data_description": {
+          "idle": "The battery neither charges nor discharges. The house runs on solar and the grid, and all solar surplus goes to the grid. Unlike Hold, it doesn't store solar surplus. Useful when exporting pays more than storing, for example to keep room in the battery for cheap or negative-price hours later in the day. Only enable it if your system has a standby or idle mode you can switch to."
         }
       },
       "compare": {
@@ -236,6 +239,9 @@
           "discharge_w": "Discharge power",
           "pv_curtail": "Solar can be switched off (for negative prices)",
           "mode_entity": "Compare with an existing mode entity (optional)"
+        },
+        "data_description": {
+          "idle": "The battery neither charges nor discharges. The house runs on solar and the grid, and all solar surplus goes to the grid. Unlike Hold, it doesn't store solar surplus. Useful when exporting pays more than storing, for example to keep room in the battery for cheap or negative-price hours later in the day. Only enable it if your system has a standby or idle mode you can switch to."
         }
       },
       "compare": {
