@@ -22,7 +22,7 @@ A home energy manager for Home Assistant. A Rust core does the forecasting (sola
 | `crates/vulpes-cli` | Backfill, calibration, evaluation and replay tools |
 | `custom_components/vulpes_ems` | Home Assistant integration |
 | `tests/` | Python tests for HA-independent integration code |
-| `docs/` | Model documentation (solar, load, price, optimizer) |
+| `docs/` | Model documentation (solar, load, price, optimizer, control) |
 
 ## Commands
 
@@ -46,13 +46,14 @@ python3 -m venv .venv && .venv/bin/pip install pytest maturin ziglang
 - **Units:** power in W, energy in Wh (kWh at the HA boundary), prices in currency/kWh, timestamps in Unix seconds UTC. 15-minute slots start on the quarter hour.
 - **Signs:** battery power positive = charging; grid power positive = import.
 - **Information-time discipline:** evaluation and replay code may only use data that was available at decision time. Day-ahead weather comes from the Open-Meteo previous-runs API (`_previous_day1`).
-- **Integration modes are Vulpes's own** (`modes.py`): charge, hold, self_consume, idle, discharge, plus `:pv_off` variants. The engine only sees behaviours (`grid_setpoint`, `self_consume`, `no_discharge`, `idle`, `battery_power`). A user's own mode entity is optional and only mapped for comparison.
+- **Integration modes are Vulpes's own** (`modes.py`): charge, hold, self_consume, idle, discharge, plus `:pv_off` variants and `:no_export` variants (hold, self_consume, idle). The engine only sees behaviours (`grid_setpoint`, `self_consume`, `no_discharge`, `idle`, `battery_power`) and the `pv_curtail`/`no_export` flags. A user's own mode entity is optional and only mapped for comparison.
+- **Active control goes through one user script** (`control.py`, `docs/control.md`): while the Active switch is on, Vulpes runs `script.turn_on` with fixed variables every 15 minutes, and the safe command (self_consume, `fallback: true`) when there is no usable plan. The variable names and mode values are an API: change them only with a release note. Vulpes never calls inverter services directly.
 - **Settings:** the options flow saves a complete copy of the settings, which replaces the setup data (`modes.settings`). Don't merge data and options, or cleared fields come back.
 - **One physics function:** the optimizer and replay both use `vulpes_opt::step`. Change slot behaviour there, never in a copy.
 - **Integration and engine move together:** the manifest pins `vulpes-ems==x.y.z` exactly. A change to the JSON request/response needs a new wheel *and* a new integration version, released together.
 - **Never change entity `unique_id`s.** Users would lose entity history, customisations and dashboards.
 - **No blocking work on HA's event loop:** calls into Rust and all network or recorder access run in the executor (`async_add_executor_job`, the recorder's own executor).
-- Keep `modes.py`, `solar_setup.py` and `setup_checks.py` free of Home Assistant imports so they stay testable in `tests/`. Flow input checks go in `setup_checks.py`.
+- Keep `modes.py`, `control.py`, `solar_setup.py` and `setup_checks.py` free of Home Assistant imports so they stay testable in `tests/`. Flow input checks go in `setup_checks.py`.
 - **Solar setup:** the array form stores engine planes with `inverter: 0` plus integration-only keys (`power_entity`), stripped by `engine_planes()` before any engine call. `solar_setup` in the settings is `form` or `json`; setups from before 0.3.0 have neither and are treated as JSON. Calibration results live in `.storage/vulpes_ems.<entry_id>.calibration` and are only applied by the user, through the options flow.
 - `strings.json` and `translations/en.json` must stay identical, and each options step has the same labels as its config step (`tests/test_strings.py`). The options flow is a menu; each section saves the full settings copy.
 - **Licensing:** MIT OR Apache-2.0. No per-file license headers.

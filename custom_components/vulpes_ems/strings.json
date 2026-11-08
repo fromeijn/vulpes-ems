@@ -61,7 +61,7 @@
       },
       "modes": {
         "title": "Battery modes",
-        "description": "Tick the modes your system can do; Vulpes plans only with these. With grid setpoint (Victron ESS-style), charging holds grid import at the charge power and discharging holds grid export at the discharge power; with battery power, the battery itself runs at that power. Optionally pick the entity your current automation uses (for example an input_select) to compare the plan with what the house does.",
+        "description": "Tick the modes your system can do; Vulpes plans only with these. With grid setpoint (Victron ESS-style), charging holds grid import at the charge power and discharging holds grid export at the discharge power; with battery power, the battery itself runs at that power. Optionally pick the entity your current automation uses (for example an input_select) to compare the plan with what the house does. To let Vulpes control the battery, pick a control script: once the Active switch is on, Vulpes runs it every 15 minutes with what to do (see the field description).",
         "data": {
           "power_control": "How charge and discharge power is set",
           "charge": "Charge from grid",
@@ -72,10 +72,14 @@
           "discharge": "Discharge to grid",
           "discharge_w": "Discharge power",
           "pv_curtail": "Solar can be switched off (for negative prices)",
-          "mode_entity": "Compare with an existing mode entity (optional)"
+          "export_block": "Export can be blocked (zero export, for negative prices)",
+          "mode_entity": "Compare with an existing mode entity (optional)",
+          "control_script": "Control script (optional, lets Vulpes control the battery)"
         },
         "data_description": {
-          "idle": "The battery neither charges nor discharges. The house runs on solar and the grid, and all solar surplus goes to the grid. Unlike Hold, it doesn't store solar surplus. Useful when exporting pays more than storing, for example to keep room in the battery for cheap or negative-price hours later in the day. Only enable it if your system has a standby or idle mode you can switch to."
+          "idle": "The battery neither charges nor discharges. The house runs on solar and the grid, and all solar surplus goes to the grid. Unlike Hold, it doesn't store solar surplus. Useful when exporting pays more than storing, for example to keep room in the battery for cheap or negative-price hours later in the day. Only enable it if your system has a standby or idle mode you can switch to.",
+          "export_block": "Your inverter can stop feeding solar into the grid while still powering the house and charging the battery. Vulpes then also plans Hold, Self-consume and Idle with export blocked, and uses them when exporting would cost money.",
+          "control_script": "Vulpes runs this script every 15 minutes while its Active switch is on, with the variables mode (charge, hold, self_consume, idle or discharge), pv_off, no_export, power_control, power_w, soc_min, soc_max, planned_grid_w, planned_battery_w, fallback and until. Without a usable plan, it sends self_consume with fallback set. Disable your own battery automations before you turn Active on."
         }
       },
       "compare": {
@@ -227,7 +231,7 @@
       },
       "modes": {
         "title": "Battery modes",
-        "description": "Tick the modes your system can do; Vulpes plans only with these. With grid setpoint (Victron ESS-style), charging holds grid import at the charge power and discharging holds grid export at the discharge power; with battery power, the battery itself runs at that power. Optionally pick the entity your current automation uses (for example an input_select) to compare the plan with what the house does.",
+        "description": "Tick the modes your system can do; Vulpes plans only with these. With grid setpoint (Victron ESS-style), charging holds grid import at the charge power and discharging holds grid export at the discharge power; with battery power, the battery itself runs at that power. Optionally pick the entity your current automation uses (for example an input_select) to compare the plan with what the house does. To let Vulpes control the battery, pick a control script: once the Active switch is on, Vulpes runs it every 15 minutes with what to do (see the field description).",
         "data": {
           "power_control": "How charge and discharge power is set",
           "charge": "Charge from grid",
@@ -238,10 +242,14 @@
           "discharge": "Discharge to grid",
           "discharge_w": "Discharge power",
           "pv_curtail": "Solar can be switched off (for negative prices)",
-          "mode_entity": "Compare with an existing mode entity (optional)"
+          "export_block": "Export can be blocked (zero export, for negative prices)",
+          "mode_entity": "Compare with an existing mode entity (optional)",
+          "control_script": "Control script (optional, lets Vulpes control the battery)"
         },
         "data_description": {
-          "idle": "The battery neither charges nor discharges. The house runs on solar and the grid, and all solar surplus goes to the grid. Unlike Hold, it doesn't store solar surplus. Useful when exporting pays more than storing, for example to keep room in the battery for cheap or negative-price hours later in the day. Only enable it if your system has a standby or idle mode you can switch to."
+          "idle": "The battery neither charges nor discharges. The house runs on solar and the grid, and all solar surplus goes to the grid. Unlike Hold, it doesn't store solar surplus. Useful when exporting pays more than storing, for example to keep room in the battery for cheap or negative-price hours later in the day. Only enable it if your system has a standby or idle mode you can switch to.",
+          "export_block": "Your inverter can stop feeding solar into the grid while still powering the house and charging the battery. Vulpes then also plans Hold, Self-consume and Idle with export blocked, and uses them when exporting would cost money.",
+          "control_script": "Vulpes runs this script every 15 minutes while its Active switch is on, with the variables mode (charge, hold, self_consume, idle or discharge), pv_off, no_export, power_control, power_w, soc_min, soc_max, planned_grid_w, planned_battery_w, fallback and until. Without a usable plan, it sends self_consume with fallback set. Disable your own battery automations before you turn Active on."
         }
       },
       "compare": {
@@ -378,6 +386,14 @@
       },
       "solar_calibration": {
         "name": "Solar calibration improvement"
+      },
+      "control": {
+        "name": "Battery control",
+        "state": {
+          "off": "Off (shadow mode)",
+          "following_plan": "Following the plan",
+          "fallback": "Fallback (self-consume)"
+        }
       }
     },
     "binary_sensor": {
@@ -391,6 +407,11 @@
     "button": {
       "calibrate_solar": {
         "name": "Calibrate solar"
+      }
+    },
+    "switch": {
+      "active": {
+        "name": "Active"
       }
     }
   }

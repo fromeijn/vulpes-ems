@@ -16,6 +16,8 @@ CONF_POWER_CONTROL = "power_control"
 CONF_CHARGE_W = "charge_w"
 CONF_DISCHARGE_W = "discharge_w"
 CONF_PV_CURTAIL = "pv_curtail"
+CONF_EXPORT_BLOCK = "export_block"
+CONF_CONTROL_SCRIPT = "control_script"
 CONF_MODE_ENTITY = "mode_entity"
 CONF_MODE_MAP = "mode_map"
 CONF_MODES_V1 = "modes"
@@ -34,6 +36,11 @@ POWERED = {"charge": CONF_CHARGE_W, "discharge": CONF_DISCHARGE_W}
 
 # Suffix for the variant of a mode with solar switched off.
 PV_OFF = ":pv_off"
+# Suffix for the variant of a mode with export blocked (zero export).
+NO_EXPORT = ":no_export"
+# Modes that get a zero-export variant: in charge and discharge, blocking
+# export means nothing or contradicts the mode.
+EXPORT_BLOCK_MODES = ("hold", "self_consume", "idle")
 
 
 def settings(data: dict[str, Any], options: dict[str, Any]) -> dict[str, Any]:
@@ -57,17 +64,21 @@ def engine_modes(cfg: dict[str, Any]) -> list[dict[str, Any]]:
             behaviour = {"type": "no_discharge"}
         else:
             behaviour = {"type": key}
-        out.append({"name": key, "behaviour": behaviour, "pv_curtail": False})
+        out.append({"name": key, "behaviour": behaviour, "pv_curtail": False, "no_export": False})
         if cfg.get(CONF_PV_CURTAIL):
-            out.append({"name": key + PV_OFF, "behaviour": behaviour, "pv_curtail": True})
+            out.append({"name": key + PV_OFF, "behaviour": behaviour, "pv_curtail": True, "no_export": False})
+        if cfg.get(CONF_EXPORT_BLOCK) and key in EXPORT_BLOCK_MODES:
+            out.append({"name": key + NO_EXPORT, "behaviour": behaviour, "pv_curtail": False, "no_export": True})
     return out
 
 
-def split_mode(name: str) -> tuple[str, bool]:
-    """Engine mode name -> (Vulpes mode, solar off)."""
+def split_mode(name: str) -> tuple[str, bool, bool]:
+    """Engine mode name -> (Vulpes mode, solar off, export blocked)."""
     if name.endswith(PV_OFF):
-        return name[: -len(PV_OFF)], True
-    return name, False
+        return name[: -len(PV_OFF)], True, False
+    if name.endswith(NO_EXPORT):
+        return name[: -len(NO_EXPORT)], False, True
+    return name, False, False
 
 
 def mode_of_state(cfg: dict[str, Any], state: str) -> str | None:

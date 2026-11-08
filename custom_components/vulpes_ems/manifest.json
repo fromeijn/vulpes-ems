@@ -1,6 +1,9 @@
 {
   "domain": "vulpes_ems",
   "name": "Vulpes EMS",
+  "after_dependencies": [
+    "script"
+  ],
   "codeowners": [],
   "config_flow": true,
   "dependencies": [

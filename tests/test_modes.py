@@ -38,9 +38,38 @@ def test_engine_modes_battery_power_and_pv_off_variants():
     cfg = {"power_control": "battery_power", "hold": False, "self_consume": False, "charge_w": 2000, "pv_curtail": True}
     out = modes.engine_modes(cfg)
     assert [m["name"] for m in out] == ["charge", "charge:pv_off"]
-    assert out[1] == {"name": "charge:pv_off", "behaviour": {"type": "battery_power", "w": 2000.0}, "pv_curtail": True}
-    assert modes.split_mode("charge:pv_off") == ("charge", True)
-    assert modes.split_mode("hold") == ("hold", False)
+    assert out[1] == {
+        "name": "charge:pv_off",
+        "behaviour": {"type": "battery_power", "w": 2000.0},
+        "pv_curtail": True,
+        "no_export": False,
+    }
+    assert modes.split_mode("charge:pv_off") == ("charge", True, False)
+    assert modes.split_mode("hold") == ("hold", False, False)
+
+
+def test_engine_modes_no_export_variants_only_where_export_can_be_blocked():
+    cfg = {"idle": True, "discharge": True, "charge_w": 2000, "discharge_w": 2000, "export_block": True}
+    names = [m["name"] for m in modes.engine_modes(cfg)]
+    assert names == [
+        "charge",
+        "hold",
+        "hold:no_export",
+        "self_consume",
+        "self_consume:no_export",
+        "idle",
+        "idle:no_export",
+        "discharge",
+    ]
+    variant = next(m for m in modes.engine_modes(cfg) if m["name"] == "self_consume:no_export")
+    assert variant == {
+        "name": "self_consume:no_export",
+        "behaviour": {"type": "self_consume"},
+        "pv_curtail": False,
+        "no_export": True,
+    }
+    assert modes.split_mode("self_consume:no_export") == ("self_consume", False, True)
+    assert all(not m["no_export"] for m in modes.engine_modes({**cfg, "export_block": False}))
 
 
 def test_migrate_v1_keeps_behaviour_and_comparison():

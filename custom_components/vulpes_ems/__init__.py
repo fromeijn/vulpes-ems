@@ -1,7 +1,9 @@
 """Vulpes EMS: forecasting and ESS mode optimization for Home Assistant.
 
-Shadow mode: the integration only reads Home Assistant data and publishes its
-own entities with the plan. It never changes any other entity.
+By default the integration runs in shadow mode: it only reads Home Assistant
+data and publishes its own entities with the plan. Control is handed over
+explicitly: the user picks a control script and turns the Active switch on,
+after which Vulpes runs that script every 15 minutes (see `control.py`).
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from .calibration import SolarCalibration
 from .coordinator import VulpesCoordinator
 from .modes import migrate_v1
 
-PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
+PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON, Platform.SWITCH]
 
 _LOGGER = logging.getLogger(__name__)
 

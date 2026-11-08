@@ -22,6 +22,7 @@ from homeassistant.util import dt as dt_util
 
 from . import VulpesConfigEntry
 from .const import DOMAIN
+from .control import STATES as CONTROL_STATES, state_of
 from .coordinator import VulpesCoordinator
 from .modes import CONF_MODE_ENTITY, enabled_modes
 
@@ -113,6 +114,10 @@ async def async_setup_entry(
         VulpesSensor(coordinator, entry, d) for d in SENSORS if compare or d.key != "agreement_today"
     ]
     entities.append(SolarCalibrationSensor(coordinator, entry))
+    if coordinator.control_script:
+        entities.append(ControlSensor(coordinator, entry))
+    else:
+        remove_stale(hass, entry, "sensor", {"control"})
     async_add_entities(entities)
 
 
@@ -148,6 +153,7 @@ class VulpesSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
                         "start": iso(s["start"]),
                         "mode": s["mode"],
                         "pv_off": s["pv_off"],
+                        "no_export": s["no_export"],
                         "soc": round(s["soc_pct"], 1),
                         "battery_w": round(s["battery_w"]),
                         "grid_w": round(s["grid_w"]),
@@ -169,6 +175,36 @@ class VulpesSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
         if key == "agreement_today":
             return {"compared": self.coordinator.compared, "agreed": self.coordinator.agree}
         return None
+
+
+class ControlSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
+    """Whether Vulpes controls the battery: off, following the plan, or in fallback."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "control"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = CONTROL_STATES
+
+    def __init__(self, coordinator: VulpesCoordinator, entry: VulpesConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_control"
+        self._attr_device_info = device_info(entry)
+
+    @property
+    def available(self) -> bool:
+        return True  # most useful exactly when planning fails
+
+    @property
+    def native_value(self) -> str:
+        return state_of(self.coordinator.active, self.coordinator.last_command)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        c = self.coordinator
+        attrs: dict[str, Any] = {"script": c.control_script, "last_command": c.last_command}
+        if c.last_error:
+            attrs["error"] = c.last_error
+        return attrs
 
 
 class SolarCalibrationSensor(SensorEntity):

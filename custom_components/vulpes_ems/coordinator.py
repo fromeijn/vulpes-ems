@@ -1,4 +1,5 @@
-"""Coordinator: gathers Home Assistant data every 15 minutes and plans in Rust."""
+"""Coordinator: gathers Home Assistant data every 15 minutes, plans in Rust and,
+when the Active switch is on, runs the user's control script."""
 
 from __future__ import annotations
 
@@ -44,7 +45,8 @@ from .const import (
     WHOLESALE_HISTORY_DAYS,
 )
 from .calibration import SolarCalibration
-from .modes import CONF_MODE_ENTITY, engine_modes, settings, mode_of_state, split_mode
+from .control import command, safe_command
+from .modes import CONF_CONTROL_SCRIPT, CONF_MODE_ENTITY, engine_modes, settings, mode_of_state, split_mode
 from .setup_checks import load_groups, load_series, parse_price_attributes, soc_value
 from .solar_setup import engine_planes
 
@@ -73,6 +75,10 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.compared = 0
         self.agrees_now: bool | None = None
         self.calibration = SolarCalibration(hass, entry)
+        # Active control: set by the Active switch (restored across restarts).
+        self.active = False
+        self.last_command: dict[str, Any] | None = None
+        self.last_error: str | None = None
 
     @property
     def cfg(self) -> dict[str, Any]:
@@ -88,7 +94,49 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @callback
     def _tick(self, _now: datetime) -> None:
-        self.hass.async_create_task(self.async_refresh())
+        self.hass.async_create_task(self._async_refresh_and_apply())
+
+    async def _async_refresh_and_apply(self) -> None:
+        await self.async_refresh()
+        await self.async_apply()
+
+    @property
+    def control_script(self) -> str | None:
+        return self.cfg.get(CONF_CONTROL_SCRIPT) or None
+
+    async def async_set_active(self, active: bool) -> None:
+        """Hand over control (apply the plan now) or take it back (send the safe command once)."""
+        was_active, self.active = self.active, active
+        if active:
+            await self.async_apply()
+        elif was_active and self.control_script:
+            await self._async_run_script(safe_command(self.cfg, dt_util.utcnow().timestamp(), fallback=False))
+        else:
+            self.async_update_listeners()
+
+    async def async_apply(self) -> None:
+        """Run the control script for the current slot, or the safe command without a usable plan."""
+        if not self.active or not self.control_script:
+            return
+        now = dt_util.utcnow().timestamp()
+        cmd = command(self.cfg, self.data, now, failed=not self.last_update_success)
+        if cmd["fallback"]:
+            _LOGGER.warning("No usable plan; sending the safe mode (%s) to %s", cmd["mode"], self.control_script)
+        await self._async_run_script(cmd)
+
+    async def _async_run_script(self, cmd: dict[str, Any]) -> None:
+        script = self.control_script
+        try:
+            await self.hass.services.async_call(
+                "script", "turn_on", {"entity_id": script, "variables": cmd}, blocking=True
+            )
+        except Exception as err:  # noqa: BLE001 - a failing script must not stop the schedule
+            _LOGGER.warning("Control script %s failed: %s", script, err)
+            self.last_error = str(err)
+        else:
+            self.last_error = None
+        self.last_command = {**cmd, "sent": dt_util.utcnow().isoformat()}
+        self.async_update_listeners()
 
     async def _load_history(self, now: datetime) -> list[tuple[int, float]]:
         groups = load_groups(self.cfg)
@@ -171,9 +219,11 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise UpdateFailed(f"planning failed: {err}") from err
         plan = json.loads(raw)
         for s in plan["slots"]:
-            s["mode"], s["pv_off"] = split_mode(s["mode"])
-        plan["summary"]["mode_now"], plan["summary"]["pv_off_now"] = split_mode(plan["summary"]["mode_now"])
+            s["mode"], s["pv_off"], s["no_export"] = split_mode(s["mode"])
+        summary = plan["summary"]
+        summary["mode_now"], summary["pv_off_now"], summary["no_export_now"] = split_mode(summary["mode_now"])
         plan["inputs"] = {"load_hours": len(load), "known_price_slots": len(known), "wholesale_hours": len(wholesale)}
+        plan["planned_at"] = int(now.timestamp())
         self._track_agreement(plan)
         return plan
 

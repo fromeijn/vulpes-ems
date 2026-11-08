@@ -18,7 +18,7 @@ vulpes-ems does two things:
 | Price | Day-ahead wholesale forecast (ENTSO-E fundamentals: wind, solar, load; plus gas) with an auto-fitted consumer tariff. Known published prices always take precedence. |
 | Optimizer | Dynamic programming over slot × SOC × mode. The objective is import cost − export revenue + battery wear − terminal SOC value. A probabilistic night-reserve constraint guards against running empty. |
 | Modes | Vulpes's own modes: charge from grid, hold (no discharge), self-consume, idle, discharge to grid, each optionally with solar switched off. You tick the ones your system supports and set their power. An existing mode entity (such as an `input_select`) can be mapped to them to compare the plan with what the house does. |
-| Safety | Starts in shadow mode, with agreement and cost comparison against your current automation. An explicit *active* switch hands over control, and a watchdog falls back to a safe mode. |
+| Safety | Starts in shadow mode, with agreement and cost comparison against your current automation. To hand over control you pick a control script and turn the *Active* switch on; Vulpes then runs the script every 15 minutes. Without a usable plan it sends a safe mode (self-consume) instead. See [docs/control.md](docs/control.md). |
 
 ## Layout
 

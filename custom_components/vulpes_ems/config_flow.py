@@ -49,7 +49,9 @@ from .const import (
 from .coordinator import async_energy_changes
 from .modes import (
     CONF_CHARGE_W,
+    CONF_CONTROL_SCRIPT,
     CONF_DISCHARGE_W,
+    CONF_EXPORT_BLOCK,
     CONF_MODE_ENTITY,
     CONF_MODE_MAP,
     CONF_POWER_CONTROL,
@@ -179,8 +181,11 @@ def _modes_schema(d: dict[str, Any]) -> vol.Schema:
         if key == "discharge":
             fields[vol.Required(CONF_DISCHARGE_W, default=d.get(CONF_DISCHARGE_W, 3000))] = _num(0, 50000, 1, "W")
     fields[vol.Required(CONF_PV_CURTAIL, default=d.get(CONF_PV_CURTAIL, False))] = selector.BooleanSelector()
+    fields[vol.Required(CONF_EXPORT_BLOCK, default=d.get(CONF_EXPORT_BLOCK, False))] = selector.BooleanSelector()
     mode_entity = vol.Optional(CONF_MODE_ENTITY, description={"suggested_value": d.get(CONF_MODE_ENTITY)})
     fields[mode_entity] = selector.EntitySelector(selector.EntitySelectorConfig(domain=["input_select", "select"]))
+    script = vol.Optional(CONF_CONTROL_SCRIPT, description={"suggested_value": d.get(CONF_CONTROL_SCRIPT)})
+    fields[script] = selector.EntitySelector(selector.EntitySelectorConfig(domain="script"))
     return vol.Schema(fields)
 
 
@@ -338,7 +343,8 @@ class _Steps:
         defaults = self.data
         if user_input is not None:
             # An optional field left empty is absent from the input: clear the old value.
-            candidate = {k: v for k, v in self.data.items() if k != CONF_MODE_ENTITY}
+            optional = (CONF_MODE_ENTITY, CONF_CONTROL_SCRIPT)
+            candidate = {k: v for k, v in self.data.items() if k not in optional}
             candidate.update(user_input)
             mode_entity = candidate.get(CONF_MODE_ENTITY)
             if not enabled_modes(candidate):
