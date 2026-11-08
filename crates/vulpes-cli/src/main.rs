@@ -12,6 +12,7 @@ mod entsoe;
 mod load;
 mod price;
 mod replay;
+mod series;
 mod solar;
 
 #[derive(Parser)]
@@ -330,26 +331,21 @@ fn main() -> Result<()> {
             country,
             temp_forecast,
             temp_history,
-        } => {
-            let country = match country.as_str() {
-                "nl" => vulpes_load::Country::Netherlands,
-                "none" => vulpes_load::Country::None,
-                c => bail!("unknown country '{c}' (supported: none, nl)"),
-            };
-            load::evaluate(&store, from, to, tz, country, &temp_forecast, &temp_history)
-        }
+        } => load::evaluate(
+            &store,
+            from,
+            to,
+            tz,
+            parse_country(&country)?,
+            &temp_forecast,
+            &temp_history,
+        ),
         Cmd::FitTariff {
             pairs,
             wholesale,
             min_energy,
         } => {
-            let pairs = pairs
-                .iter()
-                .map(|p| match p.split_once(':') {
-                    Some((c, e)) => Ok((c.to_string(), e.to_string())),
-                    None => bail!("--pair must be <cost_series>:<energy_series>, got '{p}'"),
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let pairs = pairs.iter().map(|p| parse_pair(p)).collect::<Result<Vec<_>>>()?;
             price::fit_tariff(&store, &pairs, &wholesale, min_energy)
         }
         Cmd::EvalPrice {
@@ -390,11 +386,7 @@ fn main() -> Result<()> {
                 lon,
                 horizon_h,
                 wholesale: &wholesale,
-                export_override: match export.as_deref().map(|e| e.split_once(',')) {
-                    None => None,
-                    Some(Some((a, b))) => Some((a.trim().parse()?, b.trim().parse()?)),
-                    Some(None) => bail!("--export must be <a>,<b>"),
-                },
+                export_override: export.as_deref().map(parse_export).transpose()?,
             },
         ),
         Cmd::BackfillEntsoe { zone, from, to } => entsoe::backfill(&mut store, &zone, from, to),
@@ -404,8 +396,52 @@ fn main() -> Result<()> {
 
 const PRICE_KEY: &str = "price.wholesale.nl";
 
+fn parse_country(c: &str) -> Result<vulpes_load::Country> {
+    Ok(match c {
+        "nl" => vulpes_load::Country::Netherlands,
+        "none" => vulpes_load::Country::None,
+        c => bail!("unknown country '{c}' (supported: none, nl)"),
+    })
+}
+
+/// `--pair <cost_series>:<energy_series>`.
+fn parse_pair(p: &str) -> Result<(String, String)> {
+    match p.split_once(':') {
+        Some((c, e)) if !c.is_empty() && !e.is_empty() => Ok((c.to_string(), e.to_string())),
+        _ => bail!("--pair must be <cost_series>:<energy_series>, got '{p}'"),
+    }
+}
+
+/// `--export <a>,<b>`: export = a · wholesale + b.
+fn parse_export(e: &str) -> Result<(f64, f64)> {
+    let (a, b) = e.split_once(',').context("--export must be <a>,<b>")?;
+    let num = |s: &str| {
+        s.trim()
+            .parse::<f64>()
+            .with_context(|| format!("--export: '{}' is not a number", s.trim()))
+    };
+    Ok((num(a)?, num(b)?))
+}
+
+/// Split `[from, to]` into consecutive inclusive chunks of at most `days` days.
+pub(crate) fn date_chunks(from: NaiveDate, to: NaiveDate, days: i64) -> Vec<(NaiveDate, NaiveDate)> {
+    let mut out = Vec::new();
+    let mut start = from;
+    while start <= to {
+        let end = (start + chrono::Duration::days(days - 1)).min(to);
+        out.push((start, end));
+        start = end + chrono::Duration::days(1);
+    }
+    out
+}
+
 pub(crate) fn read_map(path: &Path) -> Result<Vec<(String, String)>> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    parse_map(&text, &path.display().to_string())
+}
+
+/// Lines of `<vulpes_key> <statistic_id>`; `#` starts a comment.
+fn parse_map(text: &str, name: &str) -> Result<Vec<(String, String)>> {
     let mut out = Vec::new();
     for (i, line) in text.lines().enumerate() {
         let line = line.split('#').next().unwrap_or("").trim();
@@ -415,11 +451,7 @@ pub(crate) fn read_map(path: &Path) -> Result<Vec<(String, String)>> {
         let mut parts = line.split_whitespace();
         match (parts.next(), parts.next(), parts.next()) {
             (Some(k), Some(s), None) => out.push((k.to_string(), s.to_string())),
-            _ => bail!(
-                "{}:{}: expected `<vulpes_key> <statistic_id>`",
-                path.display(),
-                i + 1
-            ),
+            _ => bail!("{name}:{}: expected `<vulpes_key> <statistic_id>`", i + 1),
         }
     }
     Ok(out)
@@ -431,7 +463,18 @@ fn import_ha(store: &mut Store, ha_db: &Path, map: &Path) -> Result<()> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .with_context(|| format!("opening {} read-only", ha_db.display()))?;
-    for (key, statistic_id) in read_map(map)? {
+    for line in import_statistics(store, &ha, &read_map(map)?)? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// Copy hourly statistics from a Home Assistant recorder database: series
+/// with a cumulative `sum` become hourly amounts, others hourly means.
+/// Returns one report line per mapped statistic.
+fn import_statistics(store: &mut Store, ha: &Connection, map: &[(String, String)]) -> Result<Vec<String>> {
+    let mut report = Vec::new();
+    for (key, statistic_id) in map {
         let meta: Option<(i64, Option<String>, bool)> = ha
             .query_row(
                 "SELECT id, unit_of_measurement, has_sum FROM statistics_meta WHERE statistic_id = ?1",
@@ -440,7 +483,7 @@ fn import_ha(store: &mut Store, ha_db: &Path, map: &Path) -> Result<()> {
             )
             .ok();
         let Some((meta_id, unit, has_sum)) = meta else {
-            eprintln!("{key}: statistic not found, skipped");
+            report.push(format!("{key}: statistic not found, skipped"));
             continue;
         };
         let unit = unit.unwrap_or_default();
@@ -458,11 +501,11 @@ fn import_ha(store: &mut Store, ha_db: &Path, map: &Path) -> Result<()> {
                 rows.iter().filter_map(|&(t, m, _)| m.map(|m| (t, m))).collect(),
             )
         };
-        store.ensure_series(&key, &unit, kind)?;
-        let n = store.put_samples(&key, 3600, &samples)?;
-        println!("{key}: {n} hourly samples ({kind:?}, {unit})");
+        store.ensure_series(key, &unit, kind)?;
+        let n = store.put_samples(key, 3600, &samples)?;
+        report.push(format!("{key}: {n} hourly samples ({kind:?}, {unit})"));
     }
-    Ok(())
+    Ok(report)
 }
 
 /// HA stores a cumulative `sum` per hour; the amount in an hour is the
@@ -508,10 +551,7 @@ fn backfill_weather(store: &mut Store, req: WeatherBackfill) -> Result<()> {
     } else {
         vars.iter().map(String::as_str).collect()
     };
-    let suffix = label.map(|l| format!("@{l}")).unwrap_or_default();
-    let mut start = from;
-    while start <= to {
-        let end = (start + chrono::Duration::days(30)).min(to);
+    for (start, end) in date_chunks(from, to, 31) {
         let series = open_meteo::fetch(&open_meteo::Request {
             location: loc,
             models: &models,
@@ -525,10 +565,7 @@ fn backfill_weather(store: &mut Store, req: WeatherBackfill) -> Result<()> {
                 },
             },
         })?;
-        let (prefix, lead_s) = match lead_days {
-            None => ("open-meteo-archive".to_string(), 0),
-            Some(d) => (format!("open-meteo-day{d}"), i64::from(d) * 86_400),
-        };
+        let lead_s = lead_days.map_or(0, |d| i64::from(d) * 86_400);
         let mut n = 0;
         for s in series {
             // The short-lead archive is stitched from the freshest run per hour,
@@ -542,12 +579,26 @@ fn backfill_weather(store: &mut Store, req: WeatherBackfill) -> Result<()> {
                     value: v,
                 })
                 .collect();
-            n += store.put_forecasts(&format!("{prefix}:{}{suffix}", s.model), &s.var, &pts)?;
+            n += store.put_forecasts(
+                &weather_source(lead_days, &s.model, label.as_deref()),
+                &s.var,
+                &pts,
+            )?;
         }
         println!("{start}..{end}: {n} forecast values");
-        start = end + chrono::Duration::days(1);
     }
     Ok(())
+}
+
+/// Store source name: `open-meteo-archive:<model>` or `open-meteo-day<N>:<model>`,
+/// plus `@<label>` for reference points.
+fn weather_source(lead_days: Option<u8>, model: &str, label: Option<&str>) -> String {
+    let prefix = match lead_days {
+        None => "open-meteo-archive".to_string(),
+        Some(d) => format!("open-meteo-day{d}"),
+    };
+    let suffix = label.map(|l| format!("@{l}")).unwrap_or_default();
+    format!("{prefix}:{model}{suffix}")
 }
 
 fn stats(store: &Store) -> Result<()> {
@@ -574,6 +625,151 @@ fn stats(store: &Store) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+    use std::collections::HashMap;
+
+    fn date(s: &str) -> NaiveDate {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn cli_definition_is_consistent() {
+        Cli::command().debug_assert();
+        let cli = Cli::try_parse_from([
+            "vulpes-cli",
+            "replay",
+            "--from",
+            "2026-10-01",
+            "--to",
+            "2026-10-14",
+            "--lat",
+            "52",
+            "--lon",
+            "5",
+            "--export",
+            "1.21,0",
+        ])
+        .unwrap();
+        assert!(matches!(cli.cmd, Cmd::Replay { horizon_h: 36, .. }));
+        assert!(Cli::try_parse_from(["vulpes-cli", "replay", "--from", "2026-10-01"]).is_err());
+        assert!(Cli::try_parse_from(["vulpes-cli", "stats"]).is_ok());
+    }
+
+    #[test]
+    fn argument_parsers() {
+        assert!(matches!(
+            parse_country("nl").unwrap(),
+            vulpes_load::Country::Netherlands
+        ));
+        assert!(matches!(
+            parse_country("none").unwrap(),
+            vulpes_load::Country::None
+        ));
+        assert!(parse_country("be").is_err());
+        assert_eq!(
+            parse_pair("cost.p1:grid.import.p1").unwrap(),
+            ("cost.p1".into(), "grid.import.p1".into())
+        );
+        assert!(parse_pair("cost.p1").is_err() && parse_pair(":x").is_err() && parse_pair("x:").is_err());
+        assert_eq!(parse_export("1.21, -0.0248").unwrap(), (1.21, -0.0248));
+        assert!(parse_export("1.21").is_err());
+        let err = parse_export("1.21,abc").unwrap_err().to_string();
+        assert!(err.contains("'abc' is not a number"), "{err}");
+    }
+
+    #[test]
+    fn date_chunks_cover_the_range_without_overlap() {
+        let c = date_chunks(date("2026-01-01"), date("2026-03-05"), 31);
+        assert_eq!(
+            c,
+            vec![
+                (date("2026-01-01"), date("2026-01-31")),
+                (date("2026-02-01"), date("2026-03-03")),
+                (date("2026-03-04"), date("2026-03-05")),
+            ]
+        );
+        assert_eq!(date_chunks(date("2026-01-01"), date("2026-01-01"), 31).len(), 1);
+        assert!(date_chunks(date("2026-01-02"), date("2026-01-01"), 31).is_empty());
+    }
+
+    #[test]
+    fn map_file_parsing() {
+        let text = "# comment\nload.house sensor.a  # trailing\n\n  pv.total sensor.b\n";
+        assert_eq!(
+            parse_map(text, "map.txt").unwrap(),
+            vec![
+                ("load.house".into(), "sensor.a".into()),
+                ("pv.total".into(), "sensor.b".into())
+            ]
+        );
+        let err = parse_map("ok sensor.a\nonly-one\n", "map.txt")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("map.txt:2"), "{err}");
+        assert!(parse_map("a b c", "m").is_err());
+        assert!(parse_map("", "m").unwrap().is_empty());
+    }
+
+    #[test]
+    fn weather_source_names() {
+        assert_eq!(
+            weather_source(None, "icon_d2", None),
+            "open-meteo-archive:icon_d2"
+        );
+        assert_eq!(
+            weather_source(Some(1), "icon_d2", None),
+            "open-meteo-day1:icon_d2"
+        );
+        assert_eq!(
+            weather_source(Some(1), "icon_d2", Some("nl-central")),
+            "open-meteo-day1:icon_d2@nl-central"
+        );
+    }
+
+    /// A recorder database with Home Assistant's statistics tables.
+    fn ha_db() -> Connection {
+        let ha = Connection::open_in_memory().unwrap();
+        ha.execute_batch(
+            "CREATE TABLE statistics_meta (id INTEGER PRIMARY KEY, statistic_id TEXT, unit_of_measurement TEXT, has_sum BOOLEAN);
+             CREATE TABLE statistics (metadata_id INTEGER, start_ts FLOAT, mean FLOAT, state FLOAT, sum FLOAT);
+             INSERT INTO statistics_meta VALUES (1, 'sensor.energy', 'kWh', 1), (2, 'sensor.power', 'W', 0), (3, 'sensor.temp', '°C', 0);
+             INSERT INTO statistics VALUES
+               (1, 0.0, NULL, 5.0, 10.0), (1, 3600.0, NULL, 6.0, 12.5), (1, 7200.0, NULL, 7.0, 13.0),
+               (2, 0.0, 300.0, 280.0, NULL), (2, 3600.0, NULL, 450.0, NULL), (2, 7200.0, NULL, NULL, NULL),
+               (3, 0.0, 18.5, NULL, NULL);",
+        )
+        .unwrap();
+        ha
+    }
+
+    #[test]
+    fn import_converts_sums_to_amounts_and_falls_back_to_state() {
+        let mut store = Store::open_in_memory().unwrap();
+        let map = vec![
+            ("grid".to_string(), "sensor.energy".to_string()),
+            ("power".to_string(), "sensor.power".to_string()),
+            ("missing".to_string(), "sensor.nope".to_string()),
+        ];
+        let report = import_statistics(&mut store, &ha_db(), &map).unwrap();
+        assert_eq!(report.len(), 3);
+        assert!(report[2].contains("not found"), "{report:?}");
+        assert_eq!(
+            store.samples("grid", 3600, 0, 10_000).unwrap(),
+            vec![(3600, 2.5), (7200, 0.5)]
+        );
+        // Mean where recorded, else the state; hours with neither are dropped.
+        assert_eq!(
+            store.samples("power", 3600, 0, 10_000).unwrap(),
+            vec![(0, 300.0), (3600, 450.0)]
+        );
+        let units: HashMap<String, String> = store
+            .summary()
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.key, s.unit))
+            .collect();
+        assert_eq!((units["grid"].as_str(), units["power"].as_str()), ("kWh", "W"));
+    }
 
     #[test]
     fn deltas_skip_gaps_keep_negatives() {

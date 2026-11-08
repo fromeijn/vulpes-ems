@@ -27,18 +27,7 @@ pub(crate) fn fit_tariff(
     );
     for (cost_key, energy_key) in pairs {
         let (cost, energy) = (series(store, cost_key)?, series(store, energy_key)?);
-        let mut by_year: BTreeMap<i32, Vec<TariffSample>> = BTreeMap::new();
-        for (t, &c) in &cost {
-            if let (Some(&e), Some(&p)) = (energy.get(t).filter(|&&e| e >= min_energy), w.get(t)) {
-                let year = DateTime::from_timestamp(*t, 0).map_or(0, |d| d.year());
-                by_year.entry(year).or_default().push(TariffSample {
-                    energy_kwh: e,
-                    wholesale: p,
-                    cost: c,
-                });
-            }
-        }
-        for (year, samples) in by_year {
+        for (year, samples) in samples_by_year(&cost, &energy, &w, min_energy) {
             match fit(&samples) {
                 Some(f) => println!(
                     "{:42} {year:5} {:6} {:8.4} {:8.4} {:9.2}",
@@ -55,19 +44,28 @@ pub(crate) fn fit_tariff(
     Ok(())
 }
 
-/// Hourly mean of a 15-minute forecast variable at a labelled reference point.
-fn hourly_var(store: &Store, source: &str, var: &str) -> Result<HashMap<i64, f64>> {
-    let mut acc: HashMap<i64, (f64, u32)> = HashMap::new();
-    for (t, v) in store.forecasts_asof(source, var, 0, i64::MAX / 2, i64::MAX)? {
-        let e = acc.entry(t - t.rem_euclid(3600)).or_default();
-        e.0 += v;
-        e.1 += 1;
+/// Hourly tariff samples per UTC calendar year: hours with a cost, at least
+/// `min_energy` kWh, and a wholesale price.
+fn samples_by_year(
+    cost: &HashMap<i64, f64>,
+    energy: &HashMap<i64, f64>,
+    wholesale: &HashMap<i64, f64>,
+    min_energy: f64,
+) -> BTreeMap<i32, Vec<TariffSample>> {
+    let mut hours: Vec<i64> = cost.keys().copied().collect();
+    hours.sort_unstable();
+    let mut by_year: BTreeMap<i32, Vec<TariffSample>> = BTreeMap::new();
+    for t in hours {
+        if let (Some(&e), Some(&p)) = (energy.get(&t).filter(|&&e| e >= min_energy), wholesale.get(&t)) {
+            let year = DateTime::from_timestamp(t, 0).map_or(0, |d| d.year());
+            by_year.entry(year).or_default().push(TariffSample {
+                energy_kwh: e,
+                wholesale: p,
+                cost: cost[&t],
+            });
+        }
     }
-    Ok(acc
-        .into_iter()
-        .filter(|(_, (_, n))| *n == 4)
-        .map(|(h, (s, n))| (h, s / n as f64))
-        .collect())
+    by_year
 }
 
 /// Normalised wind turbine power curve: cubic from 3 m/s cut-in to 12 m/s rated.
@@ -77,6 +75,9 @@ fn wind_power(v: f64) -> f64 {
 
 /// Mean of a per-point transform over all points, if every point has data.
 fn index(points: &[HashMap<i64, f64>], h: i64, f: impl Fn(f64) -> f64) -> Option<f64> {
+    if points.is_empty() {
+        return None;
+    }
     let vals: Option<Vec<f64>> = points.iter().map(|p| p.get(&h).map(|&v| f(v))).collect();
     vals.map(|v| v.iter().sum::<f64>() / v.len() as f64)
 }
@@ -152,12 +153,12 @@ pub(crate) fn evaluate(
     let wind: Vec<HashMap<i64, f64>> = points
         .wind
         .iter()
-        .map(|s| hourly_var(store, s, "wind_speed_100m"))
+        .map(|s| crate::series::hourly_forecast(store, s, "wind_speed_100m"))
         .collect::<Result<_>>()?;
     let solar: Vec<HashMap<i64, f64>> = points
         .solar
         .iter()
-        .map(|s| hourly_var(store, s, "shortwave_radiation"))
+        .map(|s| crate::series::hourly_forecast(store, s, "shortwave_radiation"))
         .collect::<Result<_>>()?;
     let wind_idx = |h: i64| index(&wind, h, wind_power);
     let solar_idx = |h: i64| index(&solar, h, |g| g / 1000.0);
@@ -274,4 +275,76 @@ pub(crate) fn evaluate(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wind_power_curve() {
+        assert_eq!(wind_power(0.0), 0.0);
+        assert_eq!(wind_power(3.0), 0.0, "cut-in");
+        assert_eq!(wind_power(12.0), 1.0, "rated");
+        assert_eq!(wind_power(25.0), 1.0, "capped");
+        assert_eq!(wind_power(-4.0), 0.0);
+        assert!(wind_power(6.0) < wind_power(9.0));
+    }
+
+    #[test]
+    fn index_needs_every_point() {
+        let a: HashMap<i64, f64> = [(0, 2.0), (3600, 4.0)].into();
+        let b: HashMap<i64, f64> = [(0, 6.0)].into();
+        assert_eq!(index(&[a.clone(), b.clone()], 0, |v| v / 2.0), Some(2.0));
+        assert_eq!(index(&[a, b], 3600, |v| v), None);
+        assert_eq!(index(&[], 0, |v| v), None, "no points is no index, not NaN");
+    }
+
+    #[test]
+    fn spearman_rank_correlation() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0];
+        assert!((spearman(&a, &[10.0, 20.0, 30.0, 40.0, 50.0]) - 1.0).abs() < 1e-12);
+        assert!((spearman(&a, &[5.0, 4.0, 3.0, 2.0, 1.0]) + 1.0).abs() < 1e-12);
+        // Monotonic but non-linear is still a perfect rank match.
+        assert!((spearman(&a, &[1.0, 8.0, 27.0, 64.0, 125.0]) - 1.0).abs() < 1e-12);
+        let r = spearman(&a, &[2.0, 1.0, 4.0, 3.0, 5.0]);
+        assert!((r - 0.8).abs() < 1e-12, "{r}");
+    }
+
+    #[test]
+    fn overlap_of_cheapest_and_priciest_hours() {
+        let actual = [0.1, 0.5, 0.2, 0.9, 0.3, 0.8];
+        let forecast = [0.2, 0.95, 0.1, 0.7, 0.5, 0.6];
+        assert_eq!(overlap(&forecast, &actual, 2, true), 2, "both pick hours 0 and 2");
+        assert_eq!(
+            overlap(&forecast, &actual, 2, false),
+            1,
+            "forecast 1+3, actual 3+5"
+        );
+        assert_eq!(
+            overlap(&forecast, &actual, 4, true),
+            3,
+            "forecast adds hour 5, actual hour 1"
+        );
+        assert_eq!(overlap(&forecast, &actual, 0, true), 0);
+        assert_eq!(overlap(&forecast, &actual, 10, true), 6, "k larger than the day");
+    }
+
+    #[test]
+    fn tariff_samples_are_filtered_and_grouped_by_year() {
+        // 2025-12-31 23:00 UTC and 2026-01-01 00:00/01:00 UTC.
+        let (h1, h2, h3) = (1_767_222_000, 1_767_225_600, 1_767_229_200);
+        let cost: HashMap<i64, f64> = [(h1, 0.5), (h2, 0.6), (h3, 0.7)].into();
+        let energy: HashMap<i64, f64> = [(h1, 2.0), (h2, 0.05), (h3, 3.0)].into();
+        let wholesale: HashMap<i64, f64> = [(h1, 0.1), (h3, 0.2)].into();
+        let by_year = samples_by_year(&cost, &energy, &wholesale, 0.1);
+        assert_eq!(by_year.keys().copied().collect::<Vec<_>>(), [2025, 2026]);
+        assert_eq!(by_year[&2025].len(), 1);
+        // h2 is below the minimum energy; h3 is kept.
+        let s = &by_year[&2026];
+        assert_eq!(
+            (s.len(), s[0].energy_kwh, s[0].wholesale, s[0].cost),
+            (1, 3.0, 0.2, 0.7)
+        );
+    }
 }

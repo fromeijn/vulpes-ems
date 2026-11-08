@@ -295,7 +295,13 @@ pub(crate) type Plane = (String, PlaneParams, Option<ShadingMap>);
 
 /// Load calibrated planes (and shading maps, unless disabled) written by `calibrate-solar`.
 pub(crate) fn load_planes(path: &Path, shading: bool) -> Result<Vec<Plane>> {
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    parse_planes(&text, shading)
+}
+
+/// Parse `calibrate-solar` output: `{name: {"params": {...}, "shading": {...} | null}}`.
+fn parse_planes(text: &str, shading: bool) -> Result<Vec<Plane>> {
+    let v: serde_json::Value = serde_json::from_str(text)?;
     let obj = v.as_object().context("planes file must be a JSON object")?;
     obj.iter()
         .map(|(name, e)| {
@@ -491,4 +497,138 @@ pub(crate) fn evaluate(
         100.0 * (1.0 - (ens.sq / pers.sq).sqrt())
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vulpes_core::ForecastPoint;
+
+    // 2026-06-21 00:00 UTC (a Sunday, ISO week 25).
+    const DAY: i64 = 1_782_000_000;
+
+    #[test]
+    fn iso_week_split() {
+        assert_eq!(DateTime::from_timestamp(DAY, 0).unwrap().iso_week().week(), 25);
+        assert!(Weeks::Odd.includes(DAY) && !Weeks::Even.includes(DAY) && Weeks::All.includes(DAY));
+        let next_week = DAY + 86_400; // Monday, week 26
+        assert!(Weeks::Even.includes(next_week) && !Weeks::Odd.includes(next_week));
+    }
+
+    #[test]
+    fn haurwitz_clear_sky() {
+        assert!((clear_sky_ghi(0.0) - 1098.0 * (-0.057f64).exp()).abs() < 1e-9);
+        assert!(clear_sky_ghi(60.0) < clear_sky_ghi(30.0));
+        assert_eq!(clear_sky_ghi(90.0), 0.0);
+        assert_eq!(clear_sky_ghi(120.0), 0.0);
+    }
+
+    #[test]
+    fn quantiles() {
+        let v = vec![5.0, 1.0, 3.0, 2.0, 4.0];
+        assert_eq!(quantile(v.clone(), 0.0), 1.0);
+        assert_eq!(quantile(v.clone(), 0.5), 3.0);
+        assert_eq!(quantile(v, 1.0), 5.0);
+        assert_eq!(quantile(Vec::new(), 0.5), 0.0);
+    }
+
+    #[test]
+    fn daily_energy_per_utc_day() {
+        let hourly: HashMap<i64, f64> = [(DAY, 1000.0), (DAY + 3600, 500.0), (DAY + 86_400, 2000.0)].into();
+        let d = daily(&hourly);
+        assert_eq!((d[&DAY], d[&(DAY + 86_400)]), (1.5, 2.0));
+    }
+
+    #[test]
+    fn score_line() {
+        let mut s = Score::new();
+        s.add(11.0, 10.0);
+        s.add(7.0, 10.0);
+        assert_eq!((s.n, s.abs, s.sq, s.bias), (2, 4.0, 10.0, -2.0));
+        let line = s.line("test", 10.0);
+        assert!(
+            line.contains("MAE  2.00") && line.contains("(20.0%)") && line.contains("bias -1.00"),
+            "{line}"
+        );
+    }
+
+    fn planes_json() -> &'static str {
+        r#"{
+            "east": {"params": {"azimuth": 90, "tilt": 30, "pdc0": 400, "ac_max": 350},
+                     "shading": {"az_step": 10, "el_step": 10, "factors": [[0.5]]}},
+            "west": {"params": {"azimuth": 270, "tilt": 30, "pdc0": 400, "ac_max": 350}, "shading": null}
+        }"#
+    }
+
+    #[test]
+    fn planes_file_parsing() {
+        let with = parse_planes(planes_json(), true).unwrap();
+        assert_eq!(with.len(), 2);
+        let east = with.iter().find(|p| p.0 == "east").unwrap();
+        assert!(east.2.is_some() && east.1.azimuth == 90.0);
+        assert!(with.iter().find(|p| p.0 == "west").unwrap().2.is_none());
+        assert!(
+            parse_planes(planes_json(), false)
+                .unwrap()
+                .iter()
+                .all(|p| p.2.is_none())
+        );
+        assert!(parse_planes("[1, 2]", true).is_err(), "must be an object");
+        assert!(parse_planes(r#"{"x": {"params": {"tilt": 3}}}"#, true).is_err());
+        assert!(parse_planes("not json", true).is_err());
+    }
+
+    fn store_with_weather(hours: i64, skip: Option<i64>) -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        let vals = [
+            ("shortwave_radiation", 400.0),
+            ("direct_normal_irradiance", 500.0),
+            ("diffuse_radiation", 100.0),
+            ("temperature_2m", 20.0),
+            ("wind_speed_10m", 2.0),
+        ];
+        for (var, v) in vals {
+            let pts: Vec<ForecastPoint> = (0..hours * 4)
+                .map(|k| DAY + 10 * 3600 + k * 900)
+                .filter(|&t| Some(t) != skip || var != "temperature_2m")
+                .map(|t| ForecastPoint {
+                    valid_ts: t,
+                    issued_ts: t - 86_400,
+                    value: v,
+                })
+                .collect();
+            store.put_forecasts("src", var, &pts).unwrap();
+        }
+        store
+    }
+
+    #[test]
+    fn load_inputs_builds_complete_hours() {
+        let skip = DAY + 11 * 3600 + 900; // one missing quarter in the second hour
+        let store = store_with_weather(3, Some(skip));
+        let d = load_inputs(&store, "src", 52.0, 5.0, DAY, DAY + 86_400).unwrap();
+        assert_eq!(d.hours, vec![DAY + 10 * 3600, DAY + 12 * 3600]);
+        assert_eq!((d.inputs.len(), d.kt.len()), (2, 2));
+        assert_eq!(d.inputs[0].day_of_year, 172);
+        assert_eq!(d.inputs[0].weather[3].ghi, 400.0);
+        // Midday in June at 52° N: 400 W/m² is well below clear sky.
+        assert!(d.kt[0] > 0.3 && d.kt[0] < 0.6, "{}", d.kt[0]);
+        assert!(load_inputs(&store, "other", 52.0, 5.0, DAY, DAY + 86_400).is_err());
+    }
+
+    #[test]
+    fn plant_is_the_sum_of_its_planes() {
+        let store = store_with_weather(2, None);
+        let d = load_inputs(&store, "src", 52.0, 5.0, DAY, DAY + 86_400).unwrap();
+        let planes = parse_planes(planes_json(), false).unwrap();
+        let total = plant_hourly(&planes, &d);
+        let single = |i: usize| plant_hourly(&planes[i..=i], &d);
+        for h in &d.hours {
+            assert!((total[h] - single(0)[h] - single(1)[h]).abs() < 1e-9);
+            assert!(total[h] > 0.0);
+        }
+        // Shading on one plane lowers the total.
+        let shaded = plant_hourly(&parse_planes(planes_json(), true).unwrap(), &d);
+        assert!(d.hours.iter().all(|h| shaded[h] <= total[h]));
+    }
 }
