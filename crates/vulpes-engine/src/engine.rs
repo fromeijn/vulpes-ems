@@ -6,6 +6,7 @@ use vulpes_load::{Country, ProfileForecaster, ProfileOptions};
 use vulpes_opt::{Problem, SlotInput, optimize};
 use vulpes_solar::model::{Weather, plane_ac_power};
 use vulpes_solar::sun_position;
+use vulpes_sources::open_meteo::WeatherSeries;
 use vulpes_sources::{Location as SrcLocation, open_meteo};
 
 const WEATHER_VARS: &[&str] = &[
@@ -33,7 +34,13 @@ fn fetch_weather(req: &PlanRequest) -> Result<HashMap<i64, WeatherSlot>> {
         range: open_meteo::Range::Forecast { days },
     })
     .map_err(|e| Error::Weather(e.to_string()))?;
-    // (start) -> per model: [ghi, dni, dhi, temp, wind]
+    Ok(average_models(series))
+}
+
+/// Combine per-model series into one weather slot per start time: the mean
+/// over the models that have all variables at that time.
+fn average_models(series: Vec<WeatherSeries>) -> HashMap<i64, WeatherSlot> {
+    // (start, model) -> [ghi, dni, dhi, temp, wind]
     let mut per: HashMap<(i64, String), [Option<f64>; 5]> = HashMap::new();
     for s in series {
         let Some(k) = WEATHER_VARS.iter().position(|v| *v == s.var) else {
@@ -53,8 +60,7 @@ fn fetch_weather(req: &PlanRequest) -> Result<HashMap<i64, WeatherSlot>> {
             entry.1 += 1;
         }
     }
-    Ok(acc
-        .into_iter()
+    acc.into_iter()
         .map(|(t, (s, n))| {
             let n = n as f64;
             (
@@ -69,7 +75,7 @@ fn fetch_weather(req: &PlanRequest) -> Result<HashMap<i64, WeatherSlot>> {
                 },
             )
         })
-        .collect())
+        .collect()
 }
 
 /// Mean of a 15-minute weather series over `[start, start + step)`.
@@ -389,5 +395,276 @@ mod tests {
         let mut bad = req;
         bad.timezone = "Mars/Olympus".into();
         assert!(plan(&bad).is_err());
+    }
+
+    fn ws(start: i64, ghi: f64) -> WeatherSlot {
+        WeatherSlot {
+            start,
+            ghi,
+            dni: 2.0 * ghi,
+            dhi: 0.5 * ghi,
+            temp_air: 10.0,
+            wind_speed: 2.0,
+        }
+    }
+
+    #[test]
+    fn average_models_uses_complete_models_only() {
+        let s = |model: &str, var: &str, pts: Vec<(i64, f64)>| WeatherSeries {
+            model: model.into(),
+            var: var.into(),
+            points: pts,
+        };
+        let mut series = Vec::new();
+        for (k, var) in WEATHER_VARS.iter().enumerate() {
+            series.push(s("a", var, vec![(0, 10.0 * (k + 1) as f64), (900, 1.0)]));
+            // Model b lacks wind at t=900, so only model a counts there.
+            let pts = if *var == "wind_speed_10m" {
+                vec![(0, 30.0 * (k + 1) as f64)]
+            } else {
+                vec![(0, 30.0 * (k + 1) as f64), (900, 5.0)]
+            };
+            series.push(s("b", var, pts));
+        }
+        series.push(s("a", "cloud_cover", vec![(0, 99.0)])); // ignored
+        let w = average_models(series);
+        assert_eq!(w.len(), 2);
+        let t0 = w[&0];
+        assert_eq!(
+            (t0.ghi, t0.dni, t0.dhi, t0.temp_air, t0.wind_speed),
+            (20.0, 40.0, 60.0, 80.0, 100.0)
+        );
+        assert_eq!(w[&900].ghi, 1.0);
+        assert!(average_models(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn weather_for_averages_quarter_hours_within_the_step() {
+        let w: HashMap<i64, WeatherSlot> = [ws(0, 100.0), ws(900, 300.0)]
+            .into_iter()
+            .map(|x| (x.start, x))
+            .collect();
+        assert_eq!(weather_for(&w, 0, 900).unwrap().len(), 1);
+        let hour = weather_for(&w, 0, 3600).unwrap();
+        assert_eq!(hour.len(), 2, "missing quarters are skipped");
+        assert!(weather_for(&w, 7200, 3600).is_none());
+    }
+
+    #[test]
+    fn invalid_requests_are_rejected() {
+        let base = request(1_781_000_000);
+        let check = |mut f: Box<dyn FnMut(&mut PlanRequest)>, want: &str| {
+            let mut r = base.clone();
+            f(&mut r);
+            let err = plan(&r).expect_err(want).to_string();
+            assert!(err.contains(want), "{want}: got '{err}'");
+        };
+        check(Box::new(|r| r.modes.clear()), "no modes");
+        check(Box::new(|r| r.step_s = 0), "multiple of 900");
+        check(Box::new(|r| r.step_s = 600), "multiple of 900");
+        check(Box::new(|r| r.battery.capacity_wh = 0.0), "invalid battery");
+        check(
+            Box::new(|r| r.timezone = "Nowhere/City".into()),
+            "unknown time zone",
+        );
+        check(Box::new(|r| r.load_history.clear()), "load_history is empty");
+        check(Box::new(|r| r.weather = Some(Vec::new())), "no weather");
+        check(
+            Box::new(|r| {
+                r.known_prices.clear();
+                r.wholesale_history.clear();
+            }),
+            "no known prices",
+        );
+    }
+
+    #[test]
+    fn invalid_json_is_a_request_error() {
+        assert!(matches!(crate::plan_json("{"), Err(Error::Request(_))));
+        assert!(matches!(
+            crate::plan_json(r#"{"now": 1}"#),
+            Err(Error::Request(_))
+        ));
+    }
+
+    #[test]
+    fn slots_start_on_the_step_boundary() {
+        let now = 1_781_000_000 + 7 * 60; // 7 minutes into a quarter hour
+        let resp = plan(&request(now)).unwrap();
+        assert_eq!(resp.slots[0].start, now - now.rem_euclid(900));
+        assert!(resp.slots.windows(2).all(|w| w[1].start - w[0].start == 900));
+        assert_eq!(resp.summary.mode_now, resp.slots[0].mode);
+        assert_eq!(resp.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn hourly_steps() {
+        let mut r = request(1_781_000_000);
+        r.step_s = 3600;
+        let resp = plan(&r).unwrap();
+        assert_eq!(resp.slots.len(), 24);
+        assert!(resp.slots.windows(2).all(|w| w[1].start - w[0].start == 3600));
+    }
+
+    #[test]
+    fn missing_weather_at_the_end_warns_and_assumes_no_pv() {
+        let mut r = request(1_781_000_000);
+        let start = r.now - r.now.rem_euclid(900);
+        let cut = start + 90 * 900; // drop the last 6 of 96 slots
+        r.weather.as_mut().unwrap().retain(|w| w.start < cut);
+        let resp = plan(&r).unwrap();
+        assert!(
+            resp.warnings.iter().any(|w| w.contains("no weather for 6 slots")),
+            "{:?}",
+            resp.warnings
+        );
+        assert!(resp.slots[90..].iter().all(|s| s.pv_w == 0.0));
+    }
+
+    #[test]
+    fn unpublished_prices_come_from_wholesale_through_the_tariff() {
+        let mut r = request(1_781_000_000);
+        r.known_prices.truncate(6); // the first 6 hours are published
+        r.wholesale_history = (0..(24 * 30))
+            .map(|h| (r.now - 30 * 86_400 + h * 3600, 0.10))
+            .collect();
+        let resp = plan(&r).unwrap();
+        let later = &resp.slots[6 * 4..];
+        assert!(later.iter().all(|s| !s.price_known));
+        for s in later {
+            assert!((s.import_price - (1.21 * 0.10 + 0.13)).abs() < 1e-9, "{s:?}");
+            // Without net metering: export = export_a × wholesale + export_b.
+            assert!((s.export_price - 1.21 * 0.10).abs() < 1e-9, "{s:?}");
+        }
+        assert!(resp.slots[..6 * 4].iter().all(|s| s.price_known));
+        assert!(resp.warnings.is_empty(), "{:?}", resp.warnings);
+    }
+
+    #[test]
+    fn without_wholesale_history_unknown_prices_use_the_mean_known_price() {
+        let mut r = request(1_781_000_000);
+        r.known_prices.truncate(6); // all at 0.10
+        let resp = plan(&r).unwrap();
+        assert!(
+            resp.slots[6 * 4..]
+                .iter()
+                .all(|s| (s.import_price - 0.10).abs() < 1e-12)
+        );
+        assert!(
+            resp.warnings
+                .iter()
+                .any(|w| w.contains("used the mean known price")),
+            "{:?}",
+            resp.warnings
+        );
+    }
+
+    #[test]
+    fn net_metering_pays_export_at_the_import_price() {
+        let mut r = request(1_781_000_000);
+        r.export.net_metering = true;
+        let resp = plan(&r).unwrap();
+        assert!(resp.slots.iter().all(|s| s.export_price == s.import_price));
+    }
+
+    #[test]
+    fn terminal_value_is_the_median_price_after_discharge_losses() {
+        let resp = plan(&request(1_781_000_000)).unwrap();
+        // 6 hours at 0.10 and 18 at 0.40: the median is 0.40.
+        assert!((resp.summary.terminal_value_per_kwh - 0.40 * 0.95).abs() < 1e-12);
+    }
+
+    #[test]
+    fn short_load_history_falls_back_to_the_mean_with_a_warning() {
+        let mut r = request(1_781_000_000);
+        r.load_history = vec![(r.now - 3 * 3600, 600.0), (r.now - 2 * 3600, 200.0)];
+        let resp = plan(&r).unwrap();
+        assert!(
+            resp.warnings.iter().any(|w| w.contains("load profile missing")),
+            "{:?}",
+            resp.warnings
+        );
+        // Hours with history on an earlier day use it; all other hours use the mean.
+        let at = |h: i64| {
+            let t = r.now - r.now.rem_euclid(3600) + h * 3600;
+            resp.slots.iter().find(|s| s.start == t).unwrap().load_w
+        };
+        assert_eq!((at(21), at(22)), (600.0, 200.0));
+        assert!(resp.slots.iter().filter(|s| s.load_w == 400.0).count() >= 22 * 4);
+    }
+
+    /// The JSON the Home Assistant integration sends (`coordinator._request`):
+    /// optional fields left out, tuples as arrays, integer numbers.
+    #[test]
+    fn integration_request_shape_parses_with_defaults() {
+        let json = serde_json::json!({
+            "now": 1_781_000_000,
+            "horizon_h": 36,
+            "location": {"lat": 52.0, "lon": 5.0},
+            "timezone": "Europe/Amsterdam",
+            "country": "nl",
+            "battery": {"capacity_wh": 10000, "max_charge_w": 3000, "max_discharge_w": 3000,
+                        "charge_eff": 0.95, "discharge_eff": 0.95, "min_soc": 0.1, "max_soc": 1.0,
+                        "wear_cost_per_kwh": 0.02},
+            "grid": {"max_import_w": 17250, "max_export_w": 17250},
+            "modes": [{"name": "charge", "behaviour": {"type": "grid_setpoint", "w": 3000}, "pv_curtail": false},
+                      {"name": "charge:pv_off", "behaviour": {"type": "grid_setpoint", "w": 3000}, "pv_curtail": true}],
+            "soc_wh": 5000,
+            "planes": [{"azimuth": 180, "tilt": 35, "pdc0": 3000, "ac_max": 2800, "label": "extra fields are ignored"}],
+            "load_history": [[1_780_996_400, 400.0]],
+            "known_prices": [{"start": 1_780_999_200, "end": 1_781_002_800, "import": 0.25}],
+            "tariff": {"a": 1.21, "b": 0.13},
+            "export": {"net_metering": true, "a": 1.21, "b": 0.0},
+            "wholesale_history": [[1_780_996_400, 0.1]]
+        });
+        let r: PlanRequest = serde_json::from_value(json).unwrap();
+        assert_eq!((r.step_s, r.horizon_h), (900, 36));
+        assert_eq!(
+            r.weather_models,
+            vec!["knmi_harmonie_arome_netherlands", "icon_d2"]
+        );
+        assert!(r.weather.is_none());
+        assert_eq!(r.load_history, vec![(1_780_996_400, 400.0)]);
+        assert!(r.modes[1].pv_curtail);
+        assert_eq!(r.planes[0].inverter_eff, 0.965);
+    }
+
+    /// The fields the integration reads from the response.
+    #[test]
+    fn response_json_fields() {
+        let resp = plan(&request(1_781_000_000)).unwrap();
+        let v = serde_json::to_value(&resp).unwrap();
+        let keys = |v: &serde_json::Value| {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(keys(&v), ["slots", "summary", "version", "warnings"]);
+        assert_eq!(
+            keys(&v["summary"]),
+            [
+                "cost",
+                "load_kwh_24h",
+                "mode_now",
+                "pv_kwh_24h",
+                "terminal_value_per_kwh"
+            ]
+        );
+        assert_eq!(
+            keys(&v["slots"][0]),
+            [
+                "battery_w",
+                "export_price",
+                "grid_w",
+                "import_price",
+                "load_w",
+                "mode",
+                "price_known",
+                "pv_w",
+                "soc_pct",
+                "start"
+            ]
+        );
+        assert!(resp.summary.cost.is_finite());
     }
 }

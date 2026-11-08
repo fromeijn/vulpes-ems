@@ -29,3 +29,60 @@ pub struct ModeDef {
     #[serde(default)]
     pub pv_curtail: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The JSON shape is shared with the Python integration: keep it stable.
+    #[test]
+    fn behaviour_json_format() {
+        let cases = [
+            (
+                Behaviour::GridSetpoint { w: 3000.0 },
+                json!({"type": "grid_setpoint", "w": 3000.0}),
+            ),
+            (Behaviour::SelfConsume, json!({"type": "self_consume"})),
+            (Behaviour::NoDischarge, json!({"type": "no_discharge"})),
+            (Behaviour::Idle, json!({"type": "idle"})),
+            (
+                Behaviour::BatteryPower { w: -1500.0 },
+                json!({"type": "battery_power", "w": -1500.0}),
+            ),
+        ];
+        for (b, want) in cases {
+            assert_eq!(serde_json::to_value(b).unwrap(), want);
+            assert_eq!(serde_json::from_value::<Behaviour>(want).unwrap(), b);
+        }
+    }
+
+    #[test]
+    fn integer_power_is_accepted() {
+        let b: Behaviour = serde_json::from_value(json!({"type": "grid_setpoint", "w": 3318})).unwrap();
+        assert_eq!(b, Behaviour::GridSetpoint { w: 3318.0 });
+    }
+
+    #[test]
+    fn unknown_or_incomplete_behaviour_is_rejected() {
+        assert!(serde_json::from_value::<Behaviour>(json!({"type": "force_charge"})).is_err());
+        assert!(serde_json::from_value::<Behaviour>(json!({"type": "grid_setpoint"})).is_err());
+        assert!(serde_json::from_value::<Behaviour>(json!({"w": 10.0})).is_err());
+    }
+
+    #[test]
+    fn mode_def_curtail_defaults_to_false() {
+        let m: ModeDef =
+            serde_json::from_value(json!({"name": "hold", "behaviour": {"type": "no_discharge"}})).unwrap();
+        assert_eq!(
+            m,
+            ModeDef {
+                name: "hold".into(),
+                behaviour: Behaviour::NoDischarge,
+                pv_curtail: false
+            }
+        );
+        let back: ModeDef = serde_json::from_value(serde_json::to_value(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
+    }
+}

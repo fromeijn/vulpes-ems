@@ -1204,6 +1204,7 @@ version = "0.2.0"
 dependencies = [
  "rusqlite",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -1272,6 +1273,7 @@ name = "vulpes-solar"
 version = "0.2.0"
 dependencies = [
  "serde",
+ "serde_json",
  "vulpes-core",
 ]
 

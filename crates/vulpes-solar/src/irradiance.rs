@@ -84,3 +84,69 @@ pub fn perez_sky_diffuse(
 pub fn ground_diffuse(tilt: f64, ghi: f64, albedo: f64) -> f64 {
     ghi * albedo * (1.0 - tilt.to_radians().cos()) * 0.5
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extraterrestrial_peaks_at_perihelion_and_averages_the_solar_constant() {
+        let (jan, jul) = (extra_dni(3), extra_dni(185));
+        assert!((jan - 1412.0).abs() < 3.0, "{jan}");
+        assert!((jul - 1321.0).abs() < 3.0, "{jul}");
+        let mean: f64 = (1..=365).map(extra_dni).sum::<f64>() / 365.0;
+        assert!((mean - 1366.1).abs() < 1.0, "{mean}");
+    }
+
+    #[test]
+    fn airmass_values() {
+        assert!((airmass(0.0).unwrap() - 1.0).abs() < 0.001);
+        assert!((airmass(60.0).unwrap() - 1.99).abs() < 0.01);
+        assert!(airmass(85.0).unwrap() > airmass(60.0).unwrap());
+        assert_eq!(airmass(90.0), None);
+        assert_eq!(airmass(120.0), None);
+    }
+
+    #[test]
+    fn cos_aoi_geometry() {
+        // Flat plane: the incidence angle is the zenith angle.
+        assert!((cos_aoi(0.0, 180.0, 40.0, 123.0) - 40f64.to_radians().cos()).abs() < 1e-12);
+        // Sun perpendicular to the plane.
+        assert!((cos_aoi(35.0, 180.0, 35.0, 180.0) - 1.0).abs() < 1e-12);
+        // Sun in the plane (grazing).
+        assert!(cos_aoi(90.0, 180.0, 90.0, 90.0).abs() < 1e-12);
+        // Sun behind a vertical south wall.
+        assert!(cos_aoi(90.0, 180.0, 60.0, 0.0) < 0.0);
+    }
+
+    #[test]
+    fn perez_on_a_flat_plane_is_the_horizontal_diffuse() {
+        for (dhi, dni, z) in [(100.0, 0.0, 30.0), (150.0, 700.0, 50.0), (60.0, 300.0, 80.0)] {
+            let sky = perez_sky_diffuse(0.0, 180.0, dhi, dni, 1366.1, z, 180.0);
+            assert!((sky - dhi).abs() < 1e-9, "dhi {dhi} dni {dni} z {z}: {sky}");
+        }
+    }
+
+    #[test]
+    fn perez_zero_cases_and_circumsolar_gain() {
+        assert_eq!(
+            perez_sky_diffuse(30.0, 180.0, 0.0, 500.0, 1366.1, 40.0, 180.0),
+            0.0
+        );
+        assert_eq!(
+            perez_sky_diffuse(30.0, 180.0, 100.0, 0.0, 1366.1, 95.0, 180.0),
+            0.0
+        );
+        // Clear sky: a plane facing the sun gets more diffuse than one facing away.
+        let facing = perez_sky_diffuse(40.0, 180.0, 100.0, 800.0, 1366.1, 40.0, 180.0);
+        let away = perez_sky_diffuse(40.0, 0.0, 100.0, 800.0, 1366.1, 40.0, 180.0);
+        assert!(facing > away && away >= 0.0, "{facing} {away}");
+    }
+
+    #[test]
+    fn ground_reflection() {
+        assert_eq!(ground_diffuse(0.0, 800.0, 0.2), 0.0);
+        assert!((ground_diffuse(90.0, 800.0, 0.2) - 80.0).abs() < 1e-9);
+        assert!((ground_diffuse(180.0, 800.0, 0.2) - 160.0).abs() < 1e-9);
+    }
+}

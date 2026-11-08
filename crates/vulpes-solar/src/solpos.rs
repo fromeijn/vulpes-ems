@@ -62,3 +62,85 @@ pub fn sun_position(ts: f64, lat: f64, lon: f64) -> SunPosition {
         azimuth: azimuth * 180.0 / PI,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 2026-03-20 12:00 UTC (equinox day) and 2026-06-21 12:00 UTC (solstice).
+    const EQUINOX_NOON: f64 = 1_774_008_000.0;
+    const SOLSTICE_NOON: f64 = 1_782_043_200.0;
+
+    #[test]
+    fn equinox_noon_zenith_is_about_the_latitude() {
+        for lat in [-45.0, 0.0, 30.0, 52.0] {
+            let s = sun_position(EQUINOX_NOON, lat, 0.0);
+            // Declination ≈ 0 and the equation of time is a few minutes.
+            assert!(
+                (s.zenith - f64::abs(lat)).abs() < 2.0,
+                "lat {lat}: zenith {}",
+                s.zenith
+            );
+        }
+    }
+
+    #[test]
+    fn noon_sun_is_south_in_the_north_and_north_in_the_south() {
+        let north = sun_position(EQUINOX_NOON, 52.0, 0.0);
+        assert!((north.azimuth - 180.0).abs() < 5.0, "{north:?}");
+        let south = sun_position(EQUINOX_NOON, -35.0, 0.0);
+        assert!(south.azimuth < 5.0 || south.azimuth > 355.0, "{south:?}");
+    }
+
+    #[test]
+    fn solstice_sun_is_overhead_at_the_tropic() {
+        let s = sun_position(SOLSTICE_NOON, 23.44, 0.0);
+        assert!(s.zenith < 1.5, "{s:?}");
+    }
+
+    #[test]
+    fn night_morning_afternoon() {
+        let (lat, lon) = (52.0, 0.0);
+        assert!(
+            sun_position(EQUINOX_NOON - 12.0 * 3600.0, lat, lon).zenith > 90.0,
+            "midnight"
+        );
+        let morning = sun_position(EQUINOX_NOON - 3.0 * 3600.0, lat, lon);
+        let afternoon = sun_position(EQUINOX_NOON + 3.0 * 3600.0, lat, lon);
+        assert!(morning.azimuth < 180.0 && afternoon.azimuth > 180.0);
+        // Roughly symmetric about noon.
+        assert!((morning.zenith - afternoon.zenith).abs() < 2.5);
+        assert!((morning.elevation() - (90.0 - morning.zenith)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn longitude_shifts_time_by_four_minutes_per_degree() {
+        let a = sun_position(EQUINOX_NOON, 52.0, 0.0);
+        let b = sun_position(EQUINOX_NOON + 15.0 * 240.0, 52.0, -15.0);
+        assert!((a.zenith - b.zenith).abs() < 0.05 && (a.azimuth - b.azimuth).abs() < 0.1);
+    }
+
+    #[test]
+    fn azimuth_is_always_in_range() {
+        for k in 0..96 {
+            let s = sun_position(EQUINOX_NOON + k as f64 * 900.0, 52.0, 5.0);
+            assert!(
+                (0.0..360.0).contains(&s.azimuth) && (0.0..=180.0).contains(&s.zenith),
+                "{s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn polar_night_and_midnight_sun() {
+        let winter = SOLSTICE_NOON + 183.0 * 86_400.0;
+        for k in 0..24 {
+            let t = k as f64 * 3600.0;
+            assert!(sun_position(winter + t, 80.0, 0.0).zenith > 90.0, "polar night");
+            assert!(
+                sun_position(SOLSTICE_NOON + t, 80.0, 0.0).zenith < 90.0,
+                "midnight sun"
+            );
+        }
+    }
+}

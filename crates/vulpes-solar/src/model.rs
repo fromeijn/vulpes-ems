@@ -135,3 +135,120 @@ pub fn plane_ac_power(
     let dc = p.pdc0 * g / 1000.0 * (1.0 + p.gamma * (tc - 25.0));
     (dc * p.inverter_eff).clamp(0.0, p.ac_max)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plane() -> PlaneParams {
+        serde_json::from_str(r#"{"azimuth": 180, "tilt": 35, "pdc0": 400, "ac_max": 300}"#).unwrap()
+    }
+    fn sun(zenith: f64) -> SunPosition {
+        SunPosition {
+            zenith,
+            azimuth: 180.0,
+        }
+    }
+    fn weather(ghi: f64, dni: f64, dhi: f64, temp_air: f64) -> Weather {
+        Weather {
+            ghi,
+            dni,
+            dhi,
+            temp_air,
+            wind_speed: 1.0,
+        }
+    }
+
+    #[test]
+    fn serde_fills_defaults() {
+        let p = plane();
+        assert_eq!((p.inverter_eff, p.gamma, p.iam_b0), (0.965, -0.004, 0.05));
+        assert_eq!((p.albedo, p.u0, p.u1), (0.2, 25.0, 6.84));
+        let back: PlaneParams = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
+        assert!(serde_json::from_str::<PlaneParams>(r#"{"azimuth": 180, "tilt": 35}"#).is_err());
+    }
+
+    #[test]
+    fn iam_bounds_and_shape() {
+        assert_eq!(iam_ashrae(1.0, 0.05), 1.0);
+        assert_eq!(iam_ashrae(0.0, 0.05), 0.0);
+        assert_eq!(iam_ashrae(-0.5, 0.05), 0.0);
+        assert!(iam_ashrae(0.5, 0.05) < iam_ashrae(0.9, 0.05));
+        assert_eq!(iam_ashrae(0.01, 0.05), 0.0, "clamped at grazing angles");
+    }
+
+    #[test]
+    fn cell_temperature() {
+        assert_eq!(cell_temp(0.0, 12.0, 3.0, 25.0, 6.84), 12.0);
+        let calm = cell_temp(800.0, 20.0, 0.0, 25.0, 6.84);
+        assert!((calm - 52.0).abs() < 1e-9);
+        assert!(cell_temp(800.0, 20.0, 5.0, 25.0, 6.84) < calm);
+        assert_eq!(
+            cell_temp(800.0, 20.0, -3.0, 25.0, 6.84),
+            calm,
+            "negative wind treated as calm"
+        );
+    }
+
+    #[test]
+    fn dark_or_sun_down_gives_zero() {
+        let p = plane();
+        assert_eq!(
+            plane_ac_power(&p, sun(100.0), weather(50.0, 50.0, 50.0, 10.0), 172, 1.0),
+            0.0
+        );
+        assert_eq!(
+            plane_ac_power(&p, sun(40.0), weather(0.0, 0.0, 0.0, 10.0), 172, 1.0),
+            0.0
+        );
+        let poa_down = poa(&p, sun(90.0), weather(10.0, 10.0, 10.0, 10.0), 172);
+        assert_eq!(poa_down.total(), 0.0);
+    }
+
+    #[test]
+    fn negative_weather_inputs_are_ignored() {
+        let p = plane();
+        let w = weather(-5.0, -5.0, -5.0, 10.0);
+        assert_eq!(plane_ac_power(&p, sun(40.0), w, 172, 1.0), 0.0);
+    }
+
+    #[test]
+    fn clipping_and_linear_scaling() {
+        let mut p = plane();
+        let bright = weather(1000.0, 900.0, 100.0, 15.0);
+        assert_eq!(plane_ac_power(&p, sun(35.0), bright, 172, 1.0), p.ac_max);
+        p.ac_max = 1e9;
+        let one = plane_ac_power(&p, sun(35.0), bright, 172, 1.0);
+        p.pdc0 *= 2.0;
+        let two = plane_ac_power(&p, sun(35.0), bright, 172, 1.0);
+        assert!((two - 2.0 * one).abs() < 1e-9 && one > 0.0);
+    }
+
+    #[test]
+    fn heat_and_shading_reduce_power() {
+        let mut p = plane();
+        p.ac_max = 1e9;
+        let cool = plane_ac_power(&p, sun(35.0), weather(800.0, 700.0, 100.0, 0.0), 172, 1.0);
+        let hot = plane_ac_power(&p, sun(35.0), weather(800.0, 700.0, 100.0, 35.0), 172, 1.0);
+        assert!(hot < cool);
+        let w = weather(800.0, 700.0, 100.0, 15.0);
+        let full = plane_ac_power(&p, sun(35.0), w, 172, 1.0);
+        let shaded = plane_ac_power(&p, sun(35.0), w, 172, 0.0);
+        let clamped = plane_ac_power(&p, sun(35.0), w, 172, -1.0);
+        assert!(
+            shaded < full && shaded > 0.0,
+            "diffuse remains when the beam is shaded"
+        );
+        assert_eq!(shaded, clamped);
+        assert_eq!(plane_ac_power(&p, sun(35.0), w, 172, 2.0), full);
+    }
+
+    #[test]
+    fn beam_on_a_plane_facing_the_sun() {
+        let p = plane();
+        let irr = poa(&p, sun(35.0), weather(0.0, 800.0, 0.0, 15.0), 172);
+        // Sun perpendicular to the plane: no incidence loss.
+        assert!((irr.beam - 800.0).abs() < 1e-9 && irr.sky_diffuse == 0.0 && irr.ground == 0.0);
+    }
+}
