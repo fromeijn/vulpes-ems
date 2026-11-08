@@ -191,7 +191,19 @@ def test_duplicate_statistics_across_fields():
 
 @pytest.mark.parametrize(
     ("state", "value"),
-    [("55.5", 55.5), ("0", 0.0), ("100", 100.0), ("-1", None), ("101", None), ("unavailable", None), (None, None)],
+    [
+        ("55.5", 55.5),
+        ("0", 0.0),
+        ("100", 100.0),
+        ("100.4", 100.0),  # a full battery that reports slightly over 100 %
+        ("105", 100.0),
+        ("-1", 0.0),
+        ("106", None),
+        ("-6", None),
+        ("nan", None),
+        ("unavailable", None),
+        (None, None),
+    ],
 )
 def test_soc_value(state, value):
     assert sc.soc_value(state) == value

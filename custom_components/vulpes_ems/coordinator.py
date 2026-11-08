@@ -3,6 +3,7 @@ when the Active switch is on, runs the user's control script."""
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from datetime import datetime, timedelta
 import json
@@ -51,6 +52,9 @@ from .setup_checks import load_groups, load_series, parse_price_attributes, soc_
 from .solar_setup import engine_planes
 
 _LOGGER = logging.getLogger(__name__)
+# The control script runs to completion before the next step; errors in it
+# show up on the Battery control sensor.
+SCRIPT_TIMEOUT_S = 60
 
 
 async def async_energy_changes(
@@ -76,6 +80,8 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.agrees_now: bool | None = None
         self.calibration = SolarCalibration(hass, entry)
         # Active control: set by the Active switch (restored across restarts).
+        # The script is fixed for this setup: changing it reloads the entry.
+        self.control_script: str | None = self.cfg.get(CONF_CONTROL_SCRIPT) or None
         self.active = False
         self.last_command: dict[str, Any] | None = None
         self.last_error: str | None = None
@@ -100,9 +106,16 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.async_refresh()
         await self.async_apply()
 
-    @property
-    def control_script(self) -> str | None:
-        return self.cfg.get(CONF_CONTROL_SCRIPT) or None
+    async def async_release(self) -> None:
+        """On unload (settings changed, entry removed or disabled): hand control back.
+
+        Without this, the inverter would stay in the last mode Vulpes sent. A
+        reload with the same script restores the Active switch and applies the
+        plan again right away.
+        """
+        self.stop_schedule()
+        if self.active and self.control_script:
+            await self._async_run_script(safe_command(self.cfg, dt_util.utcnow().timestamp(), fallback=False))
 
     async def async_set_active(self, active: bool) -> None:
         """Hand over control (apply the plan now) or take it back (send the safe command once)."""
@@ -126,13 +139,18 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_run_script(self, cmd: dict[str, Any]) -> None:
         script = self.control_script
+        if script is None:
+            return
         try:
-            await self.hass.services.async_call(
-                "script", "turn_on", {"entity_id": script, "variables": cmd}, blocking=True
-            )
+            # Call the script's own service so errors in its actions reach us.
+            async with asyncio.timeout(SCRIPT_TIMEOUT_S):
+                await self.hass.services.async_call("script", script.split(".", 1)[1], cmd, blocking=True)
+        except TimeoutError:
+            _LOGGER.warning("Control script %s did not finish within %d s", script, SCRIPT_TIMEOUT_S)
+            self.last_error = f"did not finish within {SCRIPT_TIMEOUT_S} s"
         except Exception as err:  # noqa: BLE001 - a failing script must not stop the schedule
             _LOGGER.warning("Control script %s failed: %s", script, err)
-            self.last_error = str(err)
+            self.last_error = str(err) or type(err).__name__
         else:
             self.last_error = None
         self.last_command = {**cmd, "sent": dt_util.utcnow().isoformat()}

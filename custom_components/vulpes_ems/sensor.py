@@ -196,7 +196,7 @@ class ControlSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
 
     @property
     def native_value(self) -> str:
-        return state_of(self.coordinator.active, self.coordinator.last_command)
+        return state_of(self.coordinator.active, self.coordinator.last_command, self.coordinator.last_error)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

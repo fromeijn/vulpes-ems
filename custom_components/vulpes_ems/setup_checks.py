@@ -155,15 +155,20 @@ def duplicate_statistics(cfg: dict[str, Any]) -> list[str]:
     return [s for s, n in counts.items() if n > 1]
 
 
+# Some battery management systems report a little over 100 % when full (or
+# just below 0 %): such readings are clamped instead of rejected.
+SOC_TOLERANCE = 5.0
+
+
 def soc_value(state: str | None) -> float | None:
     """A state of charge in % from a sensor state, or None if it isn't one."""
     try:
         value = float(state) if state is not None else None
     except ValueError:
         return None
-    if value is None or not 0.0 <= value <= 100.0:
-        return None
-    return value
+    if value is None or not -SOC_TOLERANCE <= value <= 100.0 + SOC_TOLERANCE:
+        return None  # also NaN
+    return min(max(value, 0.0), 100.0)
 
 
 def check_battery(cfg: dict[str, Any]) -> dict[str, str]:

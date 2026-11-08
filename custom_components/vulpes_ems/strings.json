@@ -392,7 +392,8 @@
         "state": {
           "off": "Off (shadow mode)",
           "following_plan": "Following the plan",
-          "fallback": "Fallback (self-consume)"
+          "fallback": "Fallback (self-consume)",
+          "script_error": "Script failed (see the error attribute)"
         }
       }
     },

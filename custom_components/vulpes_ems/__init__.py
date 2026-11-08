@@ -55,8 +55,8 @@ async def _async_reload(hass: HomeAssistant, entry: VulpesConfigEntry) -> None:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: VulpesConfigEntry) -> bool:
-    """Unload a config entry."""
-    entry.runtime_data.stop_schedule()
+    """Unload a config entry; while Active, hand control back to the inverter first."""
+    await entry.runtime_data.async_release()
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 

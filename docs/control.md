@@ -5,13 +5,15 @@ Vulpes starts in shadow mode: it plans and publishes sensors, but changes nothin
 ## How it works
 
 1. In the modes step, tick the modes your system can do and pick a **control script**.
-2. Vulpes adds two entities: the **Active** switch (off by default) and the **Battery control** sensor (`off`, `following_plan` or `fallback`).
-3. While Active is on, Vulpes runs `script.turn_on` with the variables below:
+2. Vulpes adds two entities: the **Active** switch (off by default) and the **Battery control** sensor (`off`, `following_plan`, `fallback` or `script_error`).
+3. While Active is on, Vulpes runs the script with the variables below:
    - every 15 minutes, 20 s after the quarter hour, right after planning;
    - immediately when you turn Active on.
 
    The switch keeps its state across restarts.
-4. When you turn Active off, Vulpes sends the safe command once, with `fallback: false`, so your inverter returns to normal self-consumption.
+4. When you turn Active off, Vulpes sends the safe command once, with `fallback: false`, so your inverter returns to normal self-consumption. The same happens when the integration is unloaded while Active is on: for example when you change its settings, clear the script, or disable or delete the entry. After a settings change the switch comes back on and Vulpes applies the plan again straight away.
+
+Vulpes waits for the script to finish, for at most 60 seconds. So keep it short: no delays or long waits.
 
 **Turn off your own battery automations before you turn Active on.** Otherwise they fight with Vulpes.
 
@@ -45,7 +47,7 @@ The mode values stay in English whatever the Home Assistant language: they are a
   - planning failed (for example the SOC sensor is unavailable);
   - the plan is more than 30 minutes old;
   - the plan has no slot for the current time.
-- **Errors:** a failing script is logged and shown in the `error` attribute of the Battery control sensor. The next slot tries again.
+- **Errors:** if the script or one of its actions fails (for example the inverter is offline), the error is logged and shown in the `error` attribute of the Battery control sensor. The next slot tries again.
 - **Inverter failsafe:** if Home Assistant itself stops, Vulpes can't send anything. Use the inverter's own failsafe or timeout where it has one, set longer than 15 minutes, so that it returns to normal operation by itself.
 - **Persistent settings:** settings that the inverter's failsafe doesn't revert (such as an export switch) stay as the last command left them.
 

@@ -137,3 +137,5 @@ def test_state_of():
     assert control.state_of(True, None) == control.FALLBACK
     assert control.state_of(True, {"fallback": True}) == control.FALLBACK
     assert control.state_of(True, {"fallback": False}) == control.FOLLOWING
+    assert control.state_of(True, {"fallback": False}, "Action notify.x not found") == control.SCRIPT_ERROR
+    assert control.state_of(False, {"fallback": False}, "boom") == control.OFF

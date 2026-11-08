@@ -27,7 +27,8 @@ SAFE_MODE = "self_consume"
 OFF = "off"
 FOLLOWING = "following_plan"
 FALLBACK = "fallback"
-STATES = [OFF, FOLLOWING, FALLBACK]
+SCRIPT_ERROR = "script_error"
+STATES = [OFF, FOLLOWING, FALLBACK, SCRIPT_ERROR]
 
 
 def _iso(ts: float) -> str:
@@ -94,8 +95,10 @@ def command(cfg: dict[str, Any], plan: dict[str, Any] | None, now: float, *, fai
     }
 
 
-def state_of(active: bool, last: dict[str, Any] | None) -> str:
-    """The control status: off, following the plan, or in fallback."""
+def state_of(active: bool, last: dict[str, Any] | None, error: str | None = None) -> str:
+    """The control status: off, following the plan, in fallback, or the script failed."""
     if not active:
         return OFF
+    if error:
+        return SCRIPT_ERROR
     return FALLBACK if last is None or last.get("fallback") else FOLLOWING
