@@ -12,7 +12,7 @@ The optimizer reasons about physical behaviours. The Home Assistant integration 
 | Idle | `idle` |
 | Discharge to grid | `grid_setpoint { −discharge power }` or `battery_power { −discharge power }` |
 
-"How power is set" chooses between grid setpoint and battery power. If solar can be switched off, each mode also gets a variant with `pv_curtail`.
+"How power is set" chooses between grid setpoint and battery power. If solar can be switched off, each mode also gets a variant with `pv_curtail`. If export can be blocked (zero export), Hold, Self-consume and Idle also get a variant with `no_export`.
 
 | Behaviour | Effect (AC side, grid positive = import) |
 |---|---|
@@ -22,7 +22,7 @@ The optimizer reasons about physical behaviours. The Home Assistant integration 
 | `idle` | Battery at 0 |
 | `battery_power { w }` | Fixed battery power |
 
-Any mode can add `pv_curtail`.
+Any mode can add `pv_curtail` (no PV at all) or `no_export` (export limit 0: PV still covers the load and charges the battery, and only the surplus beyond that is curtailed). Zero export only pays when exporting costs money, for example at negative prices without net metering.
 
 The distinction matters. With a grid setpoint, a heavy load *reduces* charging and can even discharge the battery, because grid power is held fixed. A battery-power model gets this wrong.
 
@@ -31,7 +31,7 @@ The distinction matters. With a grid setpoint, a heavy load *reduces* charging a
 `vulpes_opt::step` applies one mode for one slot, in this order:
 1. power limits;
 2. state-of-charge limits, with charge and discharge efficiencies;
-3. the grid export limit, where excess PV is curtailed.
+3. the grid export limit (0 for a `no_export` mode), where excess PV is curtailed.
 
 The optimizer and the replay simulator use this same function.
 

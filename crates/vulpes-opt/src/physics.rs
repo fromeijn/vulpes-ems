@@ -43,9 +43,11 @@ pub fn step(
         b = b.max(-(soc_wh - min_wh).max(0.0) * bat.discharge_eff / dt_h);
     }
     let mut g = net + b;
-    // Export above the limit is curtailed (inverters throttle PV first).
-    if g < -grid.max_export_w {
-        let excess = -grid.max_export_w - g;
+    // Export above the limit is curtailed (inverters throttle PV first). A
+    // zero-export mode has a limit of 0: PV covers the load and the battery only.
+    let max_export_w = if mode.no_export { 0.0 } else { grid.max_export_w };
+    if g < -max_export_w {
+        let excess = -max_export_w - g;
         let cut = excess.min(pv);
         curtailed += cut;
         g += cut;
@@ -88,6 +90,7 @@ mod tests {
             name: "m".into(),
             behaviour: b,
             pv_curtail: false,
+            no_export: false,
         }
     }
 
@@ -186,6 +189,45 @@ mod tests {
         };
         let r = step(&c, 200.0, 3000.0, 5000.0, &bat(), &GRID, 1.0);
         assert_eq!((r.grid_w, r.curtailed_w), (200.0, 3000.0));
+    }
+
+    #[test]
+    fn no_export_curtails_only_the_surplus() {
+        let ne = |b| ModeDef {
+            no_export: true,
+            ..mode(b)
+        };
+        // Self-consume: 3 kW PV, 500 W load. The nearly full battery takes what fits
+        // (500 Wh / (0.9 × 0.25 h) ≈ 2222 W); the rest is curtailed instead of exported.
+        let r = step(
+            &ne(Behaviour::SelfConsume),
+            500.0,
+            3000.0,
+            9_500.0,
+            &bat(),
+            &GRID,
+            0.25,
+        );
+        assert!((r.battery_w - 500.0 / (0.9 * 0.25)).abs() < 1e-9);
+        assert_eq!(r.grid_w, 0.0);
+        assert!((r.curtailed_w - (2500.0 - r.battery_w)).abs() < 1e-9);
+        // Idle: everything beyond the load is curtailed.
+        let r = step(&ne(Behaviour::Idle), 500.0, 3000.0, 5000.0, &bat(), &GRID, 1.0);
+        assert_eq!((r.battery_w, r.grid_w, r.curtailed_w), (0.0, 0.0, 2500.0));
+        // Hold with an empty-ish battery: the surplus charges, nothing is curtailed.
+        let r = step(
+            &ne(Behaviour::NoDischarge),
+            500.0,
+            3000.0,
+            5000.0,
+            &bat(),
+            &GRID,
+            1.0,
+        );
+        assert_eq!((r.battery_w, r.grid_w, r.curtailed_w), (2500.0, 0.0, 0.0));
+        // A deficit is unaffected.
+        let r = step(&ne(Behaviour::Idle), 2000.0, 500.0, 5000.0, &bat(), &GRID, 1.0);
+        assert_eq!((r.grid_w, r.curtailed_w), (1500.0, 0.0));
     }
 
     #[test]

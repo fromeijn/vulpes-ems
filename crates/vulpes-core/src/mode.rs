@@ -25,9 +25,13 @@ pub enum Behaviour {
 pub struct ModeDef {
     pub name: String,
     pub behaviour: Behaviour,
-    /// Whether this mode is combined with PV curtailment.
+    /// Whether this mode is combined with PV curtailment (no PV at all).
     #[serde(default)]
     pub pv_curtail: bool,
+    /// Whether export is blocked in this mode: PV surplus beyond the load and
+    /// battery charge is curtailed (the inverter's zero-export setting).
+    #[serde(default)]
+    pub no_export: bool,
 }
 
 #[cfg(test)]
@@ -71,7 +75,7 @@ mod tests {
     }
 
     #[test]
-    fn mode_def_curtail_defaults_to_false() {
+    fn mode_def_curtail_and_no_export_default_to_false() {
         let m: ModeDef =
             serde_json::from_value(json!({"name": "hold", "behaviour": {"type": "no_discharge"}})).unwrap();
         assert_eq!(
@@ -79,10 +83,20 @@ mod tests {
             ModeDef {
                 name: "hold".into(),
                 behaviour: Behaviour::NoDischarge,
-                pv_curtail: false
+                pv_curtail: false,
+                no_export: false,
             }
         );
         let back: ModeDef = serde_json::from_value(serde_json::to_value(&m).unwrap()).unwrap();
         assert_eq!(back, m);
+    }
+
+    #[test]
+    fn mode_def_no_export_json_round_trip() {
+        let want = json!({"name": "self_consume:no_export", "behaviour": {"type": "self_consume"},
+                          "pv_curtail": false, "no_export": true});
+        let m: ModeDef = serde_json::from_value(want.clone()).unwrap();
+        assert!(m.no_export && !m.pv_curtail);
+        assert_eq!(serde_json::to_value(&m).unwrap(), want);
     }
 }

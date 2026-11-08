@@ -276,6 +276,7 @@ mod tests {
             name: n.into(),
             behaviour: b,
             pv_curtail: false,
+            no_export: false,
         };
         // Clear-sky-ish synthetic weather every 15 minutes for two days.
         let weather = (0..(2 * 96))
@@ -616,7 +617,9 @@ mod tests {
                         "wear_cost_per_kwh": 0.02},
             "grid": {"max_import_w": 17250, "max_export_w": 17250},
             "modes": [{"name": "charge", "behaviour": {"type": "grid_setpoint", "w": 3000}, "pv_curtail": false},
-                      {"name": "charge:pv_off", "behaviour": {"type": "grid_setpoint", "w": 3000}, "pv_curtail": true}],
+                      {"name": "charge:pv_off", "behaviour": {"type": "grid_setpoint", "w": 3000}, "pv_curtail": true},
+                      {"name": "hold:no_export", "behaviour": {"type": "no_discharge"}, "pv_curtail": false,
+                       "no_export": true}],
             "soc_wh": 5000,
             "planes": [{"azimuth": 180, "tilt": 35, "pdc0": 3000, "ac_max": 2800, "label": "extra fields are ignored"}],
             "load_history": [[1_780_996_400, 400.0]],
@@ -634,6 +637,7 @@ mod tests {
         assert!(r.weather.is_none());
         assert_eq!(r.load_history, vec![(1_780_996_400, 400.0)]);
         assert!(r.modes[1].pv_curtail);
+        assert!(!r.modes[0].no_export && r.modes[2].no_export);
         assert_eq!(r.planes[0].inverter_eff, 0.965);
     }
 

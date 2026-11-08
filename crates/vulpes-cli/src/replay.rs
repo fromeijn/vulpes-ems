@@ -405,6 +405,7 @@ mod tests {
             name: n.into(),
             behaviour: b,
             pv_curtail: false,
+            no_export: false,
         };
         Site {
             battery: BatteryParams {

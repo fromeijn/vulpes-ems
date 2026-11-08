@@ -73,6 +73,30 @@ def test_plan_returns_a_response():
     assert resp["version"] == vulpes_ems.__version__
 
 
+def test_plan_blocks_export_when_it_costs_money():
+    start = NOW - NOW % 900
+    modes = [
+        {"name": "self_consume", "behaviour": {"type": "self_consume"}},
+        {"name": "self_consume:no_export", "behaviour": {"type": "self_consume"}, "no_export": True},
+    ]
+
+    def plan(net_metering):
+        req = _request(
+            modes=modes,
+            soc_wh=10000,  # full: the solar surplus can only go to the grid
+            # 0.05 import at a = 1.21, b = 0.13 means a negative wholesale price.
+            known_prices=[{"start": start - 3600, "end": start + 4 * 3600, "import": 0.05}],
+            export={"net_metering": net_metering, "a": 1.0, "b": 0.0},
+        )
+        return json.loads(vulpes_ems.plan(json.dumps(req)))
+
+    blocked = plan(False)
+    assert all(s["mode"] == "self_consume:no_export" for s in blocked["slots"]), blocked["slots"]
+    assert all(s["grid_w"] >= -1e-6 for s in blocked["slots"])
+    paid = plan(True)
+    assert all(s["mode"] == "self_consume" for s in paid["slots"])
+
+
 @pytest.mark.parametrize(
     "payload",
     [

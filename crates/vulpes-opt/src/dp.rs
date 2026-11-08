@@ -156,6 +156,7 @@ mod tests {
             name: n.into(),
             behaviour: b,
             pv_curtail: false,
+            no_export: false,
         };
         vec![
             m("Charging", Behaviour::GridSetpoint { w: 3000.0 }),
@@ -244,6 +245,52 @@ mod tests {
             "should export in the expensive evening: {plan:?}"
         );
         assert!(plan.slots.last().unwrap().soc_wh > 9000.0, "refilled by PV");
+    }
+
+    #[test]
+    fn zero_export_is_chosen_only_when_export_costs_money() {
+        let b = bat(0.0);
+        let sc = modes()[2].clone();
+        let m = vec![
+            sc.clone(),
+            ModeDef {
+                name: "Net Zero:no_export".into(),
+                no_export: true,
+                ..sc
+            },
+        ];
+        // Full battery, sunny: the surplus goes to the grid unless export is blocked.
+        let plan = |export_price: f64| {
+            let s = vec![
+                SlotInput {
+                    export_price,
+                    ..slot(500.0, 3000.0, 0.20)
+                };
+                3
+            ];
+            optimize(&Problem {
+                slots: &s,
+                dt_h: 1.0,
+                modes: &m,
+                battery: &b,
+                grid: &GRID,
+                soc0_wh: 10_000.0,
+                terminal_value_per_kwh: 0.0,
+                soc_step_wh: 100.0,
+            })
+        };
+        let negative = plan(-0.05);
+        assert!(
+            negative.slots.iter().all(|x| x.mode == 1 && x.grid_w == 0.0),
+            "{negative:?}"
+        );
+        assert_eq!(negative.cost, 0.0);
+        // Net metering pays export at the (positive) import price: keep exporting.
+        let paid = plan(0.20);
+        assert!(
+            paid.slots.iter().all(|x| x.mode == 0 && x.grid_w < 0.0),
+            "{paid:?}"
+        );
     }
 
     #[test]
