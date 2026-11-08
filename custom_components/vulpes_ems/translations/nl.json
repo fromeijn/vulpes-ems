@@ -1,0 +1,418 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Gegevensbronnen",
+        "description": "Sensoren voor de batterij en de prijzen. De energiestatistieken zijn vooraf ingevuld vanuit het Energiedashboard. Verwijder dubbele, bijvoorbeeld twee netbronnen die dezelfde meter meten. Het huisverbruik wordt berekend als afname − teruglevering + zonne-energie + batterijontlading − batterijlading.",
+        "data": {
+          "soc_entity": "Laadtoestand van de batterij (%)",
+          "price_entity": "Stroomprijssensor (met prijzen voor vandaag/morgen in de attributen)",
+          "grid_import": "Energie afgenomen van het net",
+          "grid_export": "Energie teruggeleverd aan het net",
+          "solar_energy": "Zonne-energie",
+          "battery_charge": "Energie de batterij in",
+          "battery_discharge": "Energie de batterij uit",
+          "wholesale_source": "Historie van groothandelsprijzen (voor prijzen die nog niet bekend zijn)"
+        },
+        "data_description": {
+          "soc_entity": "Een sensor met de laadtoestand van de batterij in % (0–100).",
+          "price_entity": "Een sensor met in de attributen de prijzen van vandaag (en morgen) met hun begintijden, zoals de integraties Nord Pool, EnergyZero, EPEX Spot, Tibber of Zonneplan die leveren.",
+          "grid_import": "Totale energie afgenomen van het net (kWh, een meterstand die alleen oploopt).",
+          "grid_export": "Totale energie teruggeleverd aan het net (kWh)."
+        }
+      },
+      "battery": {
+        "title": "Batterij en net",
+        "data": {
+          "capacity_kwh": "Bruikbare capaciteit",
+          "max_charge_w": "Maximaal laadvermogen",
+          "max_discharge_w": "Maximaal ontlaadvermogen",
+          "charge_eff": "Laadrendement",
+          "discharge_eff": "Ontlaadrendement",
+          "min_soc": "Minimale laadtoestand",
+          "max_soc": "Maximale laadtoestand",
+          "wear_cost": "Slijtagekosten van de batterij per kWh doorvoer",
+          "max_import_w": "Maximale netafname",
+          "max_export_w": "Maximale teruglevering"
+        },
+        "data_description": {
+          "capacity_kwh": "De bruikbare capaciteit, niet de nominale: wat de batterij levert van vol tot leeg.",
+          "charge_eff": "Rendement in één richting, van het net de batterij in (0,95 = 95%). Het totale rendement is laad- × ontlaadrendement.",
+          "discharge_eff": "Rendement in één richting, van de batterij naar het huis of het net.",
+          "min_soc": "De laagste laadtoestand die de batterij mag bereiken. Moet onder het maximum liggen.",
+          "wear_cost": "Kosten van batterijslijtage per kWh die door de batterij gaat. Vulpes laadt en ontlaadt alleen als het prijsverschil hoger is. Batterijprijs ÷ (bruikbare capaciteit × verwachte volle cycli); 0,02–0,05 is gebruikelijk.",
+          "max_import_w": "Volgt uit de hoofdzekering, bijvoorbeeld 3 × 25 A × 230 V = 17250 W.",
+          "max_export_w": "Het maximale vermogen dat je mag terugleveren; vaak gelijk aan de afnamegrens."
+        }
+      },
+      "tariff": {
+        "title": "Tarief",
+        "description": "Prijzen voor uren die nog niet bekend zijn worden geschat als a × groothandelsprijs + b. Zolang salderen geldt, levert teruglevering de afnameprijs op. Anders levert teruglevering teruglevering-a × groothandelsprijs + teruglevering-b op. De salderingsregeling stopt op 1 januari 2027.",
+        "data": {
+          "tariff_a": "Afname a (meestal de btw-factor)",
+          "tariff_b": "Afname b (energiebelasting + opslag, incl. btw)",
+          "net_metering": "Salderen (teruglevering tegen de afnameprijs)",
+          "export_a": "Teruglevering a",
+          "export_b": "Teruglevering b"
+        },
+        "data_description": {
+          "net_metering": "Zet dit uit zodra salderen voor jou niet meer geldt; in Nederland vanaf 1 januari 2027."
+        }
+      },
+      "modes": {
+        "title": "Batterijmodi",
+        "description": "Vink de modi aan die je systeem kan; Vulpes plant alleen hiermee. Met een netsetpoint (zoals Victron ESS) houdt laden de netafname op het laadvermogen en ontladen de teruglevering op het ontlaadvermogen; met batterijvermogen draait de batterij zelf op dat vermogen. Kies eventueel de entiteit die je huidige automatisering gebruikt (bijvoorbeeld een input_select) om het plan te vergelijken met wat het huis doet. Wil je Vulpes de batterij laten aansturen, kies dan een stuurscript: zodra de schakelaar Actief aan staat, voert Vulpes het elke 15 minuten uit met wat er moet gebeuren (zie de uitleg bij het veld).",
+        "data": {
+          "power_control": "Hoe het laad- en ontlaadvermogen wordt ingesteld",
+          "charge": "Laden van het net",
+          "charge_w": "Laadvermogen",
+          "hold": "Vasthouden (alleen laden met zonne-overschot, nooit ontladen)",
+          "self_consume": "Eigen verbruik (batterij houdt het net op nul)",
+          "idle": "Batterij in rust",
+          "discharge": "Ontladen naar het net",
+          "discharge_w": "Ontlaadvermogen",
+          "pv_curtail": "Zonnepanelen kunnen uit (voor negatieve prijzen)",
+          "export_block": "Teruglevering kan uit (nul-teruglevering, voor negatieve prijzen)",
+          "mode_entity": "Vergelijken met een bestaande modus-entiteit (optioneel)",
+          "control_script": "Stuurscript (optioneel, laat Vulpes de batterij aansturen)"
+        },
+        "data_description": {
+          "idle": "De batterij laadt noch ontlaadt. Het huis draait op zon en net, en al het zonne-overschot gaat naar het net. Anders dan bij Vasthouden wordt zonne-overschot niet opgeslagen. Handig als terugleveren meer oplevert dan opslaan, bijvoorbeeld om ruimte in de batterij te houden voor goedkope of negatief geprijsde uren later op de dag. Zet dit alleen aan als je systeem een stand-by- of rustmodus heeft waarnaar je kunt schakelen.",
+          "export_block": "Je omvormer kan stoppen met terugleveren terwijl de zonnepanelen het huis blijven voeden en de batterij blijven laden. Vulpes plant dan ook Vasthouden, Eigen verbruik en Rust zonder teruglevering, en gebruikt die als terugleveren geld zou kosten.",
+          "control_script": "Vulpes voert dit script elke 15 minuten uit zolang de schakelaar Actief aan staat, met de variabelen mode (charge, hold, self_consume, idle of discharge), pv_off, no_export, power_control, power_w, soc_min, soc_max, planned_grid_w, planned_battery_w, fallback en until. Zonder bruikbaar plan stuurt het self_consume met fallback aan. Zet je eigen batterijautomatiseringen uit voordat je Actief aanzet."
+        }
+      },
+      "compare": {
+        "title": "Vergelijken met {entity}",
+        "description": "Kies voor elke Vulpes-modus de toestand van {entity} die hetzelfde betekent. Laat leeg als die er niet is; die toestand telt dan als afwijkend van het plan.",
+        "data": {
+          "charge": "Laden van het net",
+          "hold": "Vasthouden (alleen laden met zon, niet ontladen)",
+          "self_consume": "Eigen verbruik (net op nul)",
+          "idle": "Batterij in rust",
+          "discharge": "Ontladen naar het net"
+        }
+      },
+      "solar": {
+        "title": "Zonnepanelen",
+        "description": "Beschrijf je zonnepanelen. Ruwe waarden zijn goed genoeg: de kalibratie verfijnt ze aan de hand van je historie.{calibration}",
+        "menu_options": {
+          "solar_apply": "Kalibratie toepassen",
+          "solar_system": "Panelengroepen instellen (aanbevolen)",
+          "solar_json": "Vlak-JSON plakken (gevorderd: micro-omvormers, meerdere omvormers)"
+        }
+      },
+      "solar_system": {
+        "title": "Omvormer",
+        "description": "Deel je panelen in groepen in: panelen met dezelfde richting en hellingshoek. Alle groepen delen één omvormer. Na de installatie vergelijkt Vulpes deze waarden met je zonnehistorie en stelt correcties voor: één keer vanzelf, en telkens als je op **Zonnepanelen kalibreren** drukt bij het Vulpes EMS-apparaat. Koppel voor het beste resultaat per groep de vermogenssensor van de string. Pas het resultaat toe onder Configureren → Zonnepanelen.",
+        "data": {
+          "array_count": "Aantal groepen",
+          "inverter_ac_w": "AC-vermogensgrens van de omvormer"
+        },
+        "data_description": {
+          "array_count": "Meestal één per dakvlak, of één per omvormeringang (MPPT).",
+          "inverter_ac_w": "Het maximale AC-vermogen uit de datasheet van de omvormer. Gebruik bij een hybride omvormer met de batterij aan de DC-kant het maximale PV-ingangsvermogen: de zonnepanelen kunnen dan meer leveren dan het AC-vermogen terwijl ze de batterij laden."
+        }
+      },
+      "solar_array": {
+        "title": "Panelengroep {index} van {count}",
+        "description": "Ruwe waarden zijn goed genoeg; de kalibratie corrigeert ze later.",
+        "data": {
+          "direction": "Richting van de panelen",
+          "tilt": "Hellingshoek",
+          "kwp": "Piekvermogen",
+          "power_entity": "Vermogenssensor van de string (optioneel)"
+        },
+        "data_description": {
+          "direction": "Kies een windrichting of typ graden met de klok mee vanaf het noorden (180 = zuid).",
+          "tilt": "Graden vanaf horizontaal: 0 = plat, 90 = verticaal.",
+          "kwp": "Aantal panelen × wattpiek per paneel, in kWp.",
+          "power_entity": "De DC-vermogenssensor van de omvormer voor de ingang (MPPT) waarop deze groep is aangesloten. Daarmee kan de kalibratie de richting en hellingshoek van deze groep bepalen; zonder wordt alleen de totale grootte gecorrigeerd."
+        }
+      },
+      "solar_json": {
+        "title": "Zonnevlakken (JSON)",
+        "description": "Plak een JSON-lijst met vlakken (azimuth, tilt, pdc0 in W, ac_max in W, optioneel inverter), of de uitvoer van `vulpes-cli calibrate-solar`.",
+        "data": {
+          "planes": "Vlakken (JSON)"
+        }
+      }
+    },
+    "error": {
+      "invalid_planes": "Ongeldige vlak-JSON: elk vlak heeft azimuth, tilt, pdc0 en ac_max nodig.",
+      "no_modes": "Zet minstens één modus aan.",
+      "invalid_direction": "Kies een richting, of vul graden tussen 0 en 360 in.",
+      "soc_unavailable": "Deze sensor geeft nu geen laadtoestand tussen 0 en 100.",
+      "no_prices": "Deze sensor heeft geen prijslijst in zijn attributen (een lijst met items met een begintijd en een prijs).",
+      "grid_import_required": "Kies minstens één statistiek voor netafname.",
+      "duplicate_statistic": "Meer dan eens gekozen: {statistic}. Elke statistiek mag maar in één veld staan.",
+      "no_statistics": "Geen uurstatistieken in de afgelopen 60 dagen voor: {statistic}. Er is een state_class en enige historie nodig.",
+      "no_complete_hours": "Er is in de afgelopen 60 dagen geen uur waarin alle gekozen statistieken gegevens hebben, dus het huisverbruik kan niet worden berekend.",
+      "soc_range": "De minimale laadtoestand moet onder de maximale liggen.",
+      "charge_w_too_high": "Het laadvermogen is hoger dan het maximale laadvermogen (batterijvermogen) of de maximale netafname (netsetpoint).",
+      "discharge_w_too_high": "Het ontlaadvermogen is hoger dan het maximale ontlaadvermogen (batterijvermogen) of de maximale teruglevering (netsetpoint).",
+      "no_mode_options": "Deze entiteit heeft geen opties om mee te vergelijken."
+    },
+    "abort": {
+      "single_instance_allowed": "Vulpes EMS is al ingesteld.",
+      "no_mode_options": "De gekozen modus-entiteit is tijdens het instellen haar opties kwijtgeraakt."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Instellingen Vulpes EMS",
+        "description": "Kies wat je wilt wijzigen. Elk onderdeel wordt apart opgeslagen.",
+        "menu_options": {
+          "sources": "Gegevensbronnen",
+          "battery": "Batterij en net",
+          "tariff": "Tarief",
+          "modes": "Batterijmodi",
+          "solar": "Zonnepanelen"
+        }
+      },
+      "sources": {
+        "title": "Gegevensbronnen",
+        "description": "Sensoren voor de batterij en de prijzen. Verwijder dubbele, bijvoorbeeld twee netbronnen die dezelfde meter meten. Het huisverbruik wordt berekend als afname − teruglevering + zonne-energie + batterijontlading − batterijlading.",
+        "data": {
+          "soc_entity": "Laadtoestand van de batterij (%)",
+          "price_entity": "Stroomprijssensor (met prijzen voor vandaag/morgen in de attributen)",
+          "grid_import": "Energie afgenomen van het net",
+          "grid_export": "Energie teruggeleverd aan het net",
+          "solar_energy": "Zonne-energie",
+          "battery_charge": "Energie de batterij in",
+          "battery_discharge": "Energie de batterij uit",
+          "wholesale_source": "Historie van groothandelsprijzen (voor prijzen die nog niet bekend zijn)"
+        },
+        "data_description": {
+          "soc_entity": "Een sensor met de laadtoestand van de batterij in % (0–100).",
+          "price_entity": "Een sensor met in de attributen de prijzen van vandaag (en morgen) met hun begintijden, zoals de integraties Nord Pool, EnergyZero, EPEX Spot, Tibber of Zonneplan die leveren.",
+          "grid_import": "Totale energie afgenomen van het net (kWh, een meterstand die alleen oploopt).",
+          "grid_export": "Totale energie teruggeleverd aan het net (kWh)."
+        }
+      },
+      "battery": {
+        "title": "Batterij en net",
+        "data": {
+          "capacity_kwh": "Bruikbare capaciteit",
+          "max_charge_w": "Maximaal laadvermogen",
+          "max_discharge_w": "Maximaal ontlaadvermogen",
+          "charge_eff": "Laadrendement",
+          "discharge_eff": "Ontlaadrendement",
+          "min_soc": "Minimale laadtoestand",
+          "max_soc": "Maximale laadtoestand",
+          "wear_cost": "Slijtagekosten van de batterij per kWh doorvoer",
+          "max_import_w": "Maximale netafname",
+          "max_export_w": "Maximale teruglevering"
+        },
+        "data_description": {
+          "capacity_kwh": "De bruikbare capaciteit, niet de nominale: wat de batterij levert van vol tot leeg.",
+          "charge_eff": "Rendement in één richting, van het net de batterij in (0,95 = 95%). Het totale rendement is laad- × ontlaadrendement.",
+          "discharge_eff": "Rendement in één richting, van de batterij naar het huis of het net.",
+          "min_soc": "De laagste laadtoestand die de batterij mag bereiken. Moet onder het maximum liggen.",
+          "wear_cost": "Kosten van batterijslijtage per kWh die door de batterij gaat. Vulpes laadt en ontlaadt alleen als het prijsverschil hoger is. Batterijprijs ÷ (bruikbare capaciteit × verwachte volle cycli); 0,02–0,05 is gebruikelijk.",
+          "max_import_w": "Volgt uit de hoofdzekering, bijvoorbeeld 3 × 25 A × 230 V = 17250 W.",
+          "max_export_w": "Het maximale vermogen dat je mag terugleveren; vaak gelijk aan de afnamegrens."
+        }
+      },
+      "tariff": {
+        "title": "Tarief",
+        "description": "Prijzen voor uren die nog niet bekend zijn worden geschat als a × groothandelsprijs + b. Zolang salderen geldt, levert teruglevering de afnameprijs op. Anders levert teruglevering teruglevering-a × groothandelsprijs + teruglevering-b op. De salderingsregeling stopt op 1 januari 2027.",
+        "data": {
+          "tariff_a": "Afname a (meestal de btw-factor)",
+          "tariff_b": "Afname b (energiebelasting + opslag, incl. btw)",
+          "net_metering": "Salderen (teruglevering tegen de afnameprijs)",
+          "export_a": "Teruglevering a",
+          "export_b": "Teruglevering b"
+        },
+        "data_description": {
+          "net_metering": "Zet dit uit zodra salderen voor jou niet meer geldt; in Nederland vanaf 1 januari 2027."
+        }
+      },
+      "modes": {
+        "title": "Batterijmodi",
+        "description": "Vink de modi aan die je systeem kan; Vulpes plant alleen hiermee. Met een netsetpoint (zoals Victron ESS) houdt laden de netafname op het laadvermogen en ontladen de teruglevering op het ontlaadvermogen; met batterijvermogen draait de batterij zelf op dat vermogen. Kies eventueel de entiteit die je huidige automatisering gebruikt (bijvoorbeeld een input_select) om het plan te vergelijken met wat het huis doet. Wil je Vulpes de batterij laten aansturen, kies dan een stuurscript: zodra de schakelaar Actief aan staat, voert Vulpes het elke 15 minuten uit met wat er moet gebeuren (zie de uitleg bij het veld).",
+        "data": {
+          "power_control": "Hoe het laad- en ontlaadvermogen wordt ingesteld",
+          "charge": "Laden van het net",
+          "charge_w": "Laadvermogen",
+          "hold": "Vasthouden (alleen laden met zonne-overschot, nooit ontladen)",
+          "self_consume": "Eigen verbruik (batterij houdt het net op nul)",
+          "idle": "Batterij in rust",
+          "discharge": "Ontladen naar het net",
+          "discharge_w": "Ontlaadvermogen",
+          "pv_curtail": "Zonnepanelen kunnen uit (voor negatieve prijzen)",
+          "export_block": "Teruglevering kan uit (nul-teruglevering, voor negatieve prijzen)",
+          "mode_entity": "Vergelijken met een bestaande modus-entiteit (optioneel)",
+          "control_script": "Stuurscript (optioneel, laat Vulpes de batterij aansturen)"
+        },
+        "data_description": {
+          "idle": "De batterij laadt noch ontlaadt. Het huis draait op zon en net, en al het zonne-overschot gaat naar het net. Anders dan bij Vasthouden wordt zonne-overschot niet opgeslagen. Handig als terugleveren meer oplevert dan opslaan, bijvoorbeeld om ruimte in de batterij te houden voor goedkope of negatief geprijsde uren later op de dag. Zet dit alleen aan als je systeem een stand-by- of rustmodus heeft waarnaar je kunt schakelen.",
+          "export_block": "Je omvormer kan stoppen met terugleveren terwijl de zonnepanelen het huis blijven voeden en de batterij blijven laden. Vulpes plant dan ook Vasthouden, Eigen verbruik en Rust zonder teruglevering, en gebruikt die als terugleveren geld zou kosten.",
+          "control_script": "Vulpes voert dit script elke 15 minuten uit zolang de schakelaar Actief aan staat, met de variabelen mode (charge, hold, self_consume, idle of discharge), pv_off, no_export, power_control, power_w, soc_min, soc_max, planned_grid_w, planned_battery_w, fallback en until. Zonder bruikbaar plan stuurt het self_consume met fallback aan. Zet je eigen batterijautomatiseringen uit voordat je Actief aanzet."
+        }
+      },
+      "compare": {
+        "title": "Vergelijken met {entity}",
+        "description": "Kies voor elke Vulpes-modus de toestand van {entity} die hetzelfde betekent. Laat leeg als die er niet is; die toestand telt dan als afwijkend van het plan.",
+        "data": {
+          "charge": "Laden van het net",
+          "hold": "Vasthouden (alleen laden met zon, niet ontladen)",
+          "self_consume": "Eigen verbruik (net op nul)",
+          "idle": "Batterij in rust",
+          "discharge": "Ontladen naar het net"
+        }
+      },
+      "solar": {
+        "title": "Zonnepanelen",
+        "description": "Beschrijf je zonnepanelen. Ruwe waarden zijn goed genoeg: de kalibratie verfijnt ze aan de hand van je historie.{calibration}",
+        "menu_options": {
+          "solar_apply": "Kalibratie toepassen",
+          "solar_system": "Panelengroepen instellen (aanbevolen)",
+          "solar_json": "Vlak-JSON plakken (gevorderd: micro-omvormers, meerdere omvormers)"
+        }
+      },
+      "solar_system": {
+        "title": "Omvormer",
+        "description": "Deel je panelen in groepen in: panelen met dezelfde richting en hellingshoek. Alle groepen delen één omvormer. Na de installatie vergelijkt Vulpes deze waarden met je zonnehistorie en stelt correcties voor: één keer vanzelf, en telkens als je op **Zonnepanelen kalibreren** drukt bij het Vulpes EMS-apparaat. Koppel voor het beste resultaat per groep de vermogenssensor van de string. Pas het resultaat toe onder Configureren → Zonnepanelen.",
+        "data": {
+          "array_count": "Aantal groepen",
+          "inverter_ac_w": "AC-vermogensgrens van de omvormer"
+        },
+        "data_description": {
+          "array_count": "Meestal één per dakvlak, of één per omvormeringang (MPPT).",
+          "inverter_ac_w": "Het maximale AC-vermogen uit de datasheet van de omvormer. Gebruik bij een hybride omvormer met de batterij aan de DC-kant het maximale PV-ingangsvermogen: de zonnepanelen kunnen dan meer leveren dan het AC-vermogen terwijl ze de batterij laden."
+        }
+      },
+      "solar_array": {
+        "title": "Panelengroep {index} van {count}",
+        "description": "Ruwe waarden zijn goed genoeg; de kalibratie corrigeert ze later.",
+        "data": {
+          "direction": "Richting van de panelen",
+          "tilt": "Hellingshoek",
+          "kwp": "Piekvermogen",
+          "power_entity": "Vermogenssensor van de string (optioneel)"
+        },
+        "data_description": {
+          "direction": "Kies een windrichting of typ graden met de klok mee vanaf het noorden (180 = zuid).",
+          "tilt": "Graden vanaf horizontaal: 0 = plat, 90 = verticaal.",
+          "kwp": "Aantal panelen × wattpiek per paneel, in kWp.",
+          "power_entity": "De DC-vermogenssensor van de omvormer voor de ingang (MPPT) waarop deze groep is aangesloten. Daarmee kan de kalibratie de richting en hellingshoek van deze groep bepalen; zonder wordt alleen de totale grootte gecorrigeerd."
+        }
+      },
+      "solar_json": {
+        "title": "Zonnevlakken (JSON)",
+        "description": "Plak een JSON-lijst met vlakken (azimuth, tilt, pdc0 in W, ac_max in W, optioneel inverter), of de uitvoer van `vulpes-cli calibrate-solar`.",
+        "data": {
+          "planes": "Vlakken (JSON)"
+        }
+      }
+    },
+    "error": {
+      "invalid_planes": "Ongeldige vlak-JSON: elk vlak heeft azimuth, tilt, pdc0 en ac_max nodig.",
+      "no_modes": "Zet minstens één modus aan.",
+      "invalid_direction": "Kies een richting, of vul graden tussen 0 en 360 in.",
+      "soc_unavailable": "Deze sensor geeft nu geen laadtoestand tussen 0 en 100.",
+      "no_prices": "Deze sensor heeft geen prijslijst in zijn attributen (een lijst met items met een begintijd en een prijs).",
+      "grid_import_required": "Kies minstens één statistiek voor netafname.",
+      "duplicate_statistic": "Meer dan eens gekozen: {statistic}. Elke statistiek mag maar in één veld staan.",
+      "no_statistics": "Geen uurstatistieken in de afgelopen 60 dagen voor: {statistic}. Er is een state_class en enige historie nodig.",
+      "no_complete_hours": "Er is in de afgelopen 60 dagen geen uur waarin alle gekozen statistieken gegevens hebben, dus het huisverbruik kan niet worden berekend.",
+      "soc_range": "De minimale laadtoestand moet onder de maximale liggen.",
+      "charge_w_too_high": "Het laadvermogen is hoger dan het maximale laadvermogen (batterijvermogen) of de maximale netafname (netsetpoint).",
+      "discharge_w_too_high": "Het ontlaadvermogen is hoger dan het maximale ontlaadvermogen (batterijvermogen) of de maximale teruglevering (netsetpoint).",
+      "no_mode_options": "Deze entiteit heeft geen opties om mee te vergelijken."
+    },
+    "abort": {
+      "no_mode_options": "De gekozen modus-entiteit is tijdens het instellen haar opties kwijtgeraakt.",
+      "no_calibration": "Er is geen kalibratieresultaat om toe te passen. Druk eerst op Zonnepanelen kalibreren bij het Vulpes EMS-apparaat."
+    }
+  },
+  "selector": {
+    "wholesale_source": {
+      "options": {
+        "energyzero": "EnergyZero (NL)",
+        "none": "Geen"
+      }
+    },
+    "power_control": {
+      "options": {
+        "grid_setpoint": "Netsetpoint",
+        "battery_power": "Batterijvermogen"
+      }
+    },
+    "direction": {
+      "options": {
+        "n": "Noord",
+        "ne": "Noordoost",
+        "e": "Oost",
+        "se": "Zuidoost",
+        "s": "Zuid",
+        "sw": "Zuidwest",
+        "w": "West",
+        "nw": "Noordwest"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "planned_mode": {
+        "name": "Geplande modus",
+        "state": {
+          "charge": "Laden van het net",
+          "hold": "Vasthouden",
+          "self_consume": "Eigen verbruik",
+          "idle": "Batterij in rust",
+          "discharge": "Ontladen naar het net"
+        }
+      },
+      "pv_forecast_24h": {
+        "name": "Zonneprognose komende 24 uur"
+      },
+      "load_forecast_24h": {
+        "name": "Verbruiksprognose komende 24 uur"
+      },
+      "plan_cost": {
+        "name": "Kosten van het plan"
+      },
+      "agreement_today": {
+        "name": "Overeenkomst met huidige modus vandaag"
+      },
+      "planned_battery_power": {
+        "name": "Gepland batterijvermogen"
+      },
+      "planned_grid_power": {
+        "name": "Gepland netvermogen"
+      },
+      "solar_calibration": {
+        "name": "Verbetering door zonnekalibratie"
+      },
+      "control": {
+        "name": "Batterijsturing",
+        "state": {
+          "off": "Uit (schaduwmodus)",
+          "following_plan": "Volgt het plan",
+          "fallback": "Terugvalstand (eigen verbruik)"
+        }
+      }
+    },
+    "binary_sensor": {
+      "agrees_with_plan": {
+        "name": "Huidige modus komt overeen met plan"
+      },
+      "pv_off_planned": {
+        "name": "Zonnepanelen uit gepland"
+      }
+    },
+    "button": {
+      "calibrate_solar": {
+        "name": "Zonnepanelen kalibreren"
+      }
+    },
+    "switch": {
+      "active": {
+        "name": "Actief"
+      }
+    }
+  }
+}

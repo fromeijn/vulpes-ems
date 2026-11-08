@@ -56,6 +56,7 @@ python3 -m venv .venv && .venv/bin/pip install pytest maturin ziglang
 - Keep `modes.py`, `control.py`, `solar_setup.py` and `setup_checks.py` free of Home Assistant imports so they stay testable in `tests/`. Flow input checks go in `setup_checks.py`.
 - **Solar setup:** the array form stores engine planes with `inverter: 0` plus integration-only keys (`power_entity`), stripped by `engine_planes()` before any engine call. `solar_setup` in the settings is `form` or `json`; setups from before 0.3.0 have neither and are treated as JSON. Calibration results live in `.storage/vulpes_ems.<entry_id>.calibration` and are only applied by the user, through the options flow.
 - `strings.json` and `translations/en.json` must stay identical, and each options step has the same labels as its config step (`tests/test_strings.py`). The options flow is a menu; each section saves the full settings copy.
+- **Translations:** every string change also updates `translations/nl.json`. It must have the same keys and `{placeholders}` as `en.json` (`tests/test_strings.py`). Mode values in script variables stay English: they are an API.
 - **Licensing:** MIT OR Apache-2.0. No per-file license headers.
 
 ## Testing

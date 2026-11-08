@@ -38,3 +38,23 @@ def test_every_error_and_abort_has_a_string():
         assert errors <= STRINGS[section]["error"].keys(), (section, errors - STRINGS[section]["error"].keys())
     assert aborts <= STRINGS["options"]["abort"].keys()
     assert aborts - {"no_calibration"} <= STRINGS["config"]["abort"].keys()
+
+
+def _flatten(node, prefix=()):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield from _flatten(value, (*prefix, key))
+    else:
+        yield prefix, node
+
+
+def test_other_translations_match_english_keys_and_placeholders():
+    english = dict(_flatten(STRINGS))
+    others = [p for p in (_dir / "translations").glob("*.json") if p.name != "en.json"]
+    assert others, "expected at least one translation besides English"
+    for path in others:
+        translated = dict(_flatten(json.loads(path.read_text())))
+        assert translated.keys() == english.keys(), (path.name, translated.keys() ^ english.keys())
+        for key, text in english.items():
+            assert set(re.findall(r"\{\w+\}", translated[key])) == set(re.findall(r"\{\w+\}", text)), (path.name, key)
+            assert translated[key].strip(), (path.name, key)
