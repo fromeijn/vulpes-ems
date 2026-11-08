@@ -144,12 +144,10 @@ pub(crate) fn evaluate(
     points: &PricePoints,
     wholesale: &str,
 ) -> Result<()> {
-    use chrono::TimeZone;
-    use vulpes_load::{Country, ProfileForecaster, ProfileOptions};
-    use vulpes_ml::{recency_weight, ridge::Ridge};
-
     let all: Vec<(i64, f64)> = store.samples(wholesale, 3600, 0, i64::MAX / 2)?;
-    let actual: HashMap<i64, f64> = all.iter().copied().collect();
+    if all.is_empty() {
+        bail!("no wholesale series '{wholesale}'");
+    }
     let wind: Vec<HashMap<i64, f64>> = points
         .wind
         .iter()
@@ -160,19 +158,76 @@ pub(crate) fn evaluate(
         .iter()
         .map(|s| crate::series::hourly_forecast(store, s, "shortwave_radiation"))
         .collect::<Result<_>>()?;
-    let wind_idx = |h: i64| index(&wind, h, wind_power);
-    let solar_idx = |h: i64| index(&solar, h, |g| g / 1000.0);
+    let e = evaluate_days(&all, &wind, &solar, from, to, tz);
+    let scores = &e.scores;
+    let d = scores[0].days.max(1) as f64;
+    println!(
+        "{} days evaluated (after a 14-day regression warm-up); forecasts issued 10:00 UTC the day before",
+        scores[0].days
+    );
+    println!(
+        "{:34} {:>9} {:>9} {:>8} {:>10} {:>12} {:>12}",
+        "method", "MAE ct", "RMSE ct", "bias", "rank corr", "cheapest-4", "priciest-4"
+    );
+    for (name, s) in PRICE_METHODS.iter().zip(scores) {
+        let n = s.n.max(1) as f64;
+        println!(
+            "{name:34} {:9.2} {:9.2} {:+8.2} {:10.2} {:9.2} / 4 {:9.2} / 4",
+            100.0 * s.abs / n,
+            100.0 * (s.sq / n).sqrt(),
+            100.0 * s.bias / n,
+            s.rho / d,
+            s.cheap_hits as f64 / d,
+            s.dear_hits as f64 / d
+        );
+    }
+    if let Some(m) = e.last_model {
+        println!(
+            "latest regression: {:+.1} ct per unit wind-power index, {:+.1} ct per kW/m² solar (vs reference days)",
+            100.0 * m.coef[0],
+            100.0 * m.coef[1]
+        );
+    }
+    Ok(())
+}
+
+const PRICE_METHODS: [&str; 3] = [
+    "copy previous day",
+    "profile (28 d, half-life 7 d)",
+    "profile + wind/solar regression",
+];
+
+struct PriceEval {
+    /// One score per entry of [`PRICE_METHODS`].
+    scores: Vec<PriceScore>,
+    last_model: Option<vulpes_ml::ridge::Ridge>,
+}
+
+/// Score the wholesale forecasting methods on each complete local day in
+/// `[from, to]`. `all` is the hourly price history; `wind` and `solar` are
+/// hourly weather at the reference points. A day is scored once the
+/// regression has 14 days of past residuals.
+fn evaluate_days(
+    all: &[(i64, f64)],
+    wind: &[HashMap<i64, f64>],
+    solar: &[HashMap<i64, f64>],
+    from: chrono::NaiveDate,
+    to: chrono::NaiveDate,
+    tz: chrono_tz::Tz,
+) -> PriceEval {
+    use chrono::TimeZone;
+    use vulpes_load::{Country, ProfileForecaster, ProfileOptions};
+    use vulpes_ml::{recency_weight, ridge::Ridge};
+
+    let actual: HashMap<i64, f64> = all.iter().copied().collect();
+    let wind_idx = |h: i64| index(wind, h, wind_power);
+    let solar_idx = |h: i64| index(solar, h, |g| g / 1000.0);
     let opt = ProfileOptions {
         lookback_days: 28,
         half_life_days: 7.0,
         ..Default::default()
     };
-    let names = [
-        "copy previous day",
-        "profile (28 d, half-life 7 d)",
-        "profile + wind/solar regression",
-    ];
-    let mut scores: Vec<PriceScore> = names.iter().map(|_| PriceScore::default()).collect();
+    let mut scores: Vec<PriceScore> = PRICE_METHODS.iter().map(|_| PriceScore::default()).collect();
     // Past rows for the regression: (day start, features, residual).
     let mut past: Vec<(i64, Vec<f64>, f64)> = Vec::new();
     let midnight = |d: chrono::NaiveDate| {
@@ -200,7 +255,7 @@ pub(crate) fn evaluate(
             .map(|(d, x, r)| (x.clone(), *r, recency_weight((start - d) as f64 / 86_400.0, 30.0)))
             .collect();
         let model = (rows.len() >= 24 * 14).then(|| Ridge::fit(&rows, 1e-3)).flatten();
-        let mut f: Vec<Vec<f64>> = vec![Vec::new(); names.len()];
+        let mut f: Vec<Vec<f64>> = vec![Vec::new(); PRICE_METHODS.len()];
         let mut a = Vec::new();
         let mut ok = true;
         for &t in &hours {
@@ -228,7 +283,9 @@ pub(crate) fn evaluate(
             f[2].push(corrected);
             a.push(actual[&t]);
         }
-        if ok && model.is_some() {
+        // With reference points, wait for the regression's warm-up so all
+        // methods are scored on the same days; without, it never trains.
+        if ok && (model.is_some() || (wind.is_empty() && solar.is_empty())) {
             for (m, s) in scores.iter_mut().enumerate() {
                 for (fv, av) in f[m].iter().zip(&a) {
                     let e = fv - av;
@@ -246,35 +303,7 @@ pub(crate) fn evaluate(
         }
         day = next;
     }
-    let d = scores[0].days.max(1) as f64;
-    println!(
-        "{} days evaluated (after a 14-day regression warm-up); forecasts issued 10:00 UTC the day before",
-        scores[0].days
-    );
-    println!(
-        "{:34} {:>9} {:>9} {:>8} {:>10} {:>12} {:>12}",
-        "method", "MAE ct", "RMSE ct", "bias", "rank corr", "cheapest-4", "priciest-4"
-    );
-    for (name, s) in names.iter().zip(&scores) {
-        let n = s.n.max(1) as f64;
-        println!(
-            "{name:34} {:9.2} {:9.2} {:+8.2} {:10.2} {:9.2} / 4 {:9.2} / 4",
-            100.0 * s.abs / n,
-            100.0 * (s.sq / n).sqrt(),
-            100.0 * s.bias / n,
-            s.rho / d,
-            s.cheap_hits as f64 / d,
-            s.dear_hits as f64 / d
-        );
-    }
-    if let Some(m) = last_model {
-        println!(
-            "latest regression: {:+.1} ct per unit wind-power index, {:+.1} ct per kW/m² solar (vs reference days)",
-            100.0 * m.coef[0],
-            100.0 * m.coef[1]
-        );
-    }
-    Ok(())
+    PriceEval { scores, last_model }
 }
 
 #[cfg(test)]
@@ -346,5 +375,94 @@ mod tests {
             (s.len(), s[0].energy_kwh, s[0].wholesale, s[0].cost),
             (1, 3.0, 0.2, 0.7)
         );
+    }
+
+    const TZ: chrono_tz::Tz = chrono_tz::Europe::Amsterdam;
+    const START: i64 = 1_767_225_600; // 2026-01-01 00:00 UTC
+
+    fn date(s: &str) -> chrono::NaiveDate {
+        s.parse().unwrap()
+    }
+
+    fn series(days: i64, f: impl Fn(i64) -> f64) -> Vec<(i64, f64)> {
+        (0..24 * days)
+            .map(|k| START + k * 3600)
+            .map(|t| (t, f(t)))
+            .collect()
+    }
+
+    /// Local hour of a timestamp in Amsterdam.
+    fn local_hour(t: i64) -> f64 {
+        use chrono::{TimeZone, Timelike};
+        TZ.timestamp_opt(t, 0).unwrap().hour() as f64
+    }
+
+    #[test]
+    fn a_repeating_day_is_copied_perfectly() {
+        let all = series(40, |t| 0.10 + 0.01 * local_hour(t));
+        let e = evaluate_days(&all, &[], &[], date("2026-01-20"), date("2026-01-29"), TZ);
+        let copy = &e.scores[0];
+        assert_eq!(copy.days, 10, "without reference points no warm-up is needed");
+        assert!(copy.abs < 1e-12);
+        assert!((copy.rho / copy.days as f64 - 1.0).abs() < 1e-12);
+        assert_eq!((copy.cheap_hits, copy.dear_hits), (4 * 10, 4 * 10));
+        assert!(e.last_model.is_none());
+    }
+
+    #[test]
+    fn regression_learns_the_wind_effect() {
+        // Windy days are cheaper: price = profile − 0.10 × wind-power index.
+        let wind_speed = |t: i64| 3.0 + ((t / 86_400 * 5) % 10) as f64;
+        let all = series(90, |t| {
+            0.20 + 0.005 * local_hour(t) - 0.10 * wind_power(wind_speed(t))
+        });
+        let wind: HashMap<i64, f64> = all.iter().map(|&(t, _)| (t, wind_speed(t))).collect();
+        let solar: HashMap<i64, f64> = all.iter().map(|&(t, _)| (t, 0.0)).collect();
+        let e = evaluate_days(
+            &all,
+            &[wind],
+            &[solar],
+            date("2026-01-30"),
+            date("2026-03-25"),
+            TZ,
+        );
+        let [_, profile, regression] = [0, 1, 2].map(|k| e.scores[k].abs / e.scores[k].n.max(1) as f64);
+        assert!(
+            e.scores[0].days > 0 && e.scores[0].days < 55,
+            "warm-up days are not scored"
+        );
+        assert!(
+            regression < 0.5 * profile,
+            "regression {regression} vs profile {profile}"
+        );
+        let m = e.last_model.expect("a fitted model");
+        assert!((m.coef[0] + 0.10).abs() < 0.02, "{:?}", m.coef);
+    }
+
+    #[test]
+    fn data_after_the_period_is_never_used() {
+        let all = series(60, |t| 0.15 + 0.02 * ((t / 3600 * 7) % 13) as f64);
+        let mut changed = all.clone();
+        let end = local_midnight(date("2026-02-11"));
+        for (t, v) in &mut changed {
+            if *t >= end {
+                *v = 9.99;
+            }
+        }
+        let run = |a: &[(i64, f64)]| {
+            let e = evaluate_days(a, &[], &[], date("2026-01-25"), date("2026-02-10"), TZ);
+            e.scores
+                .iter()
+                .map(|s| (s.abs, s.sq, s.bias, s.rho))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(run(&all), run(&changed));
+    }
+
+    fn local_midnight(d: chrono::NaiveDate) -> i64 {
+        use chrono::TimeZone;
+        TZ.from_local_datetime(&d.and_hms_opt(0, 0, 0).unwrap())
+            .unwrap()
+            .timestamp()
     }
 }

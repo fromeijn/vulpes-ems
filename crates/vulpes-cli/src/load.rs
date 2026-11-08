@@ -155,11 +155,81 @@ pub(crate) fn evaluate(
     temp_forecast: &str,
     temp_history: &str,
 ) -> Result<()> {
+    let all: Vec<(i64, f64)> = store.samples(LOAD_KEY, 3600, 0, i64::MAX / 2)?;
+    if all.is_empty() {
+        bail!("no '{LOAD_KEY}' series; run build-load first");
+    }
     // Day-ahead temperature for target hours; short-lead archive for reference days.
-    let (t_fc, t_hist) = (
-        crate::series::hourly_forecast(store, temp_forecast, "temperature_2m")?,
-        crate::series::hourly_forecast(store, temp_history, "temperature_2m")?,
+    let temps = Temperatures {
+        forecast: crate::series::hourly_forecast(store, temp_forecast, "temperature_2m")?,
+        history: crate::series::hourly_forecast(store, temp_history, "temperature_2m")?,
+    };
+    let e = evaluate_days(&all, &temps, from, to, tz, country)?;
+    let bases = DegreeBases::default();
+    println!(
+        "temperature correction (all data): +{:.0} W per °C above {} °C, +{:.0} W per °C below {} °C",
+        e.correction.beta_cool, bases.cool_base, e.correction.beta_heat, bases.heat_base
     );
+    println!(
+        "{} hours, mean load {:.0} W; forecasts issued 12:00 UTC the day before",
+        e.hours, e.mean_load
+    );
+    println!(
+        "{:34} {:>14} {:>9} {:>8} {:>16}",
+        "method", "hourly MAE", "RMSE", "bias", "daily MAE"
+    );
+    for (name, s) in LOAD_METHODS.iter().zip(&e.scores) {
+        let n = s.n.max(1) as f64;
+        println!(
+            "{name:34} {:5.0} W ({:4.1}%) {:7.0} W {:+6.0} W {:6.2} kWh/day",
+            s.abs / n,
+            100.0 * s.abs / n / e.mean_load,
+            (s.sq / n).sqrt(),
+            s.bias / n,
+            s.day_abs / s.days.max(1) as f64
+        );
+    }
+    Ok(())
+}
+
+/// Hourly temperature (°C) keyed by hour start: day-ahead forecasts for the
+/// target hours, and the short-lead archive for reference days.
+pub(crate) struct Temperatures {
+    pub forecast: HashMap<i64, f64>,
+    pub history: HashMap<i64, f64>,
+}
+
+const LOAD_METHODS: [&str; 7] = [
+    "last known day, same hour",
+    "same hour last week",
+    "profile, mean",
+    "profile, median",
+    "profile, mean + last year 30%",
+    "profile, median + last year 30%",
+    "profile, mean + temperature",
+];
+
+struct LoadEval {
+    /// One score per entry of [`LOAD_METHODS`].
+    scores: Vec<Score>,
+    hours: usize,
+    mean_load: f64,
+    /// Temperature correction fitted on all evaluated days.
+    correction: Correction,
+}
+
+/// Score every load forecasting method on each complete local day in
+/// `[from, to]`, with forecasts issued 12:00 UTC the day before. Only data
+/// before that moment is used, also for fitting the temperature correction.
+fn evaluate_days(
+    all: &[(i64, f64)],
+    temps: &Temperatures,
+    from: NaiveDate,
+    to: NaiveDate,
+    tz: Tz,
+    country: Country,
+) -> Result<LoadEval> {
+    let (t_fc, t_hist) = (&temps.forecast, &temps.history);
     let bases = DegreeBases::default();
     let mut past: Vec<(i64, Sample)> = Vec::new();
     let local_midnight = |d: NaiveDate| -> Result<i64> {
@@ -169,38 +239,25 @@ pub(crate) fn evaluate(
             .context("tz")?
             .timestamp())
     };
-    let all: Vec<(i64, f64)> = store.samples(LOAD_KEY, 3600, 0, i64::MAX / 2)?;
-    if all.is_empty() {
-        bail!("no '{LOAD_KEY}' series; run build-load first");
-    }
     let actual: HashMap<i64, f64> = all.iter().copied().collect();
-    let methods: Vec<(&str, Option<ProfileOptions>)> = vec![
-        ("last known day, same hour", None),
-        ("same hour last week", None),
-        ("profile, mean", Some(ProfileOptions::default())),
-        (
-            "profile, median",
-            Some(ProfileOptions {
-                median: true,
-                ..Default::default()
-            }),
-        ),
-        (
-            "profile, mean + last year 30%",
-            Some(ProfileOptions {
-                last_year_weight: 0.3,
-                ..Default::default()
-            }),
-        ),
-        (
-            "profile, median + last year 30%",
-            Some(ProfileOptions {
-                median: true,
-                last_year_weight: 0.3,
-                ..Default::default()
-            }),
-        ),
-        ("profile, mean + temperature", Some(ProfileOptions::default())),
+    let methods: [Option<ProfileOptions>; LOAD_METHODS.len()] = [
+        None,
+        None,
+        Some(ProfileOptions::default()),
+        Some(ProfileOptions {
+            median: true,
+            ..Default::default()
+        }),
+        Some(ProfileOptions {
+            last_year_weight: 0.3,
+            ..Default::default()
+        }),
+        Some(ProfileOptions {
+            median: true,
+            last_year_weight: 0.3,
+            ..Default::default()
+        }),
+        Some(ProfileOptions::default()),
     ];
     let temp_method = methods.len() - 1;
     let mut scores: Vec<Score> = methods.iter().map(|_| Score::default()).collect();
@@ -221,7 +278,7 @@ pub(crate) fn evaluate(
         }
         let profiles: Vec<Option<ProfileForecaster>> = methods
             .iter()
-            .map(|(_, o)| o.map(|o| ProfileForecaster::new(&history, tz, country, o)))
+            .map(|o| o.map(|o| ProfileForecaster::new(&history, tz, country, o)))
             .collect();
         let mut day_f = vec![0.0; methods.len()];
         let mut day_a = 0.0;
@@ -279,29 +336,15 @@ pub(crate) fn evaluate(
         }
         day += chrono::Duration::days(1);
     }
-    let last = Correction::fit(&past.iter().map(|(_, s)| *s).collect::<Vec<_>>(), 100.0);
-    println!(
-        "temperature correction (all data): +{:.0} W per °C above {} °C, +{:.0} W per °C below {} °C",
-        last.beta_cool, bases.cool_base, last.beta_heat, bases.heat_base
-    );
-    let mean = sum_actual / n_actual.max(1) as f64;
-    println!("{n_actual} hours, mean load {mean:.0} W; forecasts issued 12:00 UTC the day before");
-    println!(
-        "{:34} {:>14} {:>9} {:>8} {:>16}",
-        "method", "hourly MAE", "RMSE", "bias", "daily MAE"
-    );
-    for ((name, _), s) in methods.iter().zip(&scores) {
-        let n = s.n.max(1) as f64;
-        println!(
-            "{name:34} {:5.0} W ({:4.1}%) {:7.0} W {:+6.0} W {:6.2} kWh/day",
-            s.abs / n,
-            100.0 * s.abs / n / mean,
-            (s.sq / n).sqrt(),
-            s.bias / n,
-            s.day_abs / s.days.max(1) as f64
-        );
+    if n_actual == 0 {
+        bail!("no complete days with load data between {from} and {to}");
     }
-    Ok(())
+    Ok(LoadEval {
+        scores,
+        hours: n_actual,
+        mean_load: sum_actual / n_actual as f64,
+        correction: Correction::fit(&past.iter().map(|(_, s)| *s).collect::<Vec<_>>(), 100.0),
+    })
 }
 
 #[cfg(test)]
@@ -398,5 +441,146 @@ mod tests {
         s.add(110.0, 100.0);
         s.add(80.0, 100.0);
         assert_eq!((s.n, s.abs, s.sq, s.bias), (2, 30.0, 500.0, -10.0));
+    }
+
+    const TZ: Tz = chrono_tz::Europe::Amsterdam;
+
+    fn date(s: &str) -> NaiveDate {
+        s.parse().unwrap()
+    }
+
+    /// Hourly series from 1 Jan 2026 for `days` days.
+    fn series(days: i64, f: impl Fn(i64) -> f64) -> Vec<(i64, f64)> {
+        let start = 1_767_225_600; // 2026-01-01 00:00 UTC
+        (0..24 * days)
+            .map(|k| start + k * 3600)
+            .map(|t| (t, f(t)))
+            .collect()
+    }
+
+    fn no_temps() -> Temperatures {
+        Temperatures {
+            forecast: HashMap::new(),
+            history: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn constant_load_is_forecast_perfectly() {
+        let all = series(60, |_| 500.0);
+        let e = evaluate_days(
+            &all,
+            &no_temps(),
+            date("2026-02-01"),
+            date("2026-02-07"),
+            TZ,
+            Country::None,
+        )
+        .unwrap();
+        assert_eq!(e.hours, 7 * 24);
+        assert_eq!(e.mean_load, 500.0);
+        for (name, s) in LOAD_METHODS.iter().zip(&e.scores) {
+            assert_eq!(s.n, 7 * 24, "{name}");
+            assert!(s.abs < 1e-6, "{name}: {}", s.abs);
+        }
+        assert_eq!(e.correction, Correction::NONE);
+    }
+
+    #[test]
+    fn data_after_the_issue_time_is_never_used() {
+        // Forecasts for 10 Feb are issued 9 Feb 12:00 UTC. Changing the load
+        // between then and the start of 10 Feb must not change its scores.
+        let base = series(60, |t| 300.0 + ((t / 3600) % 24) as f64 * 10.0);
+        let target = date("2026-02-10");
+        let start = TZ
+            .from_local_datetime(&target.and_hms_opt(0, 0, 0).unwrap())
+            .unwrap()
+            .timestamp();
+        let cutoff = start - start.rem_euclid(86_400) - 12 * 3600;
+        let mut changed = base.clone();
+        for (t, v) in &mut changed {
+            if (cutoff..start).contains(t) {
+                *v += 5000.0;
+            }
+        }
+        let run = |all: &[(i64, f64)]| {
+            let e = evaluate_days(all, &no_temps(), target, target, TZ, Country::None).unwrap();
+            e.scores.iter().map(|s| (s.abs, s.sq, s.bias)).collect::<Vec<_>>()
+        };
+        assert_eq!(run(&base), run(&changed));
+        // Data after the evaluated period doesn't matter either.
+        let mut later = base.clone();
+        for (t, v) in &mut later {
+            if *t >= start + 86_400 {
+                *v = 0.0;
+            }
+        }
+        assert_eq!(run(&base), run(&later));
+    }
+
+    #[test]
+    fn incomplete_days_are_skipped_and_no_days_is_an_error() {
+        let mut all = series(40, |_| 400.0);
+        let hole = TZ
+            .from_local_datetime(&date("2026-02-03").and_hms_opt(13, 0, 0).unwrap())
+            .unwrap()
+            .timestamp();
+        all.retain(|&(t, _)| t != hole);
+        let e = evaluate_days(
+            &all,
+            &no_temps(),
+            date("2026-02-01"),
+            date("2026-02-05"),
+            TZ,
+            Country::None,
+        )
+        .unwrap();
+        assert_eq!(e.hours, 4 * 24);
+        let err = evaluate_days(
+            &all,
+            &no_temps(),
+            date("2027-01-01"),
+            date("2027-01-02"),
+            TZ,
+            Country::None,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn temperature_correction_learns_cooling_load() {
+        // A heatwave pattern: daily temperature cycles between days; each °C
+        // above 18 adds 50 W. The plain profile lags; the corrected one doesn't.
+        let temp = |t: i64| {
+            let day = t / 86_400;
+            let hour = ((t / 3600) % 24) as f64;
+            16.0 + ((day * 7) % 11) as f64 + 4.0 * (std::f64::consts::PI * (hour - 6.0) / 12.0).sin().max(0.0)
+        };
+        let all = series(100, |t| 400.0 + 50.0 * (temp(t) - 18.0).max(0.0));
+        let temps: HashMap<i64, f64> = all.iter().map(|&(t, _)| (t, temp(t))).collect();
+        let temps = Temperatures {
+            forecast: temps.clone(),
+            history: temps,
+        };
+        let e = evaluate_days(
+            &all,
+            &temps,
+            date("2026-02-15"),
+            date("2026-04-05"),
+            TZ,
+            Country::None,
+        )
+        .unwrap();
+        let mae = |name: &str| {
+            let s = &e.scores[LOAD_METHODS.iter().position(|m| *m == name).unwrap()];
+            s.abs / s.n as f64
+        };
+        assert!(
+            mae("profile, mean + temperature") < 0.5 * mae("profile, mean"),
+            "{} vs {}",
+            mae("profile, mean + temperature"),
+            mae("profile, mean")
+        );
+        assert!((e.correction.beta_cool - 50.0).abs() < 10.0, "{:?}", e.correction);
     }
 }

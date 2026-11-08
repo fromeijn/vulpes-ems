@@ -67,13 +67,13 @@ Rules:
 - **No network or real data in tests.** API clients test their parsers on small inline samples (for example XML/JSON snippets). Tests build their own synthetic inputs.
 - **Bug fixes come with a regression test** that fails without the fix.
 - **New or changed behaviour comes with tests in the same change.** Before committing, the checks under Commands must pass.
-- **CLI commands:** put the logic in plain functions that take data and return results, and unit-test those. Keep `main.rs` and the store/printing glue thin.
+- **CLI commands:** put the logic in plain functions that take data and return results, and unit-test those (for example `replay::simulate`, `load::evaluate_days`, `solar::calibrate_panels`). The command function only loads data, calls them and prints. Keep `main.rs` thin.
+- **Refactoring commands:** run the command on real local data before and after, and check that the output is identical.
 - **Serde formats are part of the API:** test the JSON round-trip of engine requests/responses and of `Behaviour`/`ModeDef`, so the Python side doesn't silently break.
 - **Physics against references:** solar changes must keep `crates/vulpes-solar/tests/pvlib_reference.rs` green (pvlib 0.16.1, solar constant 1366.1 W/m²). Regenerate reference values with pvlib, never by copying our own output.
 - **Python:** HA-independent code (like `modes.py`) gets pytest tests in `tests/`.
 
 Known coverage gaps to fill:
-- **`vulpes-cli` evaluation and calibration commands** (`eval-*`, `calibrate-solar`, `build-load`): their helpers are tested, but the day-by-day loops are not. Next step: move each loop into a function over in-memory data, as was done for `replay::simulate`.
 - **Network calls** (`open_meteo::fetch`, `entsoe::fetch`, `energyzero::fetch_hourly`): only the request building and response parsing are tested; there are no tests against live services by design.
 - **`vulpes-py`** is tested from Python (`tests/test_bindings.py`), against the built module. PyO3 functions can't be unit-tested from Rust because the extension module doesn't link libpython.
 
