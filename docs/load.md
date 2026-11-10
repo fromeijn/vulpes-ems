@@ -13,6 +13,10 @@ The terms are energy per step. With hourly data, mean power in W equals energy i
 - When the battery energy counters are missing, a battery power series fills in, with a configurable sign.
 - Small negative values from sensor timing jitter are clipped to 0.
 
+The Home Assistant integration builds the same series from hourly statistics. Two kinds of hours are left out, because a single one would distort the profile's mean for weeks:
+- an hour where an energy counter went down (a meter reset or a corrected statistic);
+- an hour with a load above what the grid connection, the battery and the solar panels can deliver together. The plan then carries a warning.
+
 ## Baseline: similar-day profile
 
 Households follow the local clock and calendar, so everything works in local time, including DST.

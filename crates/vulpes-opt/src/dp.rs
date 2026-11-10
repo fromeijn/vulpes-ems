@@ -6,7 +6,7 @@
 //! price × discharge efficiency), so there is no fixed end-SOC target.
 
 use crate::physics::step;
-use vulpes_core::{BatteryParams, GridLimits, ModeDef};
+use vulpes_core::{BatteryParams, Behaviour, GridLimits, ModeDef};
 
 /// Forecasts and prices for one slot. Prices in currency/kWh.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -62,6 +62,21 @@ fn slot_cost(inp: &SlotInput, grid_w: f64, battery_w: f64, dt_h: f64, wear: f64)
 /// Penalty per Wh below the reserve: large enough to dominate any price.
 const RESERVE_PENALTY_PER_WH: f64 = 10.0;
 
+/// Scores closer than this count as equal.
+const TIE_EPS: f64 = 1e-9;
+
+/// How much a mode intervenes. Among modes with an equal score the least
+/// active one is planned (and among those the first in the list): a full
+/// battery gives "charge" and "hold" the same outcome, but if the forecast
+/// is off, the passive mode does less harm.
+fn activity(mode: &ModeDef) -> u8 {
+    let powered = matches!(
+        mode.behaviour,
+        Behaviour::GridSetpoint { .. } | Behaviour::BatteryPower { .. }
+    );
+    2 * u8::from(powered) + u8::from(mode.pv_curtail || mode.no_export)
+}
+
 pub fn optimize(p: &Problem<'_>) -> Plan {
     let b = p.battery;
     let (lo, hi) = (b.min_soc * b.capacity_wh, b.max_soc * b.capacity_wh);
@@ -112,7 +127,10 @@ pub fn optimize(p: &Problem<'_>) -> Plan {
             let o = step(mode, inp.load_w, inp.pv_w, soc, b, p.grid, p.dt_h);
             let c = slot_cost(inp, o.grid_w, o.battery_w, p.dt_h, b.wear_cost_per_kwh);
             let score = c + reserve_penalty(inp, o.soc_wh) + interp(&value[t + 1], o.soc_wh);
-            if best.as_ref().is_none_or(|x| score < x.0) {
+            let better = best.as_ref().is_none_or(|x| {
+                score < x.0 - TIE_EPS || (score <= x.0 + TIE_EPS && activity(mode) < activity(&p.modes[x.1]))
+            });
+            if better {
                 best = Some((score, m, o, c));
             }
         }
@@ -291,6 +309,62 @@ mod tests {
             paid.slots.iter().all(|x| x.mode == 0 && x.grid_w < 0.0),
             "{paid:?}"
         );
+    }
+
+    #[test]
+    fn a_tie_goes_to_the_passive_mode() {
+        // Full battery, no sun, flat prices, energy worth keeping: charging from
+        // the grid and holding have the same outcome. Plan "hold" (index 1),
+        // although "charge" comes first in the list.
+        let s = vec![slot(500.0, 0.0, 0.20); 4];
+        let plan = solve(&s, 10_000.0, 0.0, 0.40);
+        assert!(
+            plan.slots.iter().all(|x| x.mode == 1 && x.battery_w == 0.0),
+            "{plan:?}"
+        );
+        // A real difference still wins over the preference: cheap now, dear later.
+        let mut s = vec![slot(300.0, 0.0, 0.10); 3];
+        s.extend(vec![slot(1500.0, 0.0, 0.50); 3]);
+        assert_eq!(solve(&s, 1000.0, 0.02, 0.0).slots[0].mode, 0);
+    }
+
+    #[test]
+    fn ties_prefer_plain_modes_and_then_list_order() {
+        let plain = |b| ModeDef {
+            name: "m".into(),
+            behaviour: b,
+            pv_curtail: false,
+            no_export: false,
+        };
+        let variant = ModeDef {
+            no_export: true,
+            ..plain(Behaviour::SelfConsume)
+        };
+        assert!(activity(&plain(Behaviour::Idle)) < activity(&variant));
+        assert!(activity(&variant) < activity(&plain(Behaviour::BatteryPower { w: 0.0 })));
+        assert_eq!(
+            activity(&plain(Behaviour::NoDischarge)),
+            activity(&plain(Behaviour::SelfConsume))
+        );
+        // Night, empty battery: hold and self-consume both do nothing; the first listed wins.
+        let b = bat(0.0);
+        let m = vec![
+            variant,
+            plain(Behaviour::NoDischarge),
+            plain(Behaviour::SelfConsume),
+        ];
+        let s = vec![slot(500.0, 0.0, 0.3); 3];
+        let plan = optimize(&Problem {
+            slots: &s,
+            dt_h: 1.0,
+            modes: &m,
+            battery: &b,
+            grid: &GRID,
+            soc0_wh: 1000.0,
+            terminal_value_per_kwh: 0.0,
+            soc_step_wh: 100.0,
+        });
+        assert!(plan.slots.iter().all(|x| x.mode == 1), "{plan:?}");
     }
 
     #[test]

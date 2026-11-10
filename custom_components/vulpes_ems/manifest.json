@@ -15,8 +15,8 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/fromeijn/vulpes-ems/issues",
   "requirements": [
-    "vulpes-ems==0.3.0"
+    "vulpes-ems==0.3.1"
   ],
   "single_config_entry": true,
-  "version": "0.3.0"
+  "version": "0.3.1"
 }

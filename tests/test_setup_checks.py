@@ -86,6 +86,23 @@ def test_load_series_balances_and_skips_incomplete_hours():
     assert sc.load_series(groups, stats) == [(T0, 500.0), (T0 + 7200, 0.0)]
 
 
+def test_load_series_skips_hours_where_a_counter_went_down():
+    """A counter reset gives a huge negative change; as a balance it would be hundreds of kW."""
+    groups = {+1: ["sensor.import", "sensor.discharge"], -1: ["sensor.charge"]}
+    stats = {
+        "sensor.import": _rows([0.5, 0.5, 0.5, 0.5]),
+        "sensor.discharge": _rows([0.0, -2000.0, 0.0, -0.001]),
+        "sensor.charge": _rows([0.1, -2500.0, 0.1, 0.0]),
+    }
+    # Hour 1 is the reset (it would be 500 kW); hour 3 is rounding jitter and stays.
+    history = sc.load_series(groups, stats)
+    assert [t for t, _ in history] == [T0, T0 + 7200, T0 + 10800]
+    assert [w for _, w in history] == pytest.approx([400.0, 400.0, 499.0])
+    # A reset on a subtracted series alone is skipped too.
+    stats["sensor.discharge"] = _rows([0.0, 0.0, 0.0, 0.0])
+    assert [t for t, _ in sc.load_series(groups, stats)] == [T0, T0 + 7200, T0 + 10800]
+
+
 def test_load_series_empty():
     assert sc.load_series({+1: [], -1: []}, {}) == []
     assert sc.load_series({+1: ["sensor.a"], -1: []}, {}) == []

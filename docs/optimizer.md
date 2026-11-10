@@ -41,6 +41,10 @@ The optimizer does backward induction over slot × SOC grid × mode, interpolati
 
 `import kWh × import price − export kWh × export price + wear × |battery kWh|`
 
+**Ties:** when modes score the same in a slot, the plan takes the least active one: a mode without a power setpoint before charge or discharge, and a plain mode before its `pv_curtail` or `no_export` variant. A full battery, for example, gives "charge" and "hold" the same outcome, and the plan says "hold".
+
+**Charge can mean discharge:** with a grid setpoint, "charge" in a slot with a forecast load above the setpoint is a partial discharge. The optimizer uses it that way when it pays.
+
 **End of horizon:** no end-SOC target is imposed. Energy left in the battery is credited at a terminal value per kWh: the median import price over the horizon × discharge efficiency.
 
 **Reserve:** an optional minimum SOC per slot is enforced with a large penalty.

@@ -89,11 +89,18 @@ def load_groups(cfg: dict[str, Any]) -> dict[int, list[str]]:
     }
 
 
+# An hourly energy change below minus this (kWh) is a counter reset, not rounding jitter.
+COUNTER_JITTER_KWH = 0.01
+
+
 def load_series(groups: dict[int, list[str]], stats: dict[str, list[dict[str, Any]]]) -> list[tuple[int, float]]:
     """Hourly house load in W from hourly energy changes (kWh) per statistic.
 
     `stats` maps statistic ids to recorder rows with `start` and `change`.
     An hour missing any of the series is skipped: it would give a wrong balance.
+    So is an hour where a counter went down (a meter reset or a corrected
+    statistic): energy counters only go up, and the balance of such an hour
+    can be hundreds of kW, which would distort the load profile for weeks.
     """
     ids = {s for g in groups.values() for s in g}
     per_hour: dict[int, dict[str, float]] = {}
@@ -106,6 +113,8 @@ def load_series(groups: dict[int, list[str]], stats: dict[str, list[dict[str, An
     for t in sorted(per_hour):
         vals = per_hour[t]
         if not ids or not ids <= vals.keys():
+            continue
+        if any(vals[s] < -COUNTER_JITTER_KWH for s in ids):
             continue
         kwh = sum(sign * vals[s] for sign, group in groups.items() for s in group)
         history.append((t, max(kwh, 0.0) * 1000.0))

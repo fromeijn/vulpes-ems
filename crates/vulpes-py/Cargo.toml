@@ -16,6 +16,6 @@ crate-type = ["cdylib"]
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 pyo3 = { version = "0.25", features = ["extension-module", "abi3-py313"] }
 vulpes-core.workspace = true
-vulpes-engine = { version = "0.3.0", path = "../vulpes-engine" }
+vulpes-engine = { version = "0.3.1", path = "../vulpes-engine" }
 vulpes-opt.workspace = true
-vulpes-sources = { version = "0.3.0", path = "../vulpes-sources" }
+vulpes-sources = { version = "0.3.1", path = "../vulpes-sources" }

@@ -86,6 +86,24 @@ fn weather_for(weather: &HashMap<i64, WeatherSlot>, start: i64, step: i64) -> Op
     (!v.is_empty()).then_some(v)
 }
 
+/// Load history without the hours a house cannot have consumed: more than the
+/// grid connection, the battery and the solar panels can deliver together (or
+/// not a finite number). Such hours come from meter glitches, like a counter
+/// reset, and one of them distorts the profile's mean for weeks. Returns the
+/// kept history and the number of hours left out.
+fn plausible_load(req: &PlanRequest) -> (Vec<(i64, f64)>, usize) {
+    let limit_w =
+        req.grid.max_import_w + req.battery.max_discharge_w + req.planes.iter().map(|p| p.pdc0).sum::<f64>();
+    let kept: Vec<(i64, f64)> = req
+        .load_history
+        .iter()
+        .copied()
+        .filter(|&(_, w)| w.is_finite() && w <= limit_w)
+        .collect();
+    let ignored = req.load_history.len() - kept.len();
+    (kept, ignored)
+}
+
 pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
     req.battery.validate()?;
     if req.modes.is_empty() {
@@ -144,11 +162,17 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
     }
 
     // Load forecast (hourly profile, applied to each slot of the hour).
-    if req.load_history.is_empty() {
+    let (load_history, load_ignored) = plausible_load(req);
+    if load_ignored > 0 {
+        warnings.push(format!(
+            "ignored {load_ignored} load hours above the physical limit"
+        ));
+    }
+    if load_history.is_empty() {
         return Err(Error::Request("load_history is empty".into()));
     }
-    let load_fc = ProfileForecaster::new(&req.load_history, tz, country, ProfileOptions::default());
-    let mean_load = req.load_history.iter().map(|x| x.1).sum::<f64>() / req.load_history.len() as f64;
+    let load_fc = ProfileForecaster::new(&load_history, tz, country, ProfileOptions::default());
+    let mean_load = load_history.iter().map(|x| x.1).sum::<f64>() / load_history.len() as f64;
     let mut load_fallback = 0;
 
     // Prices: published where known, else forecast wholesale through the tariff.
@@ -362,9 +386,22 @@ mod tests {
         assert!((resp.summary.load_kwh_24h - 9.6).abs() < 0.5);
         assert!(resp.slots.iter().all(|s| s.price_known));
         assert!(resp.slots.iter().all(|s| (10.0..=100.0).contains(&s.soc_pct)));
-        // Cheap first hours, expensive later: it should charge early.
+        // Cheap first hours, expensive later, and a sunny morning: the battery
+        // fills from solar alone, so "Charging" (a tie once it is full) is not planned.
+        let cheap = &resp.slots[..24];
+        assert!(cheap.iter().all(|s| s.mode != "Charging"), "{cheap:?}");
+        assert!(cheap.iter().all(|s| s.grid_w <= 1e-6), "{cheap:?}");
+        assert!(cheap.last().unwrap().soc_pct > 99.9, "{cheap:?}");
+        // Without sun it charges from the grid in the cheap hours.
+        let mut dark = request(now);
+        for w in dark.weather.as_mut().unwrap() {
+            (w.ghi, w.dni, w.dhi) = (0.0, 0.0, 0.0);
+        }
+        let resp = plan(&dark).unwrap();
         assert!(
-            resp.slots[..24].iter().any(|s| s.mode == "Charging"),
+            resp.slots[..24]
+                .iter()
+                .any(|s| s.mode == "Charging" && s.battery_w > 0.0),
             "{:?}",
             &resp.slots[..24]
         );
@@ -600,6 +637,42 @@ mod tests {
         };
         assert_eq!((at(21), at(22)), (600.0, 200.0));
         assert!(resp.slots.iter().filter(|s| s.load_w == 400.0).count() >= 22 * 4);
+    }
+
+    #[test]
+    fn impossible_load_hours_are_ignored_with_a_warning() {
+        let clean = request(1_781_000_000);
+        let base = plan(&clean).unwrap();
+        assert!(!base.warnings.iter().any(|w| w.contains("physical limit")));
+        // A meter glitch: 500 kW for one hour, a week ago. The limit is 17 + 3 + 3 = 23 kW.
+        let mut r = clean.clone();
+        let glitch = r.load_history.len() - 7 * 24;
+        r.load_history[glitch].1 = 500_000.0;
+        r.load_history[glitch + 1].1 = f64::NAN;
+        let resp = plan(&r).unwrap();
+        assert!(
+            resp.warnings
+                .iter()
+                .any(|w| w == "ignored 2 load hours above the physical limit"),
+            "{:?}",
+            resp.warnings
+        );
+        assert!(resp.slots.iter().all(|s| s.load_w == 400.0), "{:?}", resp.slots);
+        // A heavy but possible hour stays in.
+        let mut r = clean.clone();
+        r.load_history[glitch].1 = 23_000.0;
+        let resp = plan(&r).unwrap();
+        assert!(!resp.warnings.iter().any(|w| w.contains("physical limit")));
+        assert!(resp.slots.iter().any(|s| s.load_w > 400.0));
+        // Nothing plausible left: the same error as an empty history.
+        let mut r = clean;
+        r.load_history = vec![(r.now - 3600, 1e9)];
+        assert!(
+            plan(&r)
+                .unwrap_err()
+                .to_string()
+                .contains("load_history is empty")
+        );
     }
 
     /// The JSON the Home Assistant integration sends (`coordinator._request`):
