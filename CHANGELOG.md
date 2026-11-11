@@ -7,6 +7,7 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 ### Added
 
 - **CLI:** `replay` also runs the optimizer with the actual load, PV or prices in place of the forecast, and prints what a perfect forecast of each would save per year, with a 90 % interval. The table has a new "vs optim" column.
+- **CLI:** `replay --compare-horizons 48,60` replays the optimizer with other planning horizons and prints what each saves per year against `--horizon-h`.
 
 ### Changed
 
@@ -15,6 +16,7 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 - The Tariff step explains Export a and Export b.
 - **Engine request:** `export` no longer has `net_metering`. The integration and the wheel must be updated together.
 - **CLI:** a replay site file with `net_metering` under `export` is rejected. For net metering, set `export.a`/`export.b` to the `tariff` values.
+- **CLI:** `replay` now gives each hour the PV forecast that had been issued by then. Hours more than a day ahead use the model from the new `--tail-model` flag (default `ecmwf_ifs025`) instead of the day-ahead forecast, which was not available yet. Before replaying, run `backfill-weather --lead-days 2 --models ecmwf_ifs025` (and `--lead-days 3`, `4` for horizons beyond 48 and 72 hours). Results differ slightly from earlier versions.
 
 ## 0.3.1 - 2026-11-10
 

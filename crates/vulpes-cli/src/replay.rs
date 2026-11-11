@@ -67,6 +67,10 @@ pub(crate) struct ReplayArgs<'a> {
     pub lat: f64,
     pub lon: f64,
     pub horizon_h: usize,
+    /// Further horizons (hours) to compare the optimizer on.
+    pub compare_horizons: &'a [usize],
+    /// Weather model for PV forecasts issued two or more days ahead.
+    pub tail_model: &'a str,
     pub wholesale: &'a str,
     pub export_override: Option<(f64, f64)>,
 }
@@ -142,8 +146,20 @@ struct ReplayData {
     pv: HashMap<i64, f64>,
     /// Actual wholesale price (currency/kWh).
     price: HashMap<i64, f64>,
-    /// Day-ahead PV forecast (W).
-    pv_fc: HashMap<i64, f64>,
+    /// PV forecast (W) by lead: entry `n - 1` holds the forecast issued `n`
+    /// days before each hour.
+    pv_fc: Vec<HashMap<i64, f64>>,
+}
+
+/// The freshest forecast lead (days, at least 1) that was already issued at
+/// `t` for hour `h`: a forecast with lead `n` is issued `n` days before `h`.
+fn lead_days(t: i64, h: i64) -> usize {
+    ((h - t).max(1) as usize).div_ceil(86_400)
+}
+
+/// PV forecast for hour `h` as known at `t`; `None` when that lead is missing.
+fn pv_forecast(pv_fc: &[HashMap<i64, f64>], t: i64, h: i64) -> Option<f64> {
+    pv_fc.get(lead_days(t, h) - 1)?.get(&h).copied()
 }
 
 struct Report {
@@ -345,7 +361,7 @@ fn simulate(
             } else {
                 price_fc.forecast(h)
             };
-            let (Some(w), Some(l), Some(&p)) = (w, load_fc.forecast(h), data.pv_fc.get(&h)) else {
+            let (Some(w), Some(l), Some(p)) = (w, load_fc.forecast(h), pv_forecast(&data.pv_fc, t, h)) else {
                 break;
             };
             fc.push(SlotInput {
@@ -436,23 +452,37 @@ pub(crate) fn run(store: &Store, args: &ReplayArgs<'_>) -> Result<()> {
         midnight(tz, args.from)?,
         midnight(tz, args.to + chrono::Duration::days(1))?,
     );
-    // Day-ahead PV forecast: mean of the plant forecast from both weather models.
+    // PV forecast per lead. One day ahead: the mean of the plant forecast from
+    // both short-range weather models. Further ahead those models have no
+    // archived runs, so the tail model is used.
     let planes = crate::solar::load_planes(args.planes, false)?;
-    let mut pv_fc: HashMap<i64, f64> = HashMap::new();
+    let longest = args
+        .compare_horizons
+        .iter()
+        .copied()
+        .fold(args.horizon_h, usize::max);
+    let span = (start - 86_400, end + (longest as i64 + 24) * 3600);
+    let plant = |source: &str| -> Result<HashMap<i64, f64>> {
+        let data = crate::solar::load_inputs(store, source, args.lat, args.lon, span.0, span.1)?;
+        Ok(crate::solar::plant_hourly(&planes, &data))
+    };
     let models = ["knmi_harmonie_arome_netherlands", "icon_d2"];
-    let span = (start - 86_400, end + (args.horizon_h as i64 + 24) * 3600);
+    let mut day1: HashMap<i64, f64> = HashMap::new();
     for m in models {
-        let data = crate::solar::load_inputs(
-            store,
-            &format!("open-meteo-day1:{m}"),
-            args.lat,
-            args.lon,
-            span.0,
-            span.1,
-        )?;
-        for (h, w) in crate::solar::plant_hourly(&planes, &data) {
-            *pv_fc.entry(h).or_default() += w / models.len() as f64;
+        for (h, w) in plant(&format!("open-meteo-day1:{m}"))? {
+            *day1.entry(h).or_default() += w / models.len() as f64;
         }
+    }
+    let mut pv_fc = vec![day1];
+    for lead in 2..=longest.div_ceil(24).max(1) {
+        let source = format!("open-meteo-day{lead}:{}", args.tail_model);
+        pv_fc.push(plant(&source).with_context(|| {
+            format!(
+                "a {longest} h horizon needs PV weather {lead} days ahead: \
+                 run backfill-weather --lead-days {lead} --models {}",
+                args.tail_model
+            )
+        })?);
     }
     let data = ReplayData {
         load: all(crate::load::LOAD_KEY)?,
@@ -460,11 +490,12 @@ pub(crate) fn run(store: &Store, args: &ReplayArgs<'_>) -> Result<()> {
         price: all(args.wholesale)?,
         pv_fc,
     };
+    let report = simulate(&site, &data, tz, start, end, args.horizon_h)?;
     let Report {
         hours,
         tallies,
         daily,
-    } = simulate(&site, &data, tz, start, end, args.horizon_h)?;
+    } = &report;
     let b = &site.battery;
     let export_desc = format!("export = {:.3} × wholesale {:+.3}", site.export.a, site.export.b);
     println!(
@@ -476,7 +507,7 @@ pub(crate) fn run(store: &Store, args: &ReplayArgs<'_>) -> Result<()> {
         "strategy", "cost €", "vs self", "vs optim", "import kWh", "export kWh", "cycles"
     );
     let (base, opt) = (tallies[0].cost, tallies[OPTIMIZER].cost);
-    for (name, tl) in STRATEGIES.iter().zip(&tallies) {
+    for (name, tl) in STRATEGIES.iter().zip(tallies) {
         let modes: Vec<String> = site
             .modes
             .iter()
@@ -505,7 +536,41 @@ pub(crate) fn run(store: &Store, args: &ReplayArgs<'_>) -> Result<()> {
             println!("  {name:10} {est:8.2}  ({lo:.2} to {hi:.2})");
         }
     }
+    if !args.compare_horizons.is_empty() {
+        println!(
+            "\nOptimizer by horizon: cost, and saving per year against {} h (90 % interval):",
+            args.horizon_h
+        );
+        println!("  {:3} h {:10.2}", args.horizon_h, tallies[OPTIMIZER].cost);
+        for &h in args.compare_horizons {
+            let other = simulate(&site, &data, tz, start, end, h)?;
+            let (est, lo, hi) = horizon_saving(&report, &other)?;
+            println!(
+                "  {h:3} h {:10.2} {est:8.2}  ({lo:.2} to {hi:.2})",
+                other.tallies[OPTIMIZER].cost
+            );
+        }
+    }
     Ok(())
+}
+
+/// What the optimizer saves per year in `other` against `base`, two replays
+/// of the same days: `(estimate, low, high)`.
+fn horizon_saving(base: &Report, other: &Report) -> Result<(f64, f64, f64)> {
+    if base.daily.len() != other.daily.len() {
+        bail!(
+            "the horizons replayed different days ({} and {})",
+            base.daily.len(),
+            other.daily.len()
+        );
+    }
+    let saving: Vec<f64> = base
+        .daily
+        .iter()
+        .zip(&other.daily)
+        .map(|(a, b)| a[OPTIMIZER] - b[OPTIMIZER])
+        .collect();
+    yearly_saving(&saving, 7, 2000).context("no days replayed")
 }
 
 #[cfg(test)]
@@ -588,7 +653,7 @@ mod tests {
             load: hours.iter().map(|&h| (h, 500.0)).collect(),
             pv: hours.iter().map(|&h| (h, 0.0)).collect(),
             price: hours.iter().map(|&h| (h, price(h))).collect(),
-            pv_fc: hours.iter().map(|&h| (h, 0.0)).collect(),
+            pv_fc: vec![hours.iter().map(|&h| (h, 0.0)).collect(); 4],
         }
     }
 
@@ -850,6 +915,96 @@ mod tests {
     }
 
     #[test]
+    fn forecast_lead_is_the_freshest_one_already_issued() {
+        let (t, day) = (1_794_150_000, 86_400);
+        assert_eq!(lead_days(t, t), 1, "the current hour");
+        assert_eq!(lead_days(t, t - 3600), 1, "never below one day");
+        assert_eq!(lead_days(t, t + day - 3600), 1);
+        assert_eq!(lead_days(t, t + day), 1, "issued exactly now");
+        assert_eq!(
+            lead_days(t, t + day + 3600),
+            2,
+            "the day-ahead run for it is not out yet"
+        );
+        assert_eq!(lead_days(t, t + 2 * day), 2);
+        assert_eq!(lead_days(t, t + 83 * 3600), 4);
+        // Each lead has its own forecast; a missing lead or hour gives none.
+        let h = t + day + 3600;
+        let fc = vec![
+            HashMap::from([(h, 100.0), (t, 10.0)]),
+            HashMap::from([(h, 200.0)]),
+        ];
+        assert_eq!(pv_forecast(&fc, t, t), Some(10.0));
+        assert_eq!(pv_forecast(&fc, t, h), Some(200.0));
+        assert_eq!(pv_forecast(&fc, t + 3600, h), Some(100.0), "a day ahead by now");
+        assert_eq!(pv_forecast(&fc, t, t + 3600), None);
+        assert_eq!(pv_forecast(&fc, t, t + 2 * day + 3600), None);
+        assert_eq!(pv_forecast(&[], t, t), None);
+    }
+
+    #[test]
+    fn day_ahead_pv_forecasts_do_not_leak_into_earlier_decisions() {
+        // Export earns nothing, so sun at midday replaces charging at night.
+        // The day-ahead forecast for 20 Oct shows that sun; the forecasts
+        // issued earlier show none.
+        let mut site = site(false);
+        site.export = Export { a: 0.0, b: 0.0 };
+        let base = data(25);
+        let mut sunny = data(25);
+        let noon = midnight(TZ, day(20)).unwrap() + 12 * 3600;
+        for h in (noon..noon + 3 * 3600).step_by(3600) {
+            sunny.pv_fc[0].insert(h, 5000.0);
+        }
+        let start = midnight(TZ, day(16)).unwrap();
+        let until = |d: &ReplayData, end: i64| simulate(&site, d, TZ, start, end, 36).unwrap();
+        let issued = noon - 86_400;
+        assert_eq!(
+            until(&base, issued).tallies[OPTIMIZER],
+            until(&sunny, issued).tallies[OPTIMIZER],
+            "optimizer saw the day-ahead forecast before it was issued"
+        );
+        assert_ne!(
+            until(&base, noon).tallies[OPTIMIZER],
+            until(&sunny, noon).tallies[OPTIMIZER]
+        );
+    }
+
+    #[test]
+    fn horizon_stops_where_the_pv_forecast_lead_is_missing() {
+        let site = site(true);
+        let (start, end) = (midnight(TZ, day(15)).unwrap(), midnight(TZ, day(18)).unwrap());
+        let mut one_lead = data(25);
+        one_lead.pv_fc.truncate(1);
+        // With only day-ahead forecasts, 36 h plans on the 25 hours they cover.
+        let short = simulate(&site, &one_lead, TZ, start, end, 36).unwrap();
+        let full = simulate(&site, &data(25), TZ, start, end, 25).unwrap();
+        assert_eq!(short.tallies, full.tallies);
+        assert_eq!(short.hours, 72);
+    }
+
+    #[test]
+    fn horizon_saving_compares_the_optimizer_day_by_day() {
+        let report = |cost: f64, days: usize| {
+            let mut row = vec![0.0; STRATEGIES.len()];
+            row[OPTIMIZER] = cost;
+            Report {
+                hours: days * 24,
+                tallies: Vec::new(),
+                daily: vec![row; days],
+            }
+        };
+        let (est, lo, hi) = horizon_saving(&report(1.0, 30), &report(0.9, 30)).unwrap();
+        for v in [est, lo, hi] {
+            assert!((v - 36.5).abs() < 1e-9, "{v}");
+        }
+        let (worse, ..) = horizon_saving(&report(0.9, 30), &report(1.0, 30)).unwrap();
+        assert!((worse + 36.5).abs() < 1e-9);
+        let err = horizon_saving(&report(1.0, 30), &report(1.0, 29)).unwrap_err();
+        assert!(err.to_string().contains("different days"), "{err}");
+        assert!(horizon_saving(&report(1.0, 0), &report(1.0, 0)).is_err());
+    }
+
+    #[test]
     fn yearly_saving_scales_to_a_year_with_an_interval() {
         assert_eq!(yearly_saving(&[], 7, 100), None);
         assert_eq!(yearly_saving(&[1.0], 0, 100), None);
@@ -892,7 +1047,7 @@ mod tests {
             load: HashMap::new(),
             pv: HashMap::new(),
             price: HashMap::new(),
-            pv_fc: HashMap::new(),
+            pv_fc: Vec::new(),
         };
         let err = simulate(&site, &empty, TZ, start, start + 86_400, 36)
             .err()

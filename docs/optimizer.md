@@ -52,7 +52,7 @@ The optimizer does backward induction over slot × SOC grid × mode, interpolati
 ## Replay
 
 `vulpes-cli replay` steps through history hour by hour. At each hour, every strategy decides with only the information available then:
-- **PV:** day-ahead forecast;
+- **PV:** for each hour ahead, the freshest forecast that had been issued by then. Up to a day ahead that is the mean of the two short-range weather models; further ahead it is the longer-range model given with `--tail-model`, because the short-range models have no archived runs that far back. Live, the short-range models still cover part of the second day, so the replay is slightly pessimistic there;
 - **load:** profile forecast from data up to that day;
 - **prices:** published prices where they would have been out, the profile forecast otherwise.
 
@@ -68,6 +68,8 @@ Strategies compared:
 The three single-forecast variants show what a perfect forecast of that input would save, which is the most any improvement to that forecast can bring. Their savings interact, so they don't add up to the perfect-foresight gap. When actual values are missing somewhere in the horizon, these variants decide on the forecasts for that hour.
 
 Below the table, the replay scales each saving to a year and gives a 90 % interval. The interval comes from resampling whole weeks of daily savings, because consecutive days are correlated. An interval that includes zero, or that overlaps another forecast's interval, means the history is too short to tell.
+
+`--compare-horizons 48,60` replays the optimizer again with other planning horizons and prints what each saves per year against `--horizon-h`, with the same kind of interval. A horizon of more than 24 hours needs the tail model's forecasts in the store: `backfill-weather --lead-days <N> --models <tail model>` for each day of the horizon from the second.
 
 Export is paid `a × wholesale + b`, from the site file. `--export a,b` replays another scenario, for example after net metering ends. Net metering itself is an export tariff equal to the import tariff.
 

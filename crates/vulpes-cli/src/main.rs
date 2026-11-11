@@ -240,6 +240,15 @@ enum Cmd {
         lon: f64,
         #[arg(long, default_value_t = 36)]
         horizon_h: usize,
+        /// Also replay the optimizer with these horizons (hours) and print what
+        /// each saves per year against `--horizon-h`.
+        #[arg(long, value_delimiter = ',')]
+        compare_horizons: Vec<usize>,
+        /// Weather model for PV forecasts issued two or more days ahead, where
+        /// the short-range models have no archived runs. Needs
+        /// `backfill-weather --lead-days <N>` for each day of the horizon.
+        #[arg(long, default_value = "ecmwf_ifs025")]
+        tail_model: String,
         #[arg(long, default_value = PRICE_KEY)]
         wholesale: String,
         /// Scenario: override export pricing with `<a>,<b>` (export = a·wholesale + b).
@@ -437,6 +446,8 @@ fn main() -> Result<()> {
             lat,
             lon,
             horizon_h,
+            compare_horizons,
+            tail_model,
             wholesale,
             export,
         } => replay::run(
@@ -450,6 +461,8 @@ fn main() -> Result<()> {
                 lat,
                 lon,
                 horizon_h,
+                compare_horizons: &compare_horizons,
+                tail_model: &tail_model,
                 wholesale: &wholesale,
                 export_override: export.as_deref().map(parse_export).transpose()?,
             },
