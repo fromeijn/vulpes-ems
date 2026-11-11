@@ -93,6 +93,23 @@ def test_migrate_leaves_v2_and_empty_options_alone():
     assert modes.migrate_v1(v2) == v2
 
 
+def test_migrate_v2_turns_net_metering_into_the_export_tariff():
+    v2 = {"tariff_a": 1.21, "tariff_b": 0.13, "export_a": 1.1, "export_b": -0.02, "charge": True}
+    # Switch on: export was paid at the import price, so the import tariff becomes the export tariff.
+    on = modes.migrate_v2({**v2, "net_metering": True})
+    assert on == {**v2, "export_a": 1.21, "export_b": 0.13}
+    # Switch off: the export tariff was already in use and stays.
+    assert modes.migrate_v2({**v2, "net_metering": False}) == v2
+
+
+def test_migrate_v2_leaves_migrated_and_empty_settings_alone():
+    assert modes.migrate_v2({}) == {}
+    v3 = {"tariff_a": 1.21, "tariff_b": 0.13, "export_a": 1.0, "export_b": 0.0}
+    assert modes.migrate_v2(v3) == v3
+    # A switch without an import tariff (never saved by the flow) is only dropped.
+    assert modes.migrate_v2({"net_metering": True, "export_a": 1.0}) == {"export_a": 1.0}
+
+
 def test_options_replace_data_so_cleared_fields_stay_cleared():
     data = {"mode_entity": "input_select.ess_mode", "charge": True}
     assert modes.settings(data, {}) == data

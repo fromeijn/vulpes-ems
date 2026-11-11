@@ -32,7 +32,6 @@ from .const import (
     CONF_MAX_IMPORT_W,
     CONF_MAX_SOC,
     CONF_MIN_SOC,
-    CONF_NET_METERING,
     CONF_PLANES,
     CONF_PRICE_ENTITY,
     CONF_SOC_ENTITY,
@@ -207,11 +206,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "load_history": load,
             "known_prices": known,
             "tariff": {"a": float(cfg[CONF_TARIFF_A]), "b": float(cfg[CONF_TARIFF_B])},
-            "export": {
-                "net_metering": bool(cfg[CONF_NET_METERING]),
-                "a": float(cfg[CONF_EXPORT_A]),
-                "b": float(cfg[CONF_EXPORT_B]),
-            },
+            "export": {"a": float(cfg[CONF_EXPORT_A]), "b": float(cfg[CONF_EXPORT_B])},
             "wholesale_history": wholesale,
         }
 

@@ -303,7 +303,7 @@ mod tests {
             "{negative:?}"
         );
         assert_eq!(negative.cost, 0.0);
-        // Net metering pays export at the (positive) import price: keep exporting.
+        // Export paid at the (positive) import price: keep exporting.
         let paid = plan(0.20);
         assert!(
             paid.slots.iter().all(|x| x.mode == 0 && x.grid_w < 0.0),

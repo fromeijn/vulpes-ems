@@ -22,7 +22,7 @@ The optimizer reasons about physical behaviours. The Home Assistant integration 
 | `idle` | Battery at 0 |
 | `battery_power { w }` | Fixed battery power |
 
-Any mode can add `pv_curtail` (no PV at all) or `no_export` (export limit 0: PV still covers the load and charges the battery, and only the surplus beyond that is curtailed). Zero export only pays when exporting costs money, for example at negative prices without net metering.
+Any mode can add `pv_curtail` (no PV at all) or `no_export` (export limit 0: PV still covers the load and charges the battery, and only the surplus beyond that is curtailed). Zero export only pays when exporting costs money: when the export price is negative.
 
 The distinction matters. With a grid setpoint, a heavy load *reduces* charging and can even discharge the battery, because grid power is held fixed. A battery-power model gets this wrong.
 
@@ -64,6 +64,6 @@ Strategies compared:
 - the optimizer;
 - a perfect-foresight upper bound (the same optimizer fed actual future values).
 
-`--export a,b` replays a scenario where export is paid `a × wholesale + b`, for example after net metering ends.
+Export is paid `a × wholesale + b`, from the site file. `--export a,b` replays another scenario, for example after net metering ends. Net metering itself is an export tariff equal to the import tariff.
 
 **Known limitation:** under the Dutch net-metering scheme ("saldering"), export only earns the import price up to the annual import volume. The replay doesn't model that cap yet, so net-metering results that export more than they import are optimistic.

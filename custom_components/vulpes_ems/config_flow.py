@@ -33,7 +33,6 @@ from .const import (
     CONF_MAX_IMPORT_W,
     CONF_MAX_SOC,
     CONF_MIN_SOC,
-    CONF_NET_METERING,
     CONF_PLANES,
     CONF_PRICE_ENTITY,
     CONF_SOC_ENTITY,
@@ -156,8 +155,7 @@ def _tariff_schema(d: dict[str, Any], currency: str) -> vol.Schema:
         {
             vol.Required(CONF_TARIFF_A, default=d.get(CONF_TARIFF_A, 1.21)): _num(0, 5, "any"),
             vol.Required(CONF_TARIFF_B, default=d.get(CONF_TARIFF_B, 0.13)): _num(-1, 2, "any", f"{currency}/kWh"),
-            vol.Required(CONF_NET_METERING, default=d.get(CONF_NET_METERING, False)): selector.BooleanSelector(),
-            vol.Required(CONF_EXPORT_A, default=d.get(CONF_EXPORT_A, 1.21)): _num(0, 5, "any"),
+            vol.Required(CONF_EXPORT_A, default=d.get(CONF_EXPORT_A, 1.0)): _num(0, 5, "any"),
             vol.Required(CONF_EXPORT_B, default=d.get(CONF_EXPORT_B, 0.0)): _num(-1, 2, "any", f"{currency}/kWh"),
         }
     )
@@ -461,7 +459,7 @@ class _Steps:
 class VulpesEmsConfigFlow(_Steps, ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Vulpes EMS."""
 
-    VERSION = 2
+    VERSION = 3
 
     def __init__(self) -> None:
         self.data: dict[str, Any] = {}

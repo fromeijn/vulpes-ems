@@ -29,7 +29,6 @@ CONF_MAX_EXPORT_W = "max_export_w"
 # Tariff (step "tariff")
 CONF_TARIFF_A = "tariff_a"
 CONF_TARIFF_B = "tariff_b"
-CONF_NET_METERING = "net_metering"
 CONF_EXPORT_A = "export_a"
 CONF_EXPORT_B = "export_b"
 

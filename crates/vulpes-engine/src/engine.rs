@@ -185,12 +185,8 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
         ProfileForecaster::new(&req.wholesale_history, tz, Country::None, opt)
     });
     let export_from = |import: f64| {
-        if req.export.net_metering {
-            import
-        } else {
-            let wholesale = (import - req.tariff.b) / req.tariff.a;
-            req.export.a * wholesale + req.export.b
-        }
+        let wholesale = (import - req.tariff.b) / req.tariff.a;
+        req.export.a * wholesale + req.export.b
     };
     let mean_known = (!req.known_prices.is_empty())
         .then(|| req.known_prices.iter().map(|p| p.import).sum::<f64>() / req.known_prices.len() as f64);
@@ -367,11 +363,7 @@ mod tests {
                 })
                 .collect(),
             tariff: LinearTariff { a: 1.21, b: 0.13 },
-            export: ExportTariff {
-                net_metering: false,
-                a: 1.21,
-                b: 0.0,
-            },
+            export: ExportTariff { a: 1.21, b: 0.0 },
             wholesale_history: vec![],
             weather: Some(weather),
         }
@@ -579,7 +571,7 @@ mod tests {
         assert!(later.iter().all(|s| !s.price_known));
         for s in later {
             assert!((s.import_price - (1.21 * 0.10 + 0.13)).abs() < 1e-9, "{s:?}");
-            // Without net metering: export = export_a × wholesale + export_b.
+            // Export = export_a × wholesale + export_b.
             assert!((s.export_price - 1.21 * 0.10).abs() < 1e-9, "{s:?}");
         }
         assert!(resp.slots[..6 * 4].iter().all(|s| s.price_known));
@@ -606,11 +598,23 @@ mod tests {
     }
 
     #[test]
-    fn net_metering_pays_export_at_the_import_price() {
+    fn export_tariff_equal_to_import_pays_the_import_price() {
+        // Net metering: export a/b are the import a/b. That holds for published
+        // prices (first 6 hours) and for forecast ones alike.
         let mut r = request(1_781_000_000);
-        r.export.net_metering = true;
+        r.known_prices.truncate(6);
+        r.wholesale_history = (0..(24 * 30))
+            .map(|h| (r.now - 30 * 86_400 + h * 3600, 0.10))
+            .collect();
+        r.export = ExportTariff {
+            a: r.tariff.a,
+            b: r.tariff.b,
+        };
         let resp = plan(&r).unwrap();
-        assert!(resp.slots.iter().all(|s| s.export_price == s.import_price));
+        assert!(resp.slots.iter().any(|s| s.price_known) && resp.slots.iter().any(|s| !s.price_known));
+        for s in &resp.slots {
+            assert!((s.export_price - s.import_price).abs() < 1e-12, "{s:?}");
+        }
     }
 
     #[test]
@@ -698,7 +702,7 @@ mod tests {
             "load_history": [[1_780_996_400, 400.0]],
             "known_prices": [{"start": 1_780_999_200, "end": 1_781_002_800, "import": 0.25}],
             "tariff": {"a": 1.21, "b": 0.13},
-            "export": {"net_metering": true, "a": 1.21, "b": 0.0},
+            "export": {"a": 1.0, "b": -0.02},
             "wholesale_history": [[1_780_996_400, 0.1]]
         });
         let r: PlanRequest = serde_json::from_value(json).unwrap();
@@ -711,6 +715,7 @@ mod tests {
         assert_eq!(r.load_history, vec![(1_780_996_400, 400.0)]);
         assert!(r.modes[1].pv_curtail);
         assert!(!r.modes[0].no_export && r.modes[2].no_export);
+        assert_eq!((r.export.a, r.export.b), (1.0, -0.02));
         assert_eq!(r.planes[0].inverter_eff, 0.965);
     }
 

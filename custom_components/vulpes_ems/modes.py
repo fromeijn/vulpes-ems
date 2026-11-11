@@ -21,6 +21,12 @@ CONF_CONTROL_SCRIPT = "control_script"
 CONF_MODE_ENTITY = "mode_entity"
 CONF_MODE_MAP = "mode_map"
 CONF_MODES_V1 = "modes"
+# The net metering switch of settings version 2, and the tariff keys it maps to.
+CONF_NET_METERING_V2 = "net_metering"
+CONF_TARIFF_A = "tariff_a"
+CONF_TARIFF_B = "tariff_b"
+CONF_EXPORT_A = "export_a"
+CONF_EXPORT_B = "export_b"
 
 POWER_CONTROLS = ["grid_setpoint", "battery_power"]
 
@@ -87,6 +93,22 @@ def mode_of_state(cfg: dict[str, Any], state: str) -> str | None:
         if option == state:
             return key
     return None
+
+
+def migrate_v2(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Drop the net metering switch of settings version 2.
+
+    Export is always `export a × wholesale + export b`. With the switch on,
+    export was paid at the import price: the import tariff becomes the export
+    tariff, so the plan stays the same.
+    """
+    if CONF_NET_METERING_V2 not in cfg:
+        return cfg
+    new = {k: v for k, v in cfg.items() if k != CONF_NET_METERING_V2}
+    if cfg[CONF_NET_METERING_V2] and CONF_TARIFF_A in cfg and CONF_TARIFF_B in cfg:
+        new[CONF_EXPORT_A] = cfg[CONF_TARIFF_A]
+        new[CONF_EXPORT_B] = cfg[CONF_TARIFF_B]
+    return new
 
 
 def migrate_v1(cfg: dict[str, Any]) -> dict[str, Any]:

@@ -57,6 +57,7 @@ python3 -m venv .venv && .venv/bin/pip install pytest maturin ziglang
 - **Solar setup:** the array form stores engine planes with `inverter: 0` plus integration-only keys (`power_entity`), stripped by `engine_planes()` before any engine call. `solar_setup` in the settings is `form` or `json`; setups from before 0.3.0 have neither and are treated as JSON. Calibration results live in `.storage/vulpes_ems.<entry_id>.calibration` and are only applied by the user, through the options flow.
 - `strings.json` and `translations/en.json` must stay identical, and each options step has the same labels as its config step (`tests/test_strings.py`). The options flow is a menu; each section saves the full settings copy.
 - **Translations:** every string change also updates `translations/nl.json`. It must have the same keys and `{placeholders}` as `en.json` (`tests/test_strings.py`). Mode values in script variables stay English: they are an API.
+- **Changelog:** every change a user can notice gets an entry in `CHANGELOG.md` under `## Unreleased`, in the same change: behaviour, settings and defaults, entities, the script variables, the engine JSON, CLI commands and their file formats. Group entries under Added, Changed, Fixed or Removed, and say what the user has to do, if anything. Refactors, tests and internal docs need no entry.
 - **Licensing:** MIT OR Apache-2.0. No per-file license headers.
 
 ## Testing
@@ -145,9 +146,10 @@ All three must be green before a release.
 1. **Bump the version everywhere:**
    - `[workspace.package] version` in `Cargo.toml`, and the `version = "x.y.z", path = …` dependency entries in `crates/*/Cargo.toml`;
    - `custom_components/vulpes_ems/manifest.json`: both `version` and the `vulpes-ems==x.y.z` requirement.
-2. **Check:** run fmt, clippy, the Rust tests and pytest (see Commands). Commit, push.
-3. **Tag `vX.Y.Z` and push the tag.** `wheels.yml` builds the 4 wheels, smoke-tests on Alpine and publishes to PyPI via trusted publishing (environment `pypi`).
-4. **Create the GitHub Release only after PyPI has the wheels.** The Marketplace offers the update from the release, and HA installs the requirement from PyPI.
+2. **Changelog:** rename `## Unreleased` in `CHANGELOG.md` to `## x.y.z - YYYY-MM-DD` and start an empty `## Unreleased` above it.
+3. **Check:** run fmt, clippy, the Rust tests and pytest (see Commands). Commit, push.
+4. **Tag `vX.Y.Z` and push the tag.** `wheels.yml` builds the 4 wheels, smoke-tests on Alpine and publishes to PyPI via trusted publishing (environment `pypi`).
+5. **Create the GitHub Release only after PyPI has the wheels,** with that version's changelog section as the release notes. The Marketplace offers the update from the release, and HA installs the requirement from PyPI.
 
 ## Privacy
 

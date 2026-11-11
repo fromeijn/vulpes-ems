@@ -47,16 +47,16 @@
       },
       "tariff": {
         "title": "Tariff",
-        "description": "Prices for hours not yet published are estimated as a × wholesale + b. While net metering applies, export is paid at the import price. Otherwise export is paid as export a × wholesale + export b. Dutch net metering (saldering) ends on 1 January 2027.",
+        "description": "Prices for hours not yet published are estimated as a × wholesale + b. Export is paid as export a × wholesale + export b.",
         "data": {
           "tariff_a": "Import a (usually the VAT factor)",
           "tariff_b": "Import b (energy tax + markup, incl. VAT)",
-          "net_metering": "Net metering (export paid at import price)",
           "export_a": "Export a",
           "export_b": "Export b"
         },
         "data_description": {
-          "net_metering": "Turn off once net metering no longer applies to you; in the Netherlands from 1 January 2027."
+          "export_a": "Usually 1: feed-in is paid at the market price without VAT. While net metering still applies to you, use the same values as Import a and b. Check your contract.",
+          "export_b": "A feed-in fee per kWh as a negative number, a bonus as a positive one."
         }
       },
       "modes": {
@@ -217,16 +217,16 @@
       },
       "tariff": {
         "title": "Tariff",
-        "description": "Prices for hours not yet published are estimated as a × wholesale + b. While net metering applies, export is paid at the import price. Otherwise export is paid as export a × wholesale + export b. Dutch net metering (saldering) ends on 1 January 2027.",
+        "description": "Prices for hours not yet published are estimated as a × wholesale + b. Export is paid as export a × wholesale + export b.",
         "data": {
           "tariff_a": "Import a (usually the VAT factor)",
           "tariff_b": "Import b (energy tax + markup, incl. VAT)",
-          "net_metering": "Net metering (export paid at import price)",
           "export_a": "Export a",
           "export_b": "Export b"
         },
         "data_description": {
-          "net_metering": "Turn off once net metering no longer applies to you; in the Netherlands from 1 January 2027."
+          "export_a": "Usually 1: feed-in is paid at the market price without VAT. While net metering still applies to you, use the same values as Import a and b. Check your contract.",
+          "export_b": "A feed-in fee per kWh as a negative number, a bonus as a positive one."
         }
       },
       "modes": {

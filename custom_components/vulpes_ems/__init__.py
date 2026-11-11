@@ -16,7 +16,7 @@ from homeassistant.core import HomeAssistant
 
 from .calibration import SolarCalibration
 from .coordinator import VulpesCoordinator
-from .modes import migrate_v1
+from .modes import migrate_v1, migrate_v2
 
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON, Platform.SWITCH]
 
@@ -39,14 +39,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: VulpesConfigEntry) -> bo
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: VulpesConfigEntry) -> bool:
-    """Version 1 (0.1.0) had user-named modes; version 2 uses Vulpes modes."""
-    if entry.version > 2:
+    """Version 1 (0.1.0) had user-named modes; version 2 had a net metering switch."""
+    if entry.version > 3:
         return False
     if entry.version == 1:
         hass.config_entries.async_update_entry(
             entry, data=migrate_v1(dict(entry.data)), options=migrate_v1(dict(entry.options)), version=2
         )
         _LOGGER.info("Migrated Vulpes EMS settings to Vulpes modes")
+    if entry.version == 2:
+        hass.config_entries.async_update_entry(
+            entry, data=migrate_v2(dict(entry.data)), options=migrate_v2(dict(entry.options)), version=3
+        )
+        _LOGGER.info("Migrated Vulpes EMS settings: net metering is now set through the export tariff")
     return True
 
 

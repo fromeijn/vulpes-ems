@@ -41,7 +41,7 @@ def _request(**overrides):
         "load_history": [[start - h * 3600 - (start % 3600), 400.0] for h in range(1, 24 * 7)],
         "known_prices": [{"start": start - 3600, "end": start + 4 * 3600, "import": 0.25}],
         "tariff": {"a": 1.21, "b": 0.13},
-        "export": {"net_metering": True, "a": 1.21, "b": 0.0},
+        "export": {"a": 1.21, "b": 0.0},
         # Weather supplied by the caller, so nothing is fetched.
         "weather": [
             {"start": start + k * 900, "ghi": 500, "dni": 600, "dhi": 150, "temp_air": 15, "wind_speed": 2}
@@ -80,20 +80,21 @@ def test_plan_blocks_export_when_it_costs_money():
         {"name": "self_consume:no_export", "behaviour": {"type": "self_consume"}, "no_export": True},
     ]
 
-    def plan(net_metering):
+    def plan(export):
         req = _request(
             modes=modes,
             soc_wh=10000,  # full: the solar surplus can only go to the grid
             # 0.05 import at a = 1.21, b = 0.13 means a negative wholesale price.
             known_prices=[{"start": start - 3600, "end": start + 4 * 3600, "import": 0.05}],
-            export={"net_metering": net_metering, "a": 1.0, "b": 0.0},
+            export=export,
         )
         return json.loads(vulpes_ems.plan(json.dumps(req)))
 
-    blocked = plan(False)
+    blocked = plan({"a": 1.0, "b": 0.0})
     assert all(s["mode"] == "self_consume:no_export" for s in blocked["slots"]), blocked["slots"]
     assert all(s["grid_w"] >= -1e-6 for s in blocked["slots"])
-    paid = plan(True)
+    # Export tariff equal to the import tariff (net metering): export pays 0.05.
+    paid = plan({"a": 1.21, "b": 0.13})
     assert all(s["mode"] == "self_consume" for s in paid["slots"])
 
 

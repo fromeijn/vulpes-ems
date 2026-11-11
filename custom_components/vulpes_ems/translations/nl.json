@@ -47,16 +47,16 @@
       },
       "tariff": {
         "title": "Tarief",
-        "description": "Prijzen voor uren die nog niet bekend zijn worden geschat als a × groothandelsprijs + b. Zolang salderen geldt, levert teruglevering de afnameprijs op. Anders levert teruglevering teruglevering-a × groothandelsprijs + teruglevering-b op. De salderingsregeling stopt op 1 januari 2027.",
+        "description": "Prijzen voor uren die nog niet bekend zijn worden geschat als a × groothandelsprijs + b. Teruglevering levert teruglevering-a × groothandelsprijs + teruglevering-b op.",
         "data": {
           "tariff_a": "Afname a (meestal de btw-factor)",
           "tariff_b": "Afname b (energiebelasting + opslag, incl. btw)",
-          "net_metering": "Salderen (teruglevering tegen de afnameprijs)",
           "export_a": "Teruglevering a",
           "export_b": "Teruglevering b"
         },
         "data_description": {
-          "net_metering": "Zet dit uit zodra salderen voor jou niet meer geldt; in Nederland vanaf 1 januari 2027."
+          "export_a": "Meestal 1: teruglevering wordt vergoed tegen de marktprijs zonder btw. Zolang salderen voor jou nog geldt, vul je dezelfde waarden in als bij Afname a en b. Controleer je contract.",
+          "export_b": "Terugleverkosten per kWh als negatief getal, een bonus als positief getal."
         }
       },
       "modes": {
@@ -217,16 +217,16 @@
       },
       "tariff": {
         "title": "Tarief",
-        "description": "Prijzen voor uren die nog niet bekend zijn worden geschat als a × groothandelsprijs + b. Zolang salderen geldt, levert teruglevering de afnameprijs op. Anders levert teruglevering teruglevering-a × groothandelsprijs + teruglevering-b op. De salderingsregeling stopt op 1 januari 2027.",
+        "description": "Prijzen voor uren die nog niet bekend zijn worden geschat als a × groothandelsprijs + b. Teruglevering levert teruglevering-a × groothandelsprijs + teruglevering-b op.",
         "data": {
           "tariff_a": "Afname a (meestal de btw-factor)",
           "tariff_b": "Afname b (energiebelasting + opslag, incl. btw)",
-          "net_metering": "Salderen (teruglevering tegen de afnameprijs)",
           "export_a": "Teruglevering a",
           "export_b": "Teruglevering b"
         },
         "data_description": {
-          "net_metering": "Zet dit uit zodra salderen voor jou niet meer geldt; in Nederland vanaf 1 januari 2027."
+          "export_a": "Meestal 1: teruglevering wordt vergoed tegen de marktprijs zonder btw. Zolang salderen voor jou nog geldt, vul je dezelfde waarden in als bij Afname a en b. Controleer je contract.",
+          "export_b": "Terugleverkosten per kWh als negatief getal, een bonus als positief getal."
         }
       },
       "modes": {

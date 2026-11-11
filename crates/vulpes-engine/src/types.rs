@@ -19,10 +19,10 @@ pub struct Location {
     pub lon: f64,
 }
 
-/// Export pricing: equal to import under net metering, else `a · wholesale + b`.
+/// Export pricing: `a · wholesale + b`. Equal to the import tariff's `a` and
+/// `b` when export is paid at the import price (net metering).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ExportTariff {
-    pub net_metering: bool,
     pub a: f64,
     pub b: f64,
 }

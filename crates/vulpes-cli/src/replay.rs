@@ -13,9 +13,12 @@ use vulpes_load::{Country, ProfileForecaster, ProfileOptions};
 use vulpes_opt::{Problem, SlotInput, optimize, step};
 use vulpes_price::LinearTariff;
 
+/// Export pricing: `a · wholesale + b`. Unknown keys are an error, so a site
+/// file with the former `net_metering` switch doesn't replay another scenario
+/// unnoticed.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Export {
-    net_metering: bool,
     a: f64,
     b: f64,
 }
@@ -45,11 +48,7 @@ impl Site {
         self.tariff.price(wholesale)
     }
     fn export_price(&self, wholesale: f64) -> f64 {
-        if self.export.net_metering {
-            self.import_price(wholesale)
-        } else {
-            self.export.a * wholesale + self.export.b
-        }
+        self.export.a * wholesale + self.export.b
     }
     fn mode_index(&self, name: &str) -> Result<usize> {
         self.modes
@@ -318,11 +317,7 @@ pub(crate) fn run(store: &Store, args: &ReplayArgs<'_>) -> Result<()> {
     let mut site: Site = serde_json::from_str(&std::fs::read_to_string(args.site)?)
         .with_context(|| format!("parsing {}", args.site.display()))?;
     if let Some((a, b)) = args.export_override {
-        site.export = Export {
-            net_metering: false,
-            a,
-            b,
-        };
+        site.export = Export { a, b };
     }
     site.battery.validate()?;
     let tz = args.tz;
@@ -359,11 +354,7 @@ pub(crate) fn run(store: &Store, args: &ReplayArgs<'_>) -> Result<()> {
     };
     let Report { hours, tallies } = simulate(&site, &data, tz, start, end, args.horizon_h)?;
     let b = &site.battery;
-    let export_desc = if site.export.net_metering {
-        "net metering (export = import price)".to_string()
-    } else {
-        format!("export = {:.3} × wholesale {:+.3}", site.export.a, site.export.b)
-    };
+    let export_desc = format!("export = {:.3} × wholesale {:+.3}", site.export.a, site.export.b);
     println!(
         "{hours} hours replayed; horizon {} h; {export_desc}; costs include battery wear",
         args.horizon_h
@@ -429,11 +420,7 @@ mod tests {
                 m("discharge", Behaviour::GridSetpoint { w: -3000.0 }),
             ],
             tariff: LinearTariff { a: 1.0, b: 0.0 },
-            export: Export {
-                net_metering: false,
-                a: 1.0,
-                b: 0.0,
-            },
+            export: Export { a: 1.0, b: 0.0 },
             rules: rules.then(|| Rules {
                 charge_below: 0.15,
                 grid_below: 0.25,
@@ -535,16 +522,24 @@ mod tests {
     fn site_prices() {
         let mut s = site(false);
         s.tariff = LinearTariff { a: 1.21, b: 0.13 };
-        s.export = Export {
-            net_metering: false,
-            a: 1.1,
-            b: -0.02,
-        };
+        s.export = Export { a: 1.1, b: -0.02 };
         assert!((s.import_price(0.1) - 0.251).abs() < 1e-12);
         assert!((s.export_price(0.1) - 0.09).abs() < 1e-12);
-        s.export.net_metering = true;
+        // Net metering: the export tariff equals the import tariff.
+        s.export = Export { a: 1.21, b: 0.13 };
         assert_eq!(s.export_price(0.1), s.import_price(0.1));
         assert!(s.mode_index("hold").is_ok() && s.mode_index("nope").is_err());
+    }
+
+    #[test]
+    fn export_rejects_the_former_net_metering_switch() {
+        let ok: Export = serde_json::from_str(r#"{"a": 1.0, "b": -0.02}"#).unwrap();
+        assert_eq!((ok.a, ok.b), (1.0, -0.02));
+        let err = serde_json::from_str::<Export>(r#"{"net_metering": true, "a": 1.0, "b": 0.0}"#)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("net_metering"), "{err}");
     }
 
     #[test]

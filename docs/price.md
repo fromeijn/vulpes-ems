@@ -22,6 +22,8 @@ How to read the coefficients:
 
 Fitting import and export compensation separately shows whether export is paid at the import price (net metering) or not.
 
+Export has its own `a` and `b`. Under net metering they equal the import values. Without it, export is typically paid at the wholesale price without VAT (`a` close to 1), minus any feed-in fee per kWh (a negative `b`).
+
 ## Wholesale forecast
 
 `vulpes-cli eval-price` issues forecasts at 10:00 UTC on the day before, before the auction. Only prices up to the end of the issue day are known at that point.
