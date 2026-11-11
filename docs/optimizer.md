@@ -62,7 +62,12 @@ Strategies compared:
 - self-consumption only;
 - user-configured threshold rules;
 - the optimizer;
+- the optimizer with one forecast replaced by the actual values: load, PV, or the prices that were not yet published;
 - a perfect-foresight upper bound (the same optimizer fed actual future values).
+
+The three single-forecast variants show what a perfect forecast of that input would save, which is the most any improvement to that forecast can bring. Their savings interact, so they don't add up to the perfect-foresight gap. When actual values are missing somewhere in the horizon, these variants decide on the forecasts for that hour.
+
+Below the table, the replay scales each saving to a year and gives a 90 % interval. The interval comes from resampling whole weeks of daily savings, because consecutive days are correlated. An interval that includes zero, or that overlaps another forecast's interval, means the history is too short to tell.
 
 Export is paid `a × wholesale + b`, from the site file. `--export a,b` replays another scenario, for example after net metering ends. Net metering itself is an export tariff equal to the import tariff.
 

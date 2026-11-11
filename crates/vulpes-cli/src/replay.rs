@@ -92,12 +92,47 @@ impl Tally {
     }
 }
 
-const STRATEGIES: [&str; 4] = [
+const STRATEGIES: [&str; 7] = [
     "self-consumption only",
     "threshold rules (current)",
     "vulpes optimizer",
+    "optimizer + actual load",
+    "optimizer + actual PV",
+    "optimizer + actual prices",
     "perfect foresight",
 ];
+/// Index of the optimizer on plain forecasts in [`STRATEGIES`].
+const OPTIMIZER: usize = 2;
+/// The oracle strategies, in the order they follow the optimizer in [`STRATEGIES`].
+const ORACLES: [Oracle; 3] = [Oracle::Load, Oracle::Pv, Oracle::Price];
+const PERFECT: usize = 6;
+
+/// Which forecast an oracle strategy replaces with the actual values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Oracle {
+    Load,
+    Pv,
+    Price,
+}
+
+/// The forecast slot with one input taken from the actual slot.
+fn oracle_slot(fc: &SlotInput, actual: &SlotInput, which: Oracle) -> SlotInput {
+    match which {
+        Oracle::Load => SlotInput {
+            load_w: actual.load_w,
+            ..*fc
+        },
+        Oracle::Pv => SlotInput {
+            pv_w: actual.pv_w,
+            ..*fc
+        },
+        Oracle::Price => SlotInput {
+            import_price: actual.import_price,
+            export_price: actual.export_price,
+            ..*fc
+        },
+    }
+}
 
 /// Hourly history the replay runs on, keyed by hour start (Unix seconds).
 struct ReplayData {
@@ -114,6 +149,50 @@ struct ReplayData {
 struct Report {
     hours: usize,
     tallies: Vec<Tally>,
+    /// Cost per replayed local day, in order: one value per strategy.
+    daily: Vec<Vec<f64>>,
+}
+
+/// Yearly saving implied by daily savings: `(estimate, low, high)`, with a
+/// 90 % interval from resampling blocks of `block` consecutive days. Blocks
+/// rather than days, because consecutive days are correlated. The resampling
+/// is seeded, so the same input gives the same interval. `None` without data.
+fn yearly_saving(daily: &[f64], block: usize, draws: usize) -> Option<(f64, f64, f64)> {
+    if daily.is_empty() || block == 0 || draws == 0 {
+        return None;
+    }
+    let blocks: Vec<(f64, f64)> = daily
+        .chunks(block)
+        .map(|c| (c.iter().sum(), c.len() as f64))
+        .collect();
+    let per_year = |sum: f64, days: f64| sum / days * 365.0;
+    // SplitMix64: small, seeded and good enough for resampling.
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    let mut samples: Vec<f64> = (0..draws)
+        .map(|_| {
+            let (mut sum, mut days) = (0.0, 0.0);
+            for _ in 0..blocks.len() {
+                let (s, d) = blocks[(next() % blocks.len() as u64) as usize];
+                sum += s;
+                days += d;
+            }
+            per_year(sum, days)
+        })
+        .collect();
+    samples.sort_by(f64::total_cmp);
+    let at = |q: f64| samples[((samples.len() - 1) as f64 * q).round() as usize];
+    Some((
+        per_year(daily.iter().sum(), daily.len() as f64),
+        at(0.05),
+        at(0.95),
+    ))
 }
 
 /// Local midnight starting date `d`.
@@ -225,6 +304,8 @@ fn simulate(
 
     let mut day_cache: Option<(NaiveDate, ProfileForecaster, ProfileForecaster)> = None;
     let mut hours = 0usize;
+    let mut daily: Vec<Vec<f64>> = Vec::new();
+    let mut last_day: Option<NaiveDate> = None;
     let mut t = start;
     while t < end {
         let (Some(&l_act), Some(&pv_act), Some(&w_act)) = (load.get(&t), pv.get(&t), price.get(&t)) else {
@@ -289,20 +370,43 @@ fn simulate(
             continue;
         }
         let (imp, exp) = (site.import_price(w_act), site.export_price(w_act));
-        let choice = [
+        // Without actuals for the whole horizon, the oracles and perfect
+        // foresight decide on the forecasts.
+        let complete = perfect.len() == fc.len();
+        let mut choice = vec![
             net_zero,
             match (rules, &site.rules) {
                 (Some(idx), Some(r)) => rule_choice(r, idx, imp, soc[1] / b.capacity_wh),
                 _ => net_zero,
             },
-            plan_mode(&fc, soc[2]),
-            plan_mode(if perfect.len() == fc.len() { &perfect } else { &fc }, soc[3]),
+            plan_mode(&fc, soc[OPTIMIZER]),
         ];
+        for which in ORACLES {
+            let k = choice.len();
+            choice.push(if complete {
+                let slots: Vec<SlotInput> = fc
+                    .iter()
+                    .zip(&perfect)
+                    .map(|(f, a)| oracle_slot(f, a, which))
+                    .collect();
+                plan_mode(&slots, soc[k])
+            } else {
+                plan_mode(&fc, soc[k])
+            });
+        }
+        choice.push(plan_mode(if complete { &perfect } else { &fc }, soc[PERFECT]));
+        if last_day != Some(today) {
+            last_day = Some(today);
+            daily.push(vec![0.0; STRATEGIES.len()]);
+        }
+        let day_costs = daily.last_mut().expect("day pushed");
         for (k, &m) in choice.iter().enumerate() {
             let o = step(&site.modes[m], l_act, pv_act, soc[k], b, &site.grid, 1.0);
             soc[k] = o.soc_wh;
+            let before = tallies[k].cost;
             tallies[k].settle(o.grid_w, o.battery_w, imp, exp, b.wear_cost_per_kwh);
             tallies[k].mode_hours[m] += 1;
+            day_costs[k] += tallies[k].cost - before;
         }
         hours += 1;
         t += 3600;
@@ -310,7 +414,11 @@ fn simulate(
     if hours == 0 {
         bail!("no hours with complete data in range");
     }
-    Ok(Report { hours, tallies })
+    Ok(Report {
+        hours,
+        tallies,
+        daily,
+    })
 }
 
 pub(crate) fn run(store: &Store, args: &ReplayArgs<'_>) -> Result<()> {
@@ -352,7 +460,11 @@ pub(crate) fn run(store: &Store, args: &ReplayArgs<'_>) -> Result<()> {
         price: all(args.wholesale)?,
         pv_fc,
     };
-    let Report { hours, tallies } = simulate(&site, &data, tz, start, end, args.horizon_h)?;
+    let Report {
+        hours,
+        tallies,
+        daily,
+    } = simulate(&site, &data, tz, start, end, args.horizon_h)?;
     let b = &site.battery;
     let export_desc = format!("export = {:.3} × wholesale {:+.3}", site.export.a, site.export.b);
     println!(
@@ -360,10 +472,10 @@ pub(crate) fn run(store: &Store, args: &ReplayArgs<'_>) -> Result<()> {
         args.horizon_h
     );
     println!(
-        "{:28} {:>10} {:>10} {:>10} {:>11} {:>9}  mode hours",
-        "strategy", "cost €", "vs self", "import kWh", "export kWh", "cycles"
+        "{:28} {:>10} {:>10} {:>10} {:>10} {:>11} {:>9}  mode hours",
+        "strategy", "cost €", "vs self", "vs optim", "import kWh", "export kWh", "cycles"
     );
-    let base = tallies[0].cost;
+    let (base, opt) = (tallies[0].cost, tallies[OPTIMIZER].cost);
     for (name, tl) in STRATEGIES.iter().zip(&tallies) {
         let modes: Vec<String> = site
             .modes
@@ -372,14 +484,26 @@ pub(crate) fn run(store: &Store, args: &ReplayArgs<'_>) -> Result<()> {
             .map(|(m, h)| format!("{}:{h}", m.name))
             .collect();
         println!(
-            "{name:28} {:10.2} {:+10.2} {:10.0} {:11.0} {:9.1}  {}",
+            "{name:28} {:10.2} {:+10.2} {:+10.2} {:10.0} {:11.0} {:9.1}  {}",
             tl.cost,
             tl.cost - base,
+            tl.cost - opt,
             tl.import_kwh,
             tl.export_kwh,
             tl.throughput_kwh / 2.0 / (b.capacity_wh / 1000.0),
             modes.join(" ")
         );
+    }
+    println!(
+        "\n{} days replayed. What a perfect forecast would save per year (90 % interval, resampled by week):",
+        daily.len()
+    );
+    let names = ["load", "PV", "prices", "all three"];
+    for (name, k) in names.into_iter().zip(OPTIMIZER + 1..=PERFECT) {
+        let saving: Vec<f64> = daily.iter().map(|d| d[OPTIMIZER] - d[k]).collect();
+        if let Some((est, lo, hi)) = yearly_saving(&saving, 7, 2000) {
+            println!("  {name:10} {est:8.2}  ({lo:.2} to {hi:.2})");
+        }
     }
     Ok(())
 }
@@ -548,7 +672,7 @@ mod tests {
         let (start, end) = (midnight(TZ, day(15)).unwrap(), midnight(TZ, day(22)).unwrap());
         let r = simulate(&site, &data(25), TZ, start, end, 36).unwrap();
         assert_eq!(r.hours, 7 * 24);
-        let [own, rules, opt, perfect] = [0, 1, 2, 3].map(|k| r.tallies[k].cost);
+        let [own, rules, opt, perfect] = [0, 1, OPTIMIZER, PERFECT].map(|k| r.tallies[k].cost);
         assert!(opt < own - 1.0, "optimizer {opt} vs self-consumption {own}");
         assert!(opt <= rules + 1e-9, "optimizer {opt} vs rules {rules}");
         // Load, PV and prices repeat exactly, so the forecasts are perfect too.
@@ -556,7 +680,30 @@ mod tests {
             (opt - perfect).abs() < 0.05,
             "optimizer {opt} vs perfect {perfect}"
         );
-        assert!(r.tallies[2].mode_hours[0] > 0, "charges in the cheap hours");
+        assert!(
+            r.tallies[OPTIMIZER].mode_hours[0] > 0,
+            "charges in the cheap hours"
+        );
+        // With perfect forecasts, knowing one actual input changes nothing.
+        for (name, t) in STRATEGIES
+            .iter()
+            .zip(&r.tallies)
+            .take(PERFECT)
+            .skip(OPTIMIZER + 1)
+        {
+            assert!((t.cost - opt).abs() < 0.05, "{name}: {} vs {opt}", t.cost);
+        }
+        // One row of costs per local day, adding up to the totals.
+        assert_eq!(r.daily.len(), 7);
+        for (k, t) in r.tallies.iter().enumerate() {
+            let sum: f64 = r.daily.iter().map(|d| d[k]).sum();
+            assert!(
+                (sum - t.cost).abs() < 1e-9,
+                "{}: {sum} vs {}",
+                STRATEGIES[k],
+                t.cost
+            );
+        }
         assert!(
             r.tallies
                 .iter()
@@ -577,12 +724,158 @@ mod tests {
         let before = |d: &ReplayData| simulate(&site, d, TZ, start, published, 36).unwrap();
         let (a, b) = (before(&base), before(&spiked));
         assert_eq!(
-            a.tallies[2], b.tallies[2],
+            a.tallies[OPTIMIZER], b.tallies[OPTIMIZER],
             "optimizer saw the spike before publication"
         );
         // Once published, the optimizer reacts to it (perfect foresight always could).
         let after = |d: &ReplayData| simulate(&site, d, TZ, start, spike_hour + 3600, 36).unwrap();
-        assert_ne!(after(&base).tallies[2], after(&spiked).tallies[2]);
+        assert_ne!(after(&base).tallies[OPTIMIZER], after(&spiked).tallies[OPTIMIZER]);
+    }
+
+    #[test]
+    fn oracle_slot_swaps_only_its_own_input() {
+        let fc = SlotInput {
+            load_w: 1.0,
+            pv_w: 2.0,
+            import_price: 3.0,
+            export_price: 4.0,
+            min_soc_wh: Some(5.0),
+        };
+        let actual = SlotInput {
+            load_w: 10.0,
+            pv_w: 20.0,
+            import_price: 30.0,
+            export_price: 40.0,
+            min_soc_wh: None,
+        };
+        let load = SlotInput { load_w: 10.0, ..fc };
+        let pv = SlotInput { pv_w: 20.0, ..fc };
+        let price = SlotInput {
+            import_price: 30.0,
+            export_price: 40.0,
+            ..fc
+        };
+        assert_eq!(oracle_slot(&fc, &actual, Oracle::Load), load);
+        assert_eq!(oracle_slot(&fc, &actual, Oracle::Pv), pv);
+        assert_eq!(oracle_slot(&fc, &actual, Oracle::Price), price);
+    }
+
+    /// Hour of the day in local time.
+    fn local_hour(h: i64) -> u32 {
+        chrono::Timelike::hour(&TZ.timestamp_opt(h, 0).unwrap())
+    }
+
+    #[test]
+    fn load_oracle_gains_when_the_load_forecast_is_wrong() {
+        // Export earns nothing, and there is an evening peak. The history has
+        // a small load, so the forecast expects the battery to last all day.
+        // From 15 Oct the load is ten times higher: the battery then has to be
+        // saved for the peak, which only the load oracle knows.
+        let mut site = site(false);
+        site.export = Export { a: 0.0, b: 0.0 };
+        let mut d = data(25);
+        let start = midnight(TZ, day(15)).unwrap();
+        for (&h, p) in d.price.iter_mut() {
+            if (17..21).contains(&local_hour(h)) {
+                *p = 0.60;
+            }
+        }
+        for (&h, l) in d.load.iter_mut() {
+            *l = if h < start { 100.0 } else { 1000.0 };
+        }
+        let r = simulate(&site, &d, TZ, start, start + 7 * 86_400, 36).unwrap();
+        let cost = |k: usize| r.tallies[k].cost;
+        let (opt, load) = (cost(OPTIMIZER), cost(OPTIMIZER + 1));
+        assert!(load < opt - 1.0, "load oracle {load} vs optimizer {opt}");
+        assert!(
+            cost(PERFECT) <= load + 0.05,
+            "perfect {} vs {load}",
+            cost(PERFECT)
+        );
+        // PV is forecast exactly (zero), so its oracle decides like the optimizer.
+        assert_eq!(r.tallies[OPTIMIZER + 2], r.tallies[OPTIMIZER]);
+        // Prices repeat, so the price oracle has nothing to add.
+        assert!((cost(OPTIMIZER + 3) - opt).abs() < 0.05);
+    }
+
+    #[test]
+    fn price_oracle_sees_prices_before_they_are_published() {
+        // Mornings pay best, so the battery is normally sold empty then, and
+        // buying it back in the afternoon doesn't pay. On 20 Oct the night
+        // pays more than the morning instead of being cheap; that is published
+        // on 19 Oct 12:00 UTC, after the morning of the 19th.
+        let site = site(false);
+        let mornings = |mut d: ReplayData| {
+            for (&h, p) in d.price.iter_mut() {
+                match local_hour(h) {
+                    0..6 => {}
+                    6..12 => *p = 0.50,
+                    _ => *p = 0.48,
+                }
+            }
+            d
+        };
+        let base = mornings(data(25));
+        let mut changed = mornings(data(25));
+        let night = midnight(TZ, day(20)).unwrap();
+        for h in (night..night + 6 * 3600).step_by(3600) {
+            changed.price.insert(h, 0.60);
+        }
+        let (start, published) = (midnight(TZ, day(16)).unwrap(), published_at(TZ, night));
+        let before = |d: &ReplayData| simulate(&site, d, TZ, start, published, 36).unwrap();
+        let (a, b) = (before(&base), before(&changed));
+        assert_eq!(
+            a.tallies[OPTIMIZER], b.tallies[OPTIMIZER],
+            "optimizer saw it early"
+        );
+        assert_ne!(
+            a.tallies[OPTIMIZER + 3],
+            b.tallies[OPTIMIZER + 3],
+            "the price oracle should already keep the battery for the better-paid night"
+        );
+    }
+
+    #[test]
+    fn oracles_fall_back_to_forecasts_without_actuals_in_the_horizon() {
+        let site = site(true);
+        let mut d = data(25);
+        let start = midnight(TZ, day(15)).unwrap();
+        // An hour after the replayed day, but inside every decision's horizon.
+        d.load.remove(&(start + 30 * 3600));
+        let r = simulate(&site, &d, TZ, start, start + 24 * 3600, 36).unwrap();
+        assert_eq!(r.hours, 24);
+        for (name, t) in STRATEGIES.iter().zip(&r.tallies).skip(OPTIMIZER + 1) {
+            assert_eq!(*t, r.tallies[OPTIMIZER], "{name}");
+        }
+    }
+
+    #[test]
+    fn yearly_saving_scales_to_a_year_with_an_interval() {
+        assert_eq!(yearly_saving(&[], 7, 100), None);
+        assert_eq!(yearly_saving(&[1.0], 0, 100), None);
+        assert_eq!(yearly_saving(&[1.0], 7, 0), None);
+        // A constant saving has no spread, also with a short last block.
+        let (est, lo, hi) = yearly_saving(&[0.1; 30], 7, 200).unwrap();
+        for v in [est, lo, hi] {
+            assert!((v - 36.5).abs() < 1e-9, "{v}");
+        }
+        // A single day is its own estimate.
+        assert_eq!(yearly_saving(&[2.0], 7, 50), Some((730.0, 730.0, 730.0)));
+        // Weeks alternating between 0 and 1 per day: the estimate is the mean,
+        // the interval lies around it and inside the possible range.
+        let weeks: Vec<f64> = (0..140).map(|d| ((d / 7) % 2) as f64).collect();
+        let (est, lo, hi) = yearly_saving(&weeks, 7, 2000).unwrap();
+        assert!((est - 182.5).abs() < 1e-9);
+        assert!(
+            0.0 <= lo && lo < est && est < hi && hi <= 365.0,
+            "{lo} {est} {hi}"
+        );
+        assert!(hi - lo > 30.0, "interval too narrow: {lo} to {hi}");
+        // Negative savings keep their sign, and the result is reproducible.
+        let neg: Vec<f64> = weeks.iter().map(|x| -x).collect();
+        let (est_n, lo_n, hi_n) = yearly_saving(&neg, 7, 2000).unwrap();
+        assert!((est_n + 182.5).abs() < 1e-9 && lo_n < est_n && est_n < hi_n && hi_n <= 0.0);
+        assert_eq!(yearly_saving(&weeks, 7, 2000), Some((est, lo, hi)));
     }
 
     #[test]

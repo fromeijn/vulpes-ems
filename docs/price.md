@@ -49,4 +49,4 @@ Export has its own `a` and `b`. Under net metering they equal the import values.
 - the regression reduced MAE by about 26 % and RMSE by about 27 %;
 - the within-day rank correlation went from about 0.79 to 0.89.
 
-For picking the very cheapest hours, the plain profile scored slightly better. Which variant saves more money is decided by replaying the optimizer (phase 7).
+For picking the very cheapest hours, the plain profile scored slightly better. In the oracle replay (see [optimizer.md](optimizer.md#replay)) on a test household, even a perfect forecast of the not yet published prices saved nothing measurable, so the regression stays out of the engine and the plain profile is used.

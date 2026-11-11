@@ -4,6 +4,10 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 
 ## Unreleased
 
+### Added
+
+- **CLI:** `replay` also runs the optimizer with the actual load, PV or prices in place of the forecast, and prints what a perfect forecast of each would save per year, with a 90 % interval. The table has a new "vs optim" column.
+
 ### Changed
 
 - **The net metering switch is gone.** Export is always paid as `export a × wholesale + export b`. Setups that had the switch on now have Export a/b equal to Import a/b, so their plans are unchanged. When net metering ends for you (in the Netherlands on 1 January 2027), set Export a/b in the options under Tariff.

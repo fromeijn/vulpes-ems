@@ -57,5 +57,5 @@ On a test household, the profile with temperature correction reduced daily energ
 ## Planned
 
 - **AC heating submodel:** heating source chosen on temperature and the electricity/gas price ratio. This waits for enough heating-season data.
-- **ML residual layer (phase 6).**
+- **ML residual layer:** parked. In the oracle replay (see [optimizer.md](optimizer.md#replay)) on a test household, a perfect load forecast saved only about a tenth of what the optimizer already saves, so a residual model can gain little.
 - **15-minute resolution:** from recorded live data.
