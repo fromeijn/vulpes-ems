@@ -45,6 +45,8 @@ The optimizer does backward induction over slot × SOC grid × mode, interpolati
 
 **Charge can mean discharge:** with a grid setpoint, "charge" in a slot with a forecast load above the setpoint is a partial discharge. The optimizer uses it that way when it pays.
 
+**Horizon:** 84 hours. In the replay, longer horizons kept saving money up to there, with real forecasts for each lead time; the step from 36 to 48 hours is the clearest, the rest is within the noise of one year of data but never worse.
+
 **End of horizon:** no end-SOC target is imposed. Energy left in the battery is credited at a terminal value per kWh: the median import price over the horizon × discharge efficiency.
 
 **Reserve:** an optional minimum SOC per slot is enforced with a large penalty.

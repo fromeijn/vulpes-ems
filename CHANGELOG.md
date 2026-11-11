@@ -11,6 +11,10 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 
 ### Changed
 
+- **Vulpes now plans 84 hours ahead** (was 36). In a replay of a year of history with the forecasts that were available at the time, a longer horizon gave lower costs. The `plan` attribute of the Planned mode sensor now has 336 slots instead of 144, so a dashboard chart of the plan gets longer. Nothing to set.
+- **Solar forecast beyond two days:** slots that the two short-range weather models don't reach use ECMWF IFS from Open-Meteo, in the same request.
+- **Engine request:** new optional `weather_tail_model` (default `"ecmwf_ifs025"`, `null` for none), and `horizon_h` now defaults to 84. The integration and the wheel must be updated together.
+- **CLI:** `replay --horizon-h` defaults to 84, like the integration.
 - **The net metering switch is gone.** Export is always paid as `export a × wholesale + export b`. Setups that had the switch on now have Export a/b equal to Import a/b, so their plans are unchanged. When net metering ends for you (in the Netherlands on 1 January 2027), set Export a/b in the options under Tariff.
 - **New setups default to Export a = 1.0** (was 1.21): without net metering, feed-in is usually paid at the market price without VAT. Existing setups keep their values.
 - The Tariff step explains Export a and Export b.

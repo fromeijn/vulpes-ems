@@ -7,10 +7,13 @@ fn default_step() -> i64 {
     900
 }
 fn default_horizon() -> u32 {
-    36
+    84
 }
 fn default_models() -> Vec<String> {
     vec!["knmi_harmonie_arome_netherlands".into(), "icon_d2".into()]
+}
+fn default_tail_model() -> Option<String> {
+    Some("ecmwf_ifs025".into())
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -67,6 +70,10 @@ pub struct PlanRequest {
     pub planes: Vec<PlaneParams>,
     #[serde(default = "default_models")]
     pub weather_models: Vec<String>,
+    /// Longer-range weather model for the slots `weather_models` don't reach;
+    /// `null` for none.
+    #[serde(default = "default_tail_model")]
+    pub weather_tail_model: Option<String>,
     /// Hourly house load history `(hour_start, W)`, excluding the battery.
     #[serde(default)]
     pub load_history: Vec<(i64, f64)>,

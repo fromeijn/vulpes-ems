@@ -58,6 +58,7 @@ Method (`vulpes_engine::calibrate`):
 - **Honest weather:** evaluation uses *day-ahead* forecasts (Open-Meteo previous-runs API, issued about 24 h before each slot), never the short-lead archive the calibration uses.
 - **Scores:** daily energy (MAE/RMSE/bias, compared against a benchmark series when available) and hourly power, with skill measured against persistence (same hour yesterday).
 - **Ensembles:** averaging the forecasts driven by two weather models (KNMI Harmonie and ICON-D2) beat either model alone.
+- **Beyond two days:** those two models end about two days ahead. The slots neither of them reaches use a longer-range model (ECMWF IFS), so the planner can look 84 hours ahead. The longer-range model is not averaged in where the other two have data.
 
 ## Findings on shading maps (experimental, off by default)
 

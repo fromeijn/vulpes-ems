@@ -238,7 +238,7 @@ enum Cmd {
         lat: f64,
         #[arg(long, allow_hyphen_values = true)]
         lon: f64,
-        #[arg(long, default_value_t = 36)]
+        #[arg(long, default_value_t = 84)]
         horizon_h: usize,
         /// Also replay the optimizer with these horizons (hours) and print what
         /// each saves per year against `--horizon-h`.
@@ -728,7 +728,32 @@ mod tests {
             "1.21,0",
         ])
         .unwrap();
-        assert!(matches!(cli.cmd, Cmd::Replay { horizon_h: 36, .. }));
+        let Cmd::Replay {
+            horizon_h,
+            compare_horizons,
+            tail_model,
+            ..
+        } = cli.cmd
+        else {
+            panic!("not the replay command");
+        };
+        assert_eq!((horizon_h, tail_model.as_str()), (84, "ecmwf_ifs025"));
+        assert!(compare_horizons.is_empty());
+        let cli = Cli::try_parse_from([
+            "vulpes-cli",
+            "replay",
+            "--from=2026-10-01",
+            "--to=2026-10-14",
+            "--lat=52",
+            "--lon=5",
+            "--horizon-h=36",
+            "--compare-horizons=48,60",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Replay { horizon_h: 36, compare_horizons, .. } if compare_horizons == [48, 60]
+        ));
         assert!(Cli::try_parse_from(["vulpes-cli", "replay", "--from", "2026-10-01"]).is_err());
         assert!(Cli::try_parse_from(["vulpes-cli", "stats"]).is_ok());
     }

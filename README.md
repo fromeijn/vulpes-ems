@@ -5,7 +5,7 @@ Open-source home energy management for Home Assistant. It's written in Rust and 
 vulpes-ems does two things:
 
 - **It forecasts** your solar production, household load and electricity prices. Each forecast is a physics or statistical model that works without training data.
-- **It decides** every 15 minutes which battery (ESS) mode to run over the next 48 hours. You pick which of its battery modes your system supports.
+- **It decides** every 15 minutes which battery (ESS) mode to run over the next 84 hours. You pick which of its battery modes your system supports.
 
 > Status: early development (phase 1, skeleton). Not usable yet.
 

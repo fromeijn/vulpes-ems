@@ -17,12 +17,16 @@ pub(crate) const WEATHER_VARS: &[&str] = &[
     "wind_speed_10m",
 ];
 
-/// Weather per slot start: the mean over all models that have the slot.
+/// Weather per slot start: the mean over all models that have the slot, and
+/// the tail model where none of them does.
 fn fetch_weather(req: &PlanRequest) -> Result<HashMap<i64, WeatherSlot>> {
     if let Some(w) = &req.weather {
         return Ok(w.iter().map(|s| (s.start, *s)).collect());
     }
-    let models: Vec<&str> = req.weather_models.iter().map(String::as_str).collect();
+    let mut models: Vec<&str> = req.weather_models.iter().map(String::as_str).collect();
+    // A tail model that is also a regular model is simply averaged with the rest.
+    let tail = req.weather_tail_model.as_deref().filter(|t| !models.contains(t));
+    models.extend(tail);
     let days = (req.horizon_h / 24 + 2).min(16) as u8;
     let series = open_meteo::fetch(&open_meteo::Request {
         location: SrcLocation {
@@ -34,7 +38,20 @@ fn fetch_weather(req: &PlanRequest) -> Result<HashMap<i64, WeatherSlot>> {
         range: open_meteo::Range::Forecast { days },
     })
     .map_err(|e| Error::Weather(e.to_string()))?;
-    Ok(average_models(series))
+    Ok(with_tail(series, tail))
+}
+
+/// Average the regular models, then fill the slots none of them has from the
+/// `tail` model. The regular models are finer and more accurate, but end
+/// about two days ahead.
+pub(crate) fn with_tail(series: Vec<WeatherSeries>, tail: Option<&str>) -> HashMap<i64, WeatherSlot> {
+    let (tail_series, regular): (Vec<_>, Vec<_>) =
+        series.into_iter().partition(|s| Some(s.model.as_str()) == tail);
+    let mut weather = average_models(regular);
+    for (t, slot) in average_models(tail_series) {
+        weather.entry(t).or_insert(slot);
+    }
+    weather
 }
 
 /// Combine per-model series into one weather slot per start time: the mean
@@ -349,6 +366,7 @@ mod tests {
             soc_wh: 5000.0,
             planes: vec![PlaneParams::new(180.0, 35.0, 3000.0, 2800.0)],
             weather_models: vec![],
+            weather_tail_model: None,
             load_history: (0..(24 * 30))
                 .map(|h| (now - 30 * 86_400 + h * 3600, 400.0))
                 .collect(),
@@ -474,6 +492,39 @@ mod tests {
         );
         assert_eq!(w[&900].ghi, 1.0);
         assert!(average_models(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn tail_model_only_fills_slots_the_regular_models_lack() {
+        let model = |name: &str, pts: Vec<(i64, f64)>| -> Vec<WeatherSeries> {
+            WEATHER_VARS
+                .iter()
+                .map(|var| WeatherSeries {
+                    model: name.into(),
+                    var: (*var).into(),
+                    points: pts.clone(),
+                })
+                .collect()
+        };
+        let series = || {
+            let mut s = model("near", vec![(0, 10.0), (900, 20.0)]);
+            s.extend(model("far", vec![(0, 100.0), (900, 200.0), (1800, 300.0)]));
+            s
+        };
+        // The tail is not averaged in where a regular model has the slot.
+        let w = with_tail(series(), Some("far"));
+        assert_eq!((w[&0].ghi, w[&900].ghi, w[&1800].ghi), (10.0, 20.0, 300.0));
+        assert_eq!(w[&1800].start, 1800);
+        // Without a tail, every model is a regular one.
+        let w = with_tail(series(), None);
+        assert_eq!((w[&0].ghi, w[&900].ghi, w[&1800].ghi), (55.0, 110.0, 300.0));
+        // A tail that returned nothing leaves the regular models as they are.
+        let w = with_tail(model("near", vec![(0, 10.0)]), Some("far"));
+        assert_eq!((w.len(), w[&0].ghi), (1, 10.0));
+        // Only the tail answered: it covers everything.
+        let w = with_tail(model("far", vec![(0, 100.0)]), Some("far"));
+        assert_eq!((w.len(), w[&0].ghi), (1, 100.0));
+        assert!(with_tail(Vec::new(), Some("far")).is_empty());
     }
 
     #[test]
@@ -711,6 +762,7 @@ mod tests {
             r.weather_models,
             vec!["knmi_harmonie_arome_netherlands", "icon_d2"]
         );
+        assert_eq!(r.weather_tail_model.as_deref(), Some("ecmwf_ifs025"));
         assert!(r.weather.is_none());
         assert_eq!(r.load_history, vec![(1_780_996_400, 400.0)]);
         assert!(r.modes[1].pv_curtail);

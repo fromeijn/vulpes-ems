@@ -39,7 +39,7 @@ WHOLESALE_SOURCES = ["energyzero", "none"]
 
 LOAD_HISTORY_DAYS = 60
 WHOLESALE_HISTORY_DAYS = 35
-HORIZON_HOURS = 36
+HORIZON_HOURS = 84
 CALIBRATION_HISTORY_DAYS = 120
 # First automatic calibration after setup: late enough not to slow down startup.
 CALIBRATION_DELAY_S = 600
