@@ -4,6 +4,8 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 
 ## Unreleased
 
+## 0.4.0 - 2026-11-12
+
 ### Added
 
 - **CLI:** `replay` also runs the optimizer with the actual load, PV or prices in place of the forecast, and prints what a perfect forecast of each would save per year, with a 90 % interval. The table has a new "vs optim" column.
@@ -24,7 +26,6 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 - **Engine response:** the plan can have fewer slots than the horizon asks for, when the weather stops early (see above). Before, the slots without weather were planned without solar power, and the request failed when more than a quarter had none.
 - **CLI:** a replay site file with `net_metering` under `export` is rejected. For net metering, set `export.a`/`export.b` to the `tariff` values.
 - **CLI:** `replay` now gives each hour the PV forecast that had been issued by then. Hours more than a day ahead use the model from the new `--tail-model` flag (default `ecmwf_ifs025`) instead of the day-ahead forecast, which was not available yet. Before replaying, run `backfill-weather --lead-days 2 --models ecmwf_ifs025` (and `--lead-days 3`, `4` for horizons beyond 48 and 72 hours). Results differ slightly from earlier versions.
-
 - **CLI:** `replay` scales its yearly figures from complete days only, and prints how many partial days it left out. It warns when hours were planned on a shorter horizon because a forecast was missing, and rejects a site file with invalid grid limits. `--compare-horizons` is faster: it replays only the optimizer.
 
 ### Fixed
