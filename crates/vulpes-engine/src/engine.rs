@@ -106,6 +106,30 @@ fn weather_for(weather: &HashMap<i64, WeatherSlot>, start: i64, step: i64) -> Op
     (!v.is_empty()).then_some(v)
 }
 
+/// How far the weather reaches over the PV forecast of the horizon:
+/// `(covered, gaps)`. `covered` counts the slots up to the last one with
+/// weather; the plan ends there, because planning further would mean guessing
+/// the sun. `gaps` counts the slots without weather before that point.
+///
+/// An error when the weather is too thin to plan on: it must reach three
+/// quarters of the first day (`day_slots`), or of the horizon when that is
+/// shorter, with at most a quarter of the covered slots missing.
+fn weather_cover(pv: &[Option<f64>], day_slots: usize) -> std::result::Result<(usize, usize), String> {
+    let n = pv.len();
+    let covered = pv.iter().rposition(|p| p.is_some()).map_or(0, |i| i + 1);
+    let needed = (n.min(day_slots) * 3).div_ceil(4);
+    if covered < needed {
+        return Err(format!(
+            "weather covers {covered} of {n} slots; at least {needed} are needed"
+        ));
+    }
+    let gaps = pv[..covered].iter().filter(|p| p.is_none()).count();
+    if gaps > covered / 4 {
+        return Err(format!("no weather for {gaps} of the first {covered} slots"));
+    }
+    Ok((covered, gaps))
+}
+
 /// Load history without the hours a house cannot have consumed: more than the
 /// grid connection, the battery and the solar panels can deliver together (or
 /// not a finite number). Such hours come from meter glitches, like a counter
@@ -142,14 +166,20 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
             "horizon_h must cover at least one slot and be at most {MAX_HORIZON_H}"
         )));
     }
-    // The export price of a published slot comes from inverting the tariff, so `a` cannot be 0.
-    if !(req.tariff.a.is_finite() && req.tariff.a != 0.0 && req.tariff.b.is_finite()) {
-        return Err(Error::Request(
-            "tariff: a must be a number other than 0, and b a number".into(),
-        ));
+    if !(req.tariff.a.is_finite() && req.tariff.b.is_finite()) {
+        return Err(Error::Request("tariff: a and b must be numbers".into()));
     }
     if !(req.export.a.is_finite() && req.export.b.is_finite()) {
         return Err(Error::Request("export: a and b must be numbers".into()));
+    }
+    // A fixed import price (a = 0) says nothing about the wholesale price, so
+    // it only goes with an export price that doesn't follow it either.
+    if req.tariff.a == 0.0 && req.export.a != 0.0 {
+        return Err(Error::Request(
+            "tariff: a can only be 0 when export.a is 0 too: the export price follows the wholesale \
+             price, which is derived from the import price"
+                .into(),
+        ));
     }
     if !req.soc_wh.is_finite() {
         return Err(Error::Request("soc_wh must be a number".into()));
@@ -166,12 +196,12 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
     let mut warnings = Vec::new();
     let step = req.step_s;
     let start = req.now - req.now.rem_euclid(step);
-    let n = (i64::from(req.horizon_h) * 3600 / step) as usize;
+    let horizon = (i64::from(req.horizon_h) * 3600 / step) as usize;
     let dt_h = step as f64 / 3600.0;
 
     // PV forecast per slot.
     let weather = fetch_weather(req)?;
-    let pv: Vec<Option<f64>> = (0..n)
+    let mut pv: Vec<Option<f64>> = (0..horizon)
         .map(|i| {
             let t = start + i as i64 * step;
             let ws = weather_for(&weather, t, step)?;
@@ -191,16 +221,18 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
             Some(total / ws.len() as f64)
         })
         .collect();
-    let pv_missing = pv.iter().filter(|p| p.is_none()).count();
-    if pv_missing > n / 4 {
-        return Err(Error::Weather(format!(
-            "no weather for {pv_missing} of {n} slots"
-        )));
-    }
-    if pv_missing > 0 {
+    // Plan as far as the weather reaches: a tail model that is missing must
+    // not cost the plan for the days the other models do cover.
+    let day_slots = (24 * 3600 / step) as usize;
+    let (n, pv_gaps) = weather_cover(&pv, day_slots).map_err(Error::Weather)?;
+    pv.truncate(n);
+    if n < horizon {
         warnings.push(format!(
-            "no weather for {pv_missing} slots at the end of the horizon; PV assumed 0 there"
+            "weather reaches {n} of {horizon} slots ahead; the plan ends there"
         ));
+    }
+    if pv_gaps > 0 {
+        warnings.push(format!("no weather for {pv_gaps} slots; PV assumed 0 there"));
     }
 
     // Load forecast (hourly profile, applied to each slot of the hour).
@@ -227,6 +259,10 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
         ProfileForecaster::new(&req.wholesale_history, tz, Country::None, opt)
     });
     let export_from = |import: f64| {
+        if req.export.a == 0.0 {
+            // Fixed export price; `tariff.a` may be 0 here, so don't divide by it.
+            return req.export.b;
+        }
         let wholesale = (import - req.tariff.b) / req.tariff.a;
         req.export.a * wholesale + req.export.b
     };
@@ -309,7 +345,7 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
             price_known: known,
         })
         .collect();
-    let day_slots = ((24 * 3600 / step) as usize).min(n);
+    let day_slots = day_slots.min(n);
     let kwh = |f: &dyn Fn(&SlotInput) -> f64| inputs[..day_slots].iter().map(f).sum::<f64>() * dt_h / 1000.0;
     Ok(PlanResponse {
         version: env!("CARGO_PKG_VERSION").into(),
@@ -593,9 +629,10 @@ mod tests {
             "horizon_h must cover at least one slot",
         );
         check(Box::new(|r| r.horizon_h = MAX_HORIZON_H + 1), "at most 240");
-        // a = 0 used to divide by zero in the export price.
-        check(Box::new(|r| r.tariff.a = 0.0), "tariff: a");
-        check(Box::new(|r| r.tariff.b = f64::NAN), "tariff: a");
+        // a = 0 with an export price that follows wholesale used to divide by zero.
+        check(Box::new(|r| r.tariff.a = 0.0), "tariff: a can only be 0");
+        check(Box::new(|r| r.tariff.a = f64::NAN), "tariff: a and b");
+        check(Box::new(|r| r.tariff.b = f64::NAN), "tariff: a and b");
         check(Box::new(|r| r.export.a = f64::INFINITY), "export: a and b");
         check(Box::new(|r| r.soc_wh = f64::NAN), "soc_wh");
         check(
@@ -603,7 +640,10 @@ mod tests {
             "unknown time zone",
         );
         check(Box::new(|r| r.load_history.clear()), "load_history is empty");
-        check(Box::new(|r| r.weather = Some(Vec::new())), "no weather");
+        check(
+            Box::new(|r| r.weather = Some(Vec::new())),
+            "weather covers 0 of 96 slots",
+        );
         check(
             Box::new(|r| {
                 r.known_prices.clear();
@@ -629,6 +669,30 @@ mod tests {
         json["horizon"] = 24.into();
         let err = crate::plan_json(&json.to_string()).unwrap_err().to_string();
         assert!(err.contains("unknown field `horizon`"), "{err}");
+        // Also inside the engine's own nested objects. The former net metering
+        // switch would otherwise be dropped and export priced differently.
+        let nested = |path: &[&str], key: &str| {
+            let mut json = serde_json::to_value(request(1_781_000_000)).unwrap();
+            let mut at = &mut json;
+            for p in path {
+                at = if let Ok(i) = p.parse::<usize>() {
+                    &mut at[i]
+                } else {
+                    &mut at[*p]
+                };
+            }
+            at[key] = true.into();
+            let err = crate::plan_json(&json.to_string()).unwrap_err();
+            assert!(matches!(err, Error::Request(_)), "{err}");
+            assert!(
+                err.to_string().contains(&format!("unknown field `{key}`")),
+                "{err}"
+            );
+        };
+        nested(&["export"], "net_metering");
+        nested(&["location"], "altitude");
+        nested(&["known_prices", "0"], "export");
+        nested(&["weather", "0"], "cloud_cover");
     }
 
     #[test]
@@ -693,18 +757,117 @@ mod tests {
     }
 
     #[test]
-    fn missing_weather_at_the_end_warns_and_assumes_no_pv() {
+    fn weather_cover_ends_at_the_last_slot_with_weather() {
+        let pv = |have: &[bool]| -> Vec<Option<f64>> { have.iter().map(|&h| h.then_some(1.0)).collect() };
+        let run = |with: usize, without: usize| pv(&[vec![true; with], vec![false; without]].concat());
+        // Fully covered, and a tail without weather: three and a half days, two covered.
+        assert_eq!(weather_cover(&run(336, 0), 96), Ok((336, 0)));
+        assert_eq!(weather_cover(&run(192, 144), 96), Ok((192, 0)));
+        // Three quarters of the first day is the least to plan on.
+        assert_eq!(weather_cover(&run(72, 264), 96), Ok((72, 0)));
+        let err = weather_cover(&run(71, 265), 96).unwrap_err();
+        assert_eq!(err, "weather covers 71 of 336 slots; at least 72 are needed");
+        // A horizon shorter than a day needs three quarters of itself.
+        assert_eq!(weather_cover(&run(3, 1), 96), Ok((3, 0)));
+        assert!(weather_cover(&run(2, 2), 96).is_err());
+        assert_eq!(weather_cover(&run(1, 0), 96), Ok((1, 0)));
+        // Gaps before the end are counted, up to a quarter of the covered slots.
+        let mut gaps = run(96, 0);
+        gaps[..24].fill(None);
+        assert_eq!(weather_cover(&gaps, 96), Ok((96, 24)));
+        gaps[24] = None;
+        let err = weather_cover(&gaps, 96).unwrap_err();
+        assert_eq!(err, "no weather for 25 of the first 96 slots");
+        // No weather at all, and no slots at all.
+        assert!(weather_cover(&run(0, 96), 96).is_err());
+        assert_eq!(weather_cover(&[], 96), Ok((0, 0)));
+    }
+
+    #[test]
+    fn the_plan_ends_where_the_weather_ends() {
         let mut r = request(1_781_000_000);
         let start = r.now - r.now.rem_euclid(900);
         let cut = start + 90 * 900; // drop the last 6 of 96 slots
         r.weather.as_mut().unwrap().retain(|w| w.start < cut);
         let resp = plan(&r).unwrap();
+        assert_eq!(resp.slots.len(), 90);
+        assert!(
+            resp.warnings
+                .iter()
+                .any(|w| w.contains("weather reaches 90 of 96 slots")),
+            "{:?}",
+            resp.warnings
+        );
+    }
+
+    #[test]
+    fn a_missing_tail_model_shortens_the_plan_instead_of_failing_it() {
+        // The default horizon with two days of weather, as when the tail model
+        // returns nothing: this used to fail on "no weather for 144 of 336 slots".
+        let mut r = request(1_781_000_000);
+        r.horizon_h = 84;
+        let resp = plan(&r).unwrap();
+        assert_eq!(resp.slots.len(), 192);
+        assert!(
+            resp.warnings
+                .iter()
+                .any(|w| w.contains("weather reaches 192 of 336 slots")),
+            "{:?}",
+            resp.warnings
+        );
+        assert!(resp.summary.cost.is_finite() && resp.summary.pv_kwh_24h > 5.0);
+        // With the full horizon covered there is no such warning.
+        r.horizon_h = 48;
+        let full = plan(&r).unwrap();
+        assert_eq!(full.slots.len(), 192);
+        assert!(
+            full.warnings.iter().all(|w| !w.contains("weather")),
+            "{:?}",
+            full.warnings
+        );
+    }
+
+    #[test]
+    fn gaps_in_the_weather_warn_and_assume_no_pv() {
+        let mut r = request(1_781_000_000);
+        let start = r.now - r.now.rem_euclid(900);
+        let gap = start + 40 * 900..start + 46 * 900;
+        r.weather.as_mut().unwrap().retain(|w| !gap.contains(&w.start));
+        let resp = plan(&r).unwrap();
+        assert_eq!(resp.slots.len(), 96);
         assert!(
             resp.warnings.iter().any(|w| w.contains("no weather for 6 slots")),
             "{:?}",
             resp.warnings
         );
-        assert!(resp.slots[90..].iter().all(|s| s.pv_w == 0.0));
+        assert!(resp.slots[40..46].iter().all(|s| s.pv_w == 0.0));
+    }
+
+    #[test]
+    fn a_fixed_import_price_plans_with_a_fixed_export_price() {
+        // Import a = 0: the price is b whatever the market does. Export a = 0
+        // too, as after migrating a fixed-price setup that had net metering.
+        let mut r = request(1_781_000_000);
+        r.known_prices.truncate(6);
+        r.wholesale_history = (0..(24 * 30))
+            .map(|h| (r.now - 30 * 86_400 + h * 3600, 0.10))
+            .collect();
+        r.tariff = LinearTariff { a: 0.0, b: 0.30 };
+        r.export = ExportTariff { a: 0.0, b: 0.30 };
+        let out = crate::plan_json(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert!(!out.contains("null"), "{out}");
+        let resp: PlanResponse = serde_json::from_str(&out).unwrap();
+        assert!(resp.slots.iter().any(|s| s.price_known) && resp.slots.iter().any(|s| !s.price_known));
+        for s in &resp.slots {
+            assert_eq!(s.export_price, 0.30, "{s:?}");
+            if !s.price_known {
+                assert_eq!(s.import_price, 0.30, "{s:?}");
+            }
+        }
+        // An export price that follows the market cannot be derived from it.
+        r.export.a = 1.0;
+        let err = plan(&r).unwrap_err().to_string();
+        assert!(err.contains("tariff: a can only be 0"), "{err}");
     }
 
     #[test]

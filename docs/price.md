@@ -22,7 +22,7 @@ How to read the coefficients:
 
 Fitting import and export compensation separately shows whether export is paid at the import price (net metering) or not.
 
-Export has its own `a` and `b`. Under net metering they equal the import values. Without it, export is typically paid at the wholesale price without VAT (`a` close to 1), minus any feed-in fee per kWh (a negative `b`).
+Export has its own `a` and `b`. Under net metering they equal the import values. Without it, export is typically paid at the wholesale price without VAT (`a` close to 1), minus any feed-in fee per kWh (a negative `b`). The planner gets the wholesale price of a published slot back from its import price. A fixed import price (`a` = 0) doesn't allow that, so it only goes with a fixed export price (export `a` = 0, the price in `b`).
 
 ## Wholesale forecast
 
@@ -49,4 +49,4 @@ Export has its own `a` and `b`. Under net metering they equal the import values.
 - the regression reduced MAE by about 26 % and RMSE by about 27 %;
 - the within-day rank correlation went from about 0.79 to 0.89.
 
-For picking the very cheapest hours, the plain profile scored slightly better. In the oracle replay (see [optimizer.md](optimizer.md#replay)) on a test household, even a perfect forecast of the not yet published prices saved nothing measurable, so the regression stays out of the engine and the plain profile is used.
+For picking the very cheapest hours, the plain profile scored slightly better. The oracle replay (see [optimizer.md](optimizer.md#replay)) shows what a perfect forecast of the not yet published prices would save. As long as that is small, the regression stays out of the engine and the plain profile is used.

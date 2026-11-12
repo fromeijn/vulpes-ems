@@ -26,6 +26,8 @@ CONF_MAX_IMPORT_W = "max_import_w"
 CONF_MAX_EXPORT_W = "max_export_w"
 CONF_MIN_SOC = "min_soc"
 CONF_MAX_SOC = "max_soc"
+CONF_TARIFF_A = "tariff_a"
+CONF_EXPORT_A = "export_a"
 
 ENERGY_KEYS = (CONF_GRID_IMPORT, CONF_GRID_EXPORT, CONF_SOLAR_ENERGY, CONF_BATTERY_CHARGE, CONF_BATTERY_DISCHARGE)
 
@@ -184,6 +186,18 @@ def check_battery(cfg: dict[str, Any]) -> dict[str, str]:
     """Errors for the battery step."""
     if float(cfg[CONF_MIN_SOC]) >= float(cfg[CONF_MAX_SOC]):
         return {"base": "soc_range"}
+    return {}
+
+
+def check_tariff(cfg: dict[str, Any]) -> dict[str, str]:
+    """Errors for the tariff step.
+
+    The engine derives the wholesale price from the import price, which a fixed
+    import price (a = 0) doesn't allow. The export price then cannot follow
+    the wholesale price either, so Export a has to be 0 too.
+    """
+    if float(cfg[CONF_TARIFF_A]) == 0.0 and float(cfg[CONF_EXPORT_A]) != 0.0:
+        return {CONF_EXPORT_A: "export_needs_import_a"}
     return {}
 
 

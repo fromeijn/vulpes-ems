@@ -235,6 +235,15 @@ def test_check_battery_soc_range():
     assert sc.check_battery({"min_soc": 80, "max_soc": 20}) == {"base": "soc_range"}
 
 
+def test_check_tariff_fixed_import_price_needs_fixed_export_price():
+    assert sc.check_tariff({"tariff_a": 1.21, "export_a": 1.0}) == {}
+    assert sc.check_tariff({"tariff_a": 1.21, "export_a": 0}) == {}
+    # A fixed price on both sides, as after migrating net metering with Import a = 0.
+    assert sc.check_tariff({"tariff_a": 0, "export_a": 0.0}) == {}
+    assert sc.check_tariff({"tariff_a": 0, "export_a": 1.0}) == {"export_a": "export_needs_import_a"}
+    assert sc.check_tariff({"tariff_a": 0.0, "export_a": 0.01}) == {"export_a": "export_needs_import_a"}
+
+
 LIMITS = {"max_charge_w": 3000, "max_discharge_w": 2500, "max_import_w": 10000, "max_export_w": 8000}
 
 

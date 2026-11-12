@@ -11,17 +11,21 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 
 ### Changed
 
-- **Vulpes now plans 84 hours ahead** (was 36). In a replay of a year of history with the forecasts that were available at the time, a longer horizon gave lower costs. The `plan` attribute of the Planned mode sensor now has 336 slots instead of 144, so a dashboard chart of the plan gets longer. Nothing to set.
+- **Vulpes now plans 84 hours ahead** (was 36). In a replay of a year of history with the forecasts that were available at the time, a longer horizon gave lower costs. The `plan` attribute of the Planned mode sensor now has 336 slots instead of 144, so a dashboard chart of the plan gets longer. The Plan cost sensor is the expected cost over those 84 hours, so its value is more than twice as high as before: adjust automations or thresholds that use it.
 - **Solar forecast beyond two days:** slots that the two short-range weather models don't reach use ECMWF IFS from Open-Meteo, in the same request.
+- **Weather that stops early:** when the weather forecast does not reach the whole horizon, for example because ECMWF is unavailable, the plan ends where the weather ends and the Planned mode sensor shows a warning. Planning fails only when the weather covers less than 18 hours.
 - **Engine request:** new optional `weather_tail_model` (default `"ecmwf_ifs025"`, `null` for none), and `horizon_h` now defaults to 84. The integration and the wheel must be updated together.
 - **CLI:** `replay --horizon-h` defaults to 84, like the integration.
 - **The net metering switch is gone.** Export is always paid as `export a × wholesale + export b`. Setups that had the switch on now have Export a/b equal to Import a/b, so their plans are unchanged. When net metering ends for you (in the Netherlands on 1 January 2027), set Export a/b in the options under Tariff.
 - **New setups default to Export a = 1.0** (was 1.21): without net metering, feed-in is usually paid at the market price without VAT. Existing setups keep their values.
-- The Tariff step explains Export a and Export b.
+- The Tariff step explains Export a and Export b. With Import a at 0 (a fixed price), it asks for Export a at 0 too, with the fixed export price in Export b.
 - **Engine request:** `export` no longer has `net_metering`. The integration and the wheel must be updated together.
-- **Engine request:** stricter checks. A request is now rejected when it has an unknown top-level key, a `horizon_h` above 240, a `tariff.a` of 0, negative grid limits, or two modes with the same name. The integration never sends these; check your own scripts that call `vulpes_ems.plan`.
+- **Engine request:** stricter checks. A request is now rejected when it has an unknown key at the top level or in `location`, `export`, `known_prices` or `weather`, a `horizon_h` above 240, a `tariff.a` of 0 with an `export.a` other than 0, negative grid limits, or two modes with the same name. The integration never sends these, except Import a = 0 with another Export a: set Export a to 0 in the options under Tariff. Check your own scripts that call `vulpes_ems.plan`.
+- **Engine response:** the plan can have fewer slots than the horizon asks for, when the weather stops early (see above). Before, the slots without weather were planned without solar power, and the request failed when more than a quarter had none.
 - **CLI:** a replay site file with `net_metering` under `export` is rejected. For net metering, set `export.a`/`export.b` to the `tariff` values.
 - **CLI:** `replay` now gives each hour the PV forecast that had been issued by then. Hours more than a day ahead use the model from the new `--tail-model` flag (default `ecmwf_ifs025`) instead of the day-ahead forecast, which was not available yet. Before replaying, run `backfill-weather --lead-days 2 --models ecmwf_ifs025` (and `--lead-days 3`, `4` for horizons beyond 48 and 72 hours). Results differ slightly from earlier versions.
+
+- **CLI:** `replay` scales its yearly figures from complete days only, and prints how many partial days it left out. It warns when hours were planned on a shorter horizon because a forecast was missing, and rejects a site file with invalid grid limits. `--compare-horizons` is faster: it replays only the optimizer.
 
 ### Fixed
 

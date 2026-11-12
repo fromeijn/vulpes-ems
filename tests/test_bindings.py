@@ -98,6 +98,25 @@ def test_plan_blocks_export_when_it_costs_money():
     assert all(s["mode"] == "self_consume" for s in paid["slots"])
 
 
+def test_plan_with_fixed_import_and_export_prices():
+    fixed = _request(tariff={"a": 0, "b": 0.30}, export={"a": 0, "b": 0.07})
+    plan = json.loads(vulpes_ems.plan(json.dumps(fixed)))
+    assert {s["export_price"] for s in plan["slots"]} == {0.07}
+
+
+def test_plan_ends_where_the_weather_ends():
+    # The request has 8 quarter hours of weather and asks for 10: enough to plan on.
+    req = _request(horizon_h=3)
+    last = req["weather"][-1]
+    req["weather"] += [{**last, "start": last["start"] + 900 * k} for k in (1, 2)]
+    plan = json.loads(vulpes_ems.plan(json.dumps(req)))
+    assert len(plan["slots"]) == 10
+    assert any("weather reaches 10 of 12 slots" in w for w in plan["warnings"])
+    # With 8 of 12 it is too little, and the error says so.
+    with pytest.raises(ValueError, match="weather covers 8 of 12 slots"):
+        vulpes_ems.plan(json.dumps(_request(horizon_h=3)))
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -107,7 +126,9 @@ def test_plan_blocks_export_when_it_costs_money():
         json.dumps(_request(timezone="Nowhere/City")),
         json.dumps(_request(horizon_h=0)),  # no slots: used to panic in the engine
         json.dumps(_request(horizon=24)),  # a misspelled key
-        json.dumps(_request(tariff={"a": 0, "b": 0.13})),
+        json.dumps(_request(tariff={"a": 0, "b": 0.13})),  # export a is not 0
+        json.dumps(_request(export={"net_metering": True, "a": 1.0, "b": 0.0})),  # a key from before 0.4.0
+        json.dumps(_request(weather=[])),
     ],
 )
 def test_plan_errors_raise_value_error(payload):

@@ -52,10 +52,10 @@ Baselines:
 - the last known day at the same hour (roughly what "naive" forecasters do day-ahead);
 - the same hour last week.
 
-On a test household, the profile with temperature correction reduced daily energy error by about 18 % and hourly RMSE by about 26 %, compared with the naive day-ahead method.
+How much the profile gains over these baselines differs from house to house: it depends on how regular the household is and on how much of the load follows the temperature. `vulpes-cli eval-load` scores the profile and both baselines on your own data.
 
 ## Planned
 
 - **AC heating submodel:** heating source chosen on temperature and the electricity/gas price ratio. This waits for enough heating-season data.
-- **ML residual layer:** parked. In the oracle replay (see [optimizer.md](optimizer.md#replay)) on a test household, a perfect load forecast saved only about a tenth of what the optimizer already saves, so a residual model can gain little.
+- **ML residual layer:** parked. The oracle replay (see [optimizer.md](optimizer.md#replay)) shows what a perfect load forecast would save, which is the most a residual model can gain. Run it for the house in question before picking this up.
 - **15-minute resolution:** from recorded live data.

@@ -149,6 +149,7 @@
       "no_statistics": "No hourly statistics in the last 60 days for: {statistic}. It needs a state_class and some history.",
       "no_complete_hours": "There is no hour in the last 60 days in which all selected statistics have data, so the house load can't be computed.",
       "soc_range": "The minimum state of charge must be below the maximum.",
+      "export_needs_import_a": "With Import a at 0 the price does not follow the market, so the export price cannot either. Set Export a to 0 and put the fixed export price in Export b.",
       "charge_w_too_high": "The charge power is above the maximum charge power (battery power) or the maximum grid import (grid setpoint).",
       "discharge_w_too_high": "The discharge power is above the maximum discharge power (battery power) or the maximum grid export (grid setpoint).",
       "no_mode_options": "This entity has no options to compare with."
@@ -319,6 +320,7 @@
       "no_statistics": "No hourly statistics in the last 60 days for: {statistic}. It needs a state_class and some history.",
       "no_complete_hours": "There is no hour in the last 60 days in which all selected statistics have data, so the house load can't be computed.",
       "soc_range": "The minimum state of charge must be below the maximum.",
+      "export_needs_import_a": "With Import a at 0 the price does not follow the market, so the export price cannot either. Set Export a to 0 and put the fixed export price in Export b.",
       "charge_w_too_high": "The charge power is above the maximum charge power (battery power) or the maximum grid import (grid setpoint).",
       "discharge_w_too_high": "The discharge power is above the maximum discharge power (battery power) or the maximum grid export (grid setpoint).",
       "no_mode_options": "This entity has no options to compare with."

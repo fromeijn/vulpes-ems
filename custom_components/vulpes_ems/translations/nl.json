@@ -149,6 +149,7 @@
       "no_statistics": "Geen uurstatistieken in de afgelopen 60 dagen voor: {statistic}. Er is een state_class en enige historie nodig.",
       "no_complete_hours": "Er is in de afgelopen 60 dagen geen uur waarin alle gekozen statistieken gegevens hebben, dus het huisverbruik kan niet worden berekend.",
       "soc_range": "De minimale laadtoestand moet onder de maximale liggen.",
+      "export_needs_import_a": "Met Afname a op 0 volgt de prijs de markt niet, dus de terugleverprijs kan dat ook niet. Zet Teruglevering a op 0 en vul de vaste terugleverprijs in bij Teruglevering b.",
       "charge_w_too_high": "Het laadvermogen is hoger dan het maximale laadvermogen (batterijvermogen) of de maximale netafname (netsetpoint).",
       "discharge_w_too_high": "Het ontlaadvermogen is hoger dan het maximale ontlaadvermogen (batterijvermogen) of de maximale teruglevering (netsetpoint).",
       "no_mode_options": "Deze entiteit heeft geen opties om mee te vergelijken."
@@ -319,6 +320,7 @@
       "no_statistics": "Geen uurstatistieken in de afgelopen 60 dagen voor: {statistic}. Er is een state_class en enige historie nodig.",
       "no_complete_hours": "Er is in de afgelopen 60 dagen geen uur waarin alle gekozen statistieken gegevens hebben, dus het huisverbruik kan niet worden berekend.",
       "soc_range": "De minimale laadtoestand moet onder de maximale liggen.",
+      "export_needs_import_a": "Met Afname a op 0 volgt de prijs de markt niet, dus de terugleverprijs kan dat ook niet. Zet Teruglevering a op 0 en vul de vaste terugleverprijs in bij Teruglevering b.",
       "charge_w_too_high": "Het laadvermogen is hoger dan het maximale laadvermogen (batterijvermogen) of de maximale netafname (netsetpoint).",
       "discharge_w_too_high": "Het ontlaadvermogen is hoger dan het maximale ontlaadvermogen (batterijvermogen) of de maximale teruglevering (netsetpoint).",
       "no_mode_options": "Deze entiteit heeft geen opties om mee te vergelijken."

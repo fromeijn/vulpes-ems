@@ -17,6 +17,7 @@ fn default_tail_model() -> Option<String> {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Location {
     pub lat: f64,
     pub lon: f64,
@@ -25,6 +26,7 @@ pub struct Location {
 /// Export pricing: `a · wholesale + b`. Equal to the import tariff's `a` and
 /// `b` when export is paid at the import price (net metering).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExportTariff {
     pub a: f64,
     pub b: f64,
@@ -32,6 +34,7 @@ pub struct ExportTariff {
 
 /// A published all-in price for `[start, end)`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KnownPrice {
     pub start: i64,
     pub end: i64,
@@ -40,6 +43,7 @@ pub struct KnownPrice {
 
 /// Weather for one slot (start time), when supplied by the caller instead of fetched.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WeatherSlot {
     pub start: i64,
     pub ghi: f64,
@@ -49,8 +53,11 @@ pub struct WeatherSlot {
     pub wind_speed: f64,
 }
 
-/// Unknown keys are rejected, so that a misspelled optional key cannot
-/// silently fall back to its default.
+/// Unknown keys are rejected here and in `location`, `export`, `known_prices`
+/// and `weather`, so that a misspelled optional key, or a key from another
+/// version like the former `export.net_metering`, cannot silently change the
+/// plan. `battery`, `grid`, `modes`, `planes` and `tariff` are types shared
+/// with the CLI's files and still accept extra keys.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanRequest {

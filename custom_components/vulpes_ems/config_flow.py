@@ -63,6 +63,7 @@ from .modes import (
 from .setup_checks import (
     check_battery,
     check_modes,
+    check_tariff,
     dashboard_defaults,
     duplicate_statistics,
     energy_ids,
@@ -329,11 +330,17 @@ class _Steps:
         )
 
     async def async_step_tariff(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        defaults = self.data
         if user_input is not None:
-            self.data.update(user_input)
-            return await self._next("tariff")
+            candidate = {**self.data, **user_input}
+            errors = check_tariff(candidate)
+            if not errors:
+                self.data = candidate
+                return await self._next("tariff")
+            defaults = candidate
         return self.async_show_form(  # type: ignore[attr-defined]
-            step_id="tariff", data_schema=_tariff_schema(self.data, self._currency)
+            step_id="tariff", data_schema=_tariff_schema(defaults, self._currency), errors=errors
         )
 
     async def async_step_modes(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:

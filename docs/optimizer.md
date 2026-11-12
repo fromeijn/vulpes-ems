@@ -46,7 +46,7 @@ The optimizer does backward induction over slot × SOC grid × mode, interpolati
 
 **Charge can mean discharge:** with a grid setpoint, "charge" in a slot with a forecast load above the setpoint is a partial discharge. The optimizer uses it that way when it pays.
 
-**Horizon:** 84 hours. In the replay, longer horizons kept saving money up to there, with real forecasts for each lead time; the step from 36 to 48 hours is the clearest, the rest is within the noise of one year of data but never worse.
+**Horizon:** 84 hours. The length was chosen with the replay's horizon comparison (see [Replay](#replay)), which gives each lead time the forecast that was available then. When the weather forecast stops earlier, the plan ends where the weather ends, with a warning: slots without a solar forecast are not planned. The weather must reach three quarters of the first day (or of a shorter horizon), with at most a quarter of the covered slots missing; otherwise planning fails.
 
 **End of horizon:** no end-SOC target is imposed. Energy left in the battery is credited at a terminal value per kWh: the median import price over the horizon × discharge efficiency.
 
@@ -70,9 +70,9 @@ Strategies compared:
 
 The three single-forecast variants show what a perfect forecast of that input would save, which is the most any improvement to that forecast can bring. Their savings interact, so they don't add up to the perfect-foresight gap. When actual values are missing somewhere in the horizon, these variants decide on the forecasts for that hour.
 
-Below the table, the replay scales each saving to a year and gives a 90 % interval. The interval comes from resampling whole weeks of daily savings, because consecutive days are correlated. An interval that includes zero, or that overlaps another forecast's interval, means the history is too short to tell.
+Below the table, the replay scales each saving to a year and gives a 90 % interval. Only local days of which every hour was replayed count for this; days with skipped hours are left out and their number is printed. The interval comes from resampling whole weeks of daily savings, because consecutive days are correlated. An interval that includes zero, or that overlaps another forecast's interval, means the history is too short to tell.
 
-`--compare-horizons 48,60` replays the optimizer again with other planning horizons and prints what each saves per year against `--horizon-h`, with the same kind of interval. A horizon of more than 24 hours needs the tail model's forecasts in the store: `backfill-weather --lead-days <N> --models <tail model>` for each day of the horizon from the second.
+`--compare-horizons 48,60` replays the optimizer again with other planning horizons and prints what each saves per year against `--horizon-h`, with the same kind of interval. A horizon of more than 24 hours needs the tail model's forecasts in the store: `backfill-weather --lead-days <N> --models <tail model>` for each day of the horizon from the second. Where a forecast is missing for some hours, those hours are planned on a shorter horizon; the replay prints how many, because a comparison of horizons is only meaningful when that number is small.
 
 Export is paid `a × wholesale + b`, from the site file. `--export a,b` replays another scenario, for example after net metering ends. Net metering itself is an export tariff equal to the import tariff.
 
