@@ -105,6 +105,9 @@ def test_plan_blocks_export_when_it_costs_money():
         json.dumps({"now": 1}),
         json.dumps(_request(modes=[])),
         json.dumps(_request(timezone="Nowhere/City")),
+        json.dumps(_request(horizon_h=0)),  # no slots: used to panic in the engine
+        json.dumps(_request(horizon=24)),  # a misspelled key
+        json.dumps(_request(tariff={"a": 0, "b": 0.13})),
     ],
 )
 def test_plan_errors_raise_value_error(payload):

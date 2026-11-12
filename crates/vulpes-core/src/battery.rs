@@ -47,6 +47,17 @@ pub struct GridLimits {
     pub max_export_w: f64,
 }
 
+impl GridLimits {
+    pub fn validate(&self) -> crate::Result<()> {
+        // Written so that NaN fails. Zero is valid: a connection that may not export.
+        let ok = |x: f64| x >= 0.0 && x.is_finite();
+        if !(ok(self.max_import_w) && ok(self.max_export_w)) {
+            return Err(crate::Error::Config(format!("invalid grid limits: {self:?}")));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +197,29 @@ mod tests {
         for (name, p) in cases {
             assert!(
                 matches!(p.validate(), Err(crate::Error::Config(_))),
+                "{name} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn grid_limits_must_be_finite_and_not_negative() {
+        let limits = |i, e| GridLimits {
+            max_import_w: i,
+            max_export_w: e,
+        };
+        assert!(limits(17_000.0, 5000.0).validate().is_ok());
+        assert!(limits(0.0, 0.0).validate().is_ok());
+        for (name, l) in [
+            ("negative import", limits(-1.0, 5000.0)),
+            ("negative export", limits(17_000.0, -1.0)),
+            ("NaN import", limits(f64::NAN, 5000.0)),
+            ("NaN export", limits(17_000.0, f64::NAN)),
+            ("infinite import", limits(f64::INFINITY, 5000.0)),
+            ("infinite export", limits(17_000.0, f64::INFINITY)),
+        ] {
+            assert!(
+                matches!(l.validate(), Err(crate::Error::Config(_))),
                 "{name} should be rejected"
             );
         }

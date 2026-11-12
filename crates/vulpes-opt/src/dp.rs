@@ -241,6 +241,39 @@ mod tests {
     }
 
     #[test]
+    fn discharge_for_export_stays_within_the_export_limit() {
+        // A high price and nothing after the horizon: sell as fast as allowed.
+        let s = vec![slot(200.0, 0.0, 0.60); 3];
+        let (b, m) = (bat(0.0), modes());
+        let solve_with = |max_export_w: f64| {
+            optimize(&Problem {
+                slots: &s,
+                dt_h: 1.0,
+                modes: &m,
+                battery: &b,
+                grid: &GridLimits {
+                    max_import_w: 17_000.0,
+                    max_export_w,
+                },
+                soc0_wh: 9000.0,
+                terminal_value_per_kwh: 0.0,
+                soc_step_wh: 100.0,
+            })
+        };
+        let free = solve_with(17_000.0);
+        // The battery's 3 kW less the 200 W load.
+        assert!((free.slots[0].grid_w + 2800.0).abs() < 1e-9, "{free:?}");
+        let limited = solve_with(800.0);
+        assert!(
+            limited.slots.iter().all(|x| x.grid_w >= -800.0 - 1e-9),
+            "{limited:?}"
+        );
+        assert!((limited.slots[0].battery_w + 1000.0).abs() < 1e-9, "{limited:?}");
+        // Less can be sold, so the limited plan earns less.
+        assert!(limited.cost > free.cost);
+    }
+
+    #[test]
     fn reserve_is_respected() {
         let mut s = vec![slot(1000.0, 0.0, 0.50); 4];
         for x in &mut s {

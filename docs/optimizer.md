@@ -31,7 +31,8 @@ The distinction matters. With a grid setpoint, a heavy load *reduces* charging a
 `vulpes_opt::step` applies one mode for one slot, in this order:
 1. power limits;
 2. state-of-charge limits, with charge and discharge efficiencies;
-3. the grid export limit (0 for a `no_export` mode), where excess PV is curtailed.
+3. the grid import limit: the battery charges less. A load that exceeds the limit on its own is left as it is;
+4. the grid export limit (0 for a `no_export` mode): excess PV is curtailed first, and if that is not enough the battery discharges less.
 
 The optimizer and the replay simulator use this same function.
 

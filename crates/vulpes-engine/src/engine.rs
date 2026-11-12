@@ -1,7 +1,7 @@
 use crate::{Error, PlanRequest, PlanResponse, PlanSummary, Result, SlotPlan, WeatherSlot};
 use chrono::{DateTime, Datelike};
 use chrono_tz::Tz;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use vulpes_load::{Country, ProfileForecaster, ProfileOptions};
 use vulpes_opt::{Problem, SlotInput, optimize};
 use vulpes_solar::model::{Weather, system_ac_power, validate_planes};
@@ -16,6 +16,9 @@ pub(crate) const WEATHER_VARS: &[&str] = &[
     "temperature_2m",
     "wind_speed_10m",
 ];
+
+/// Longest planning horizon accepted (hours): weather forecasts do not reach further.
+pub(crate) const MAX_HORIZON_H: u32 = 240;
 
 /// Weather per slot start: the mean over all models that have the slot, and
 /// the tail model where none of them does.
@@ -123,11 +126,33 @@ fn plausible_load(req: &PlanRequest) -> (Vec<(i64, f64)>, usize) {
 
 pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
     req.battery.validate()?;
+    req.grid.validate()?;
     if req.modes.is_empty() {
         return Err(Error::Request("no modes defined".into()));
     }
+    let mut names = HashSet::new();
+    if let Some(m) = req.modes.iter().find(|m| !names.insert(m.name.as_str())) {
+        return Err(Error::Request(format!("duplicate mode name '{}'", m.name)));
+    }
     if req.step_s <= 0 || req.step_s % 900 != 0 {
         return Err(Error::Request("step_s must be a positive multiple of 900".into()));
+    }
+    if req.horizon_h > MAX_HORIZON_H || i64::from(req.horizon_h) * 3600 < req.step_s {
+        return Err(Error::Request(format!(
+            "horizon_h must cover at least one slot and be at most {MAX_HORIZON_H}"
+        )));
+    }
+    // The export price of a published slot comes from inverting the tariff, so `a` cannot be 0.
+    if !(req.tariff.a.is_finite() && req.tariff.a != 0.0 && req.tariff.b.is_finite()) {
+        return Err(Error::Request(
+            "tariff: a must be a number other than 0, and b a number".into(),
+        ));
+    }
+    if !(req.export.a.is_finite() && req.export.b.is_finite()) {
+        return Err(Error::Request("export: a and b must be numbers".into()));
+    }
+    if !req.soc_wh.is_finite() {
+        return Err(Error::Request("soc_wh must be a number".into()));
     }
     validate_planes(&req.planes).map_err(Error::Request)?;
     let tz: Tz = req
@@ -141,7 +166,7 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
     let mut warnings = Vec::new();
     let step = req.step_s;
     let start = req.now - req.now.rem_euclid(step);
-    let n = (req.horizon_h as i64 * 3600 / step) as usize;
+    let n = (i64::from(req.horizon_h) * 3600 / step) as usize;
     let dt_h = step as f64 / 3600.0;
 
     // PV forecast per slot.
@@ -552,6 +577,27 @@ mod tests {
         check(Box::new(|r| r.step_s = 0), "multiple of 900");
         check(Box::new(|r| r.step_s = 600), "multiple of 900");
         check(Box::new(|r| r.battery.capacity_wh = 0.0), "invalid battery");
+        check(Box::new(|r| r.grid.max_export_w = -1.0), "invalid grid limits");
+        check(
+            Box::new(|r| r.grid.max_import_w = f64::NAN),
+            "invalid grid limits",
+        );
+        check(
+            Box::new(|r| r.modes[1].name = r.modes[0].name.clone()),
+            "duplicate mode name 'Charging'",
+        );
+        // No slot at all used to panic on the terminal value.
+        check(Box::new(|r| r.horizon_h = 0), "horizon_h");
+        check(
+            Box::new(|r| (r.step_s, r.horizon_h) = (7200, 1)),
+            "horizon_h must cover at least one slot",
+        );
+        check(Box::new(|r| r.horizon_h = MAX_HORIZON_H + 1), "at most 240");
+        // a = 0 used to divide by zero in the export price.
+        check(Box::new(|r| r.tariff.a = 0.0), "tariff: a");
+        check(Box::new(|r| r.tariff.b = f64::NAN), "tariff: a");
+        check(Box::new(|r| r.export.a = f64::INFINITY), "export: a and b");
+        check(Box::new(|r| r.soc_wh = f64::NAN), "soc_wh");
         check(
             Box::new(|r| r.timezone = "Nowhere/City".into()),
             "unknown time zone",
@@ -574,6 +620,57 @@ mod tests {
             crate::plan_json(r#"{"now": 1}"#),
             Err(Error::Request(_))
         ));
+    }
+
+    #[test]
+    fn unknown_request_keys_are_rejected() {
+        let mut json = serde_json::to_value(request(1_781_000_000)).unwrap();
+        // A misspelled `horizon_h` would otherwise silently plan the default horizon.
+        json["horizon"] = 24.into();
+        let err = crate::plan_json(&json.to_string()).unwrap_err().to_string();
+        assert!(err.contains("unknown field `horizon`"), "{err}");
+    }
+
+    #[test]
+    fn the_longest_horizon_and_a_single_slot_are_accepted() {
+        let mut r = request(1_781_000_000);
+        r.horizon_h = MAX_HORIZON_H;
+        // The fixture has two days of weather: repeat its first day over the whole horizon.
+        let day: Vec<WeatherSlot> = r.weather.as_ref().unwrap()[..96].to_vec();
+        r.weather = Some(
+            (0..i64::from(MAX_HORIZON_H) / 24)
+                .flat_map(|d| {
+                    day.iter().map(move |w| WeatherSlot {
+                        start: w.start + d * 86_400,
+                        ..*w
+                    })
+                })
+                .collect(),
+        );
+        let resp = plan(&r).unwrap();
+        assert_eq!(resp.slots.len(), 4 * MAX_HORIZON_H as usize);
+        (r.step_s, r.horizon_h) = (3600, 1);
+        assert_eq!(plan(&r).unwrap().slots.len(), 1);
+    }
+
+    #[test]
+    fn negative_prices_and_soc_at_the_limits_give_finite_plans() {
+        let now = 1_781_000_000;
+        for soc_wh in [0.0, 1000.0, 10_000.0, 20_000.0] {
+            let mut r = request(now);
+            r.soc_wh = soc_wh;
+            r.grid.max_export_w = 0.0;
+            for (h, p) in r.known_prices.iter_mut().enumerate() {
+                p.import = if h % 2 == 0 { -0.20 } else { 0.0 };
+            }
+            let out = crate::plan_json(&serde_json::to_string(&r).unwrap()).unwrap();
+            // serde_json writes NaN and infinity as null.
+            assert!(!out.contains("null"), "{out}");
+            let resp: PlanResponse = serde_json::from_str(&out).unwrap();
+            assert_eq!(resp.slots.len(), 96);
+            assert!(resp.slots.iter().all(|s| s.grid_w >= -1e-9), "export limit 0");
+            assert!(resp.slots.iter().all(|s| (10.0..=100.0).contains(&s.soc_pct)));
+        }
     }
 
     #[test]

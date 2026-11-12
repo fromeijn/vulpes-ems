@@ -43,6 +43,13 @@ pub fn step(
         b = b.max(-(soc_wh - min_wh).max(0.0) * bat.discharge_eff / dt_h);
     }
     let mut g = net + b;
+    // Import above the limit: the battery charges less. A load that exceeds
+    // the limit on its own is left alone; the house draws it anyway.
+    if g > grid.max_import_w && b > 0.0 {
+        let less = (g - grid.max_import_w).min(b);
+        b -= less;
+        g -= less;
+    }
     // Export above the limit is curtailed (inverters throttle PV first). A
     // zero-export mode has a limit of 0: PV covers the load and the battery only.
     let max_export_w = if mode.no_export { 0.0 } else { grid.max_export_w };
@@ -51,6 +58,12 @@ pub fn step(
         let cut = excess.min(pv);
         curtailed += cut;
         g += cut;
+    }
+    // What is still above the limit without PV comes from the battery: it discharges less.
+    if g < -max_export_w && b < 0.0 {
+        let less = (-max_export_w - g).min(-b);
+        b += less;
+        g += less;
     }
     let soc = if b > 0.0 {
         soc_wh + b * dt_h * bat.charge_eff
@@ -192,6 +205,76 @@ mod tests {
     }
 
     #[test]
+    fn export_limit_reduces_the_discharge_after_pv() {
+        let lim = GridLimits {
+            max_import_w: 17_000.0,
+            max_export_w: 800.0,
+        };
+        // No PV: a 3 kW discharge with a 200 W load may only export 800 W.
+        for beh in [
+            Behaviour::BatteryPower { w: -3000.0 },
+            Behaviour::GridSetpoint { w: -2800.0 },
+        ] {
+            let r = step(&mode(beh), 200.0, 0.0, 5000.0, &bat(), &lim, 1.0);
+            assert_eq!(
+                (r.battery_w, r.grid_w, r.curtailed_w),
+                (-1000.0, -800.0, 0.0),
+                "{beh:?}"
+            );
+            // The state of charge follows the reduced power.
+            assert!((r.soc_wh - (5000.0 - 1000.0 / 0.9)).abs() < 1e-9, "{beh:?}");
+        }
+        // With PV: all of it is curtailed first, then the battery is reduced.
+        let m = mode(Behaviour::BatteryPower { w: -3000.0 });
+        let r = step(&m, 500.0, 2000.0, 5000.0, &bat(), &lim, 1.0);
+        assert_eq!((r.battery_w, r.grid_w, r.curtailed_w), (-1300.0, -800.0, 2000.0));
+        // Curtailing part of the PV is enough: the battery keeps its power.
+        let r = step(&m, 3000.0, 2000.0, 5000.0, &bat(), &lim, 1.0);
+        assert_eq!((r.battery_w, r.grid_w, r.curtailed_w), (-3000.0, -800.0, 1200.0));
+        // A zero export limit leaves only the load for the battery.
+        let zero = GridLimits {
+            max_import_w: 17_000.0,
+            max_export_w: 0.0,
+        };
+        let r = step(&m, 200.0, 0.0, 5000.0, &bat(), &zero, 1.0);
+        assert_eq!((r.battery_w, r.grid_w), (-200.0, 0.0));
+    }
+
+    #[test]
+    fn import_limit_reduces_the_charge() {
+        let lim = GridLimits {
+            max_import_w: 4000.0,
+            max_export_w: 17_000.0,
+        };
+        let charge = mode(Behaviour::BatteryPower { w: 3000.0 });
+        let r = step(&charge, 2000.0, 0.0, 5000.0, &bat(), &lim, 1.0);
+        assert_eq!((r.battery_w, r.grid_w), (2000.0, 4000.0));
+        assert!((r.soc_wh - (5000.0 + 2000.0 * 0.9)).abs() < 1e-9);
+        // Below the limit nothing changes.
+        let r = step(&charge, 500.0, 0.0, 5000.0, &bat(), &lim, 1.0);
+        assert_eq!((r.battery_w, r.grid_w), (3000.0, 3500.0));
+        // PV counts: 2 kW load − 1.5 kW PV + 3 kW charge stays under 4 kW.
+        let r = step(&charge, 2000.0, 1500.0, 5000.0, &bat(), &lim, 1.0);
+        assert_eq!((r.battery_w, r.grid_w), (3000.0, 3500.0));
+        // A load above the limit stops the charge, but is not cut itself.
+        let r = step(&charge, 6000.0, 0.0, 5000.0, &bat(), &lim, 1.0);
+        assert_eq!((r.battery_w, r.grid_w), (0.0, 6000.0));
+        let r = step(&mode(Behaviour::Idle), 6000.0, 0.0, 5000.0, &bat(), &lim, 1.0);
+        assert_eq!((r.battery_w, r.grid_w), (0.0, 6000.0));
+        // A setpoint above the limit is held at the limit.
+        let r = step(
+            &mode(Behaviour::GridSetpoint { w: 5000.0 }),
+            2500.0,
+            0.0,
+            5000.0,
+            &bat(),
+            &lim,
+            1.0,
+        );
+        assert_eq!((r.battery_w, r.grid_w), (1500.0, 4000.0));
+    }
+
+    #[test]
     fn no_export_curtails_only_the_surplus() {
         let ne = |b| ModeDef {
             no_export: true,
@@ -277,10 +360,10 @@ mod tests {
     #[test]
     fn soc_stays_within_bounds_for_every_mode() {
         let b = bat();
-        let lim = GridLimits {
-            max_import_w: 17_000.0,
-            max_export_w: 17_000.0,
-        };
+        let limits = [(17_000.0, 17_000.0), (1000.0, 800.0), (0.0, 0.0)].map(|(i, e)| GridLimits {
+            max_import_w: i,
+            max_export_w: e,
+        });
         let (lo, hi) = (b.min_soc * b.capacity_wh, b.max_soc * b.capacity_wh);
         let behaviours = [
             Behaviour::GridSetpoint { w: 5000.0 },
@@ -291,10 +374,13 @@ mod tests {
             Behaviour::BatteryPower { w: 3000.0 },
             Behaviour::BatteryPower { w: -3000.0 },
         ];
-        for beh in behaviours {
+        for (beh, lim) in behaviours
+            .iter()
+            .flat_map(|b| limits.iter().map(move |l| (*b, l)))
+        {
             for soc in [lo, lo + 1.0, 0.5 * (lo + hi), hi - 1.0, hi] {
                 for (load, pv) in [(0.0, 0.0), (2000.0, 0.0), (300.0, 4000.0)] {
-                    let o = step(&mode(beh), load, pv, soc, &b, &lim, 1.0);
+                    let o = step(&mode(beh), load, pv, soc, &b, lim, 1.0);
                     assert!((lo..=hi).contains(&o.soc_wh), "{beh:?} soc {soc}: {o:?}");
                     // Energy balance: grid = load − used PV + battery.
                     let used_pv = pv - o.curtailed_w;
@@ -302,6 +388,13 @@ mod tests {
                         (o.grid_w - (load - used_pv + o.battery_w)).abs() < 1e-9,
                         "{beh:?}: {o:?}"
                     );
+                    // The limits hold, except for a load that alone exceeds the import limit.
+                    assert!(o.grid_w >= -lim.max_export_w - 1e-9, "{beh:?} {lim:?}: {o:?}");
+                    assert!(
+                        o.grid_w <= lim.max_import_w.max(load - used_pv) + 1e-9,
+                        "{beh:?} {lim:?}: {o:?}"
+                    );
+                    assert!(o.battery_w.is_finite() && o.grid_w.is_finite() && o.curtailed_w >= 0.0);
                 }
             }
         }

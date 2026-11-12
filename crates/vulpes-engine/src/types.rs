@@ -49,7 +49,10 @@ pub struct WeatherSlot {
     pub wind_speed: f64,
 }
 
+/// Unknown keys are rejected, so that a misspelled optional key cannot
+/// silently fall back to its default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlanRequest {
     /// Unix seconds; planning starts at the slot containing `now`.
     pub now: i64,

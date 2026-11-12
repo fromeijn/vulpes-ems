@@ -136,7 +136,6 @@ All three must be green before a release.
 
 ## Known gaps and parked ideas
 
-- `GridLimits::max_import_w` isn't applied in `vulpes_opt::step`; only the export limit is.
 - **Hybrid inverters:** PV behind a DC-coupled battery is limited by the PV input, not the AC output. The form's inverter limit is a single number; a separate AC limit for (PV − battery charge) is not modelled.
 - **Per-phase limits:** a single-phase inverter is limited by its phase fuse together with the house load on that phase. Not modelled; parked until needed.
 - **ML forecast corrections are parked.** The oracle replay (`vulpes-cli replay`, the "optimizer + actual …" rows) on a test household over one year showed that even a perfect load or PV forecast each saves only about a tenth of what the optimizer already saves over self-consumption, and a perfect forecast of unpublished prices nothing measurable. Before picking ML up again, run the oracle replay on the house in question and check that the gain justifies the work. Simpler levers (planning horizon, intraday scaling of the forecasts) come first.

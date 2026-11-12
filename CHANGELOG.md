@@ -19,8 +19,14 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 - **New setups default to Export a = 1.0** (was 1.21): without net metering, feed-in is usually paid at the market price without VAT. Existing setups keep their values.
 - The Tariff step explains Export a and Export b.
 - **Engine request:** `export` no longer has `net_metering`. The integration and the wheel must be updated together.
+- **Engine request:** stricter checks. A request is now rejected when it has an unknown top-level key, a `horizon_h` above 240, a `tariff.a` of 0, negative grid limits, or two modes with the same name. The integration never sends these; check your own scripts that call `vulpes_ems.plan`.
 - **CLI:** a replay site file with `net_metering` under `export` is rejected. For net metering, set `export.a`/`export.b` to the `tariff` values.
 - **CLI:** `replay` now gives each hour the PV forecast that had been issued by then. Hours more than a day ahead use the model from the new `--tail-model` flag (default `ecmwf_ifs025`) instead of the day-ahead forecast, which was not available yet. Before replaying, run `backfill-weather --lead-days 2 --models ecmwf_ifs025` (and `--lead-days 3`, `4` for horizons beyond 48 and 72 hours). Results differ slightly from earlier versions.
+
+### Fixed
+
+- **Grid limits:** a plan no longer discharges the battery above the maximum grid export, or charges it above the maximum grid import. Before, only solar power was limited, so a plan could count on export or import that the connection does not allow. Plans change only for setups where a grid limit is lower than the battery power plus the load or solar power. Nothing to set.
+- **Engine:** a request with a planning horizon shorter than one slot is rejected with an error instead of crashing the engine. Should the engine still crash, Python now gets a `ValueError` ("internal error: …") like for any other failure.
 
 ## 0.3.1 - 2026-11-10
 
