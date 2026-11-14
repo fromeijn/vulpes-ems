@@ -4,12 +4,12 @@ use anyhow::{Context, Result, bail};
 use chrono::{NaiveDate, TimeZone};
 use chrono_tz::Tz;
 use std::collections::HashMap;
-use vulpes_core::{SeriesKind, Store};
+use vulpes_core::{ErrorStats, SeriesKind, Store, keys};
 use vulpes_load::reconstruct::Balance;
 use vulpes_load::temperature::{Correction, DegreeBases, Sample};
 use vulpes_load::{Country, ProfileForecaster, ProfileOptions};
 
-pub(crate) const LOAD_KEY: &str = "load.house";
+pub(crate) const LOAD_KEY: &str = keys::LOAD_HOUSE;
 
 /// First series (in priority order) that has a value at each hour.
 fn merged(store: &Store, keys: &[String], from: i64, to: i64) -> Result<HashMap<i64, f64>> {
@@ -126,23 +126,17 @@ pub(crate) fn build(store: &mut Store, src: &LoadSources, from: NaiveDate) -> Re
     Ok(())
 }
 
+/// Hourly errors of one method, plus its daily-energy error.
 #[derive(Default)]
 struct Score {
-    n: usize,
-    abs: f64,
-    sq: f64,
-    bias: f64,
+    err: ErrorStats,
     day_abs: f64,
     days: usize,
 }
 
 impl Score {
     fn add(&mut self, f: f64, a: f64) {
-        let e = f - a;
-        self.n += 1;
-        self.abs += e.abs();
-        self.sq += e * e;
-        self.bias += e;
+        self.err.add(f, a);
     }
 }
 
@@ -179,13 +173,17 @@ pub(crate) fn evaluate(
         "method", "hourly MAE", "RMSE", "bias", "daily MAE"
     );
     for (name, s) in LOAD_METHODS.iter().zip(&e.scores) {
-        let n = s.n.max(1) as f64;
+        let (mae, rmse, bias) = (
+            s.err.mae().unwrap_or(0.0),
+            s.err.rmse().unwrap_or(0.0),
+            s.err.bias().unwrap_or(0.0),
+        );
         println!(
             "{name:34} {:5.0} W ({:4.1}%) {:7.0} W {:+6.0} W {:6.2} kWh/day",
-            s.abs / n,
-            100.0 * s.abs / n / e.mean_load,
-            (s.sq / n).sqrt(),
-            s.bias / n,
+            mae,
+            100.0 * s.err.abs / s.err.n.max(1) as f64 / e.mean_load,
+            rmse,
+            bias,
             s.day_abs / s.days.max(1) as f64
         );
     }
@@ -435,14 +433,6 @@ mod tests {
         assert!(merged(&store, &[], 0, 10_000).unwrap().is_empty());
     }
 
-    #[test]
-    fn score_accumulates_errors() {
-        let mut s = Score::default();
-        s.add(110.0, 100.0);
-        s.add(80.0, 100.0);
-        assert_eq!((s.n, s.abs, s.sq, s.bias), (2, 30.0, 500.0, -10.0));
-    }
-
     const TZ: Tz = chrono_tz::Europe::Amsterdam;
 
     fn date(s: &str) -> NaiveDate {
@@ -480,8 +470,8 @@ mod tests {
         assert_eq!(e.hours, 7 * 24);
         assert_eq!(e.mean_load, 500.0);
         for (name, s) in LOAD_METHODS.iter().zip(&e.scores) {
-            assert_eq!(s.n, 7 * 24, "{name}");
-            assert!(s.abs < 1e-6, "{name}: {}", s.abs);
+            assert_eq!(s.err.n, 7 * 24, "{name}");
+            assert!(s.err.abs < 1e-6, "{name}: {}", s.err.abs);
         }
         assert_eq!(e.correction, Correction::NONE);
     }
@@ -505,7 +495,10 @@ mod tests {
         }
         let run = |all: &[(i64, f64)]| {
             let e = evaluate_days(all, &no_temps(), target, target, TZ, Country::None).unwrap();
-            e.scores.iter().map(|s| (s.abs, s.sq, s.bias)).collect::<Vec<_>>()
+            e.scores
+                .iter()
+                .map(|s| (s.err.abs, s.err.sq, s.err.sum))
+                .collect::<Vec<_>>()
         };
         assert_eq!(run(&base), run(&changed));
         // Data after the evaluated period doesn't matter either.
@@ -573,7 +566,7 @@ mod tests {
         .unwrap();
         let mae = |name: &str| {
             let s = &e.scores[LOAD_METHODS.iter().position(|m| *m == name).unwrap()];
-            s.abs / s.n as f64
+            s.err.mae().unwrap()
         };
         assert!(
             mae("profile, mean + temperature") < 0.5 * mae("profile, mean"),

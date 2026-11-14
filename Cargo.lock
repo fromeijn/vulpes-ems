@@ -1192,7 +1192,6 @@ dependencies = [
  "vulpes-core",
  "vulpes-engine",
  "vulpes-load",
- "vulpes-ml",
  "vulpes-opt",
  "vulpes-price",
  "vulpes-solar",
@@ -1232,13 +1231,6 @@ version = "0.4.0"
 dependencies = [
  "chrono",
  "chrono-tz",
- "vulpes-core",
-]
-
-[[package]]
-name = "vulpes-ml"
-version = "0.4.0"
-dependencies = [
  "vulpes-core",
 ]
 

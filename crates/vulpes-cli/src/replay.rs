@@ -99,7 +99,7 @@ impl Tally {
     fn settle(&mut self, grid_w: f64, battery_w: f64, import: f64, export: f64, wear: f64) {
         let kwh = grid_w / 1000.0;
         let throughput = battery_w.abs() / 1000.0;
-        self.cost += if kwh >= 0.0 { kwh * import } else { kwh * export } + wear * throughput;
+        self.cost += vulpes_opt::slot_cost(grid_w, battery_w, import, export, 1.0, wear);
         self.import_kwh += kwh.max(0.0);
         self.export_kwh += (-kwh).max(0.0);
         self.throughput_kwh += throughput;
@@ -582,7 +582,7 @@ pub(crate) fn run(store: &Store, args: &ReplayArgs<'_>) -> Result<()> {
     }
     let data = ReplayData {
         load: all(crate::load::LOAD_KEY)?,
-        pv: all("pv.total.power")?,
+        pv: all(vulpes_core::keys::PV_TOTAL_POWER)?,
         price: all(args.wholesale)?,
         pv_fc,
     };

@@ -4,7 +4,7 @@
 pub mod dp;
 pub mod physics;
 
-pub use dp::{Plan, PlanSlot, Problem, SlotInput, optimize};
+pub use dp::{Plan, PlanSlot, Problem, SlotInput, optimize, slot_cost};
 pub use physics::{SlotOutcome, step};
 
 pub fn version() -> &'static str {

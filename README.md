@@ -22,9 +22,8 @@ vulpes-ems does two things:
 
 ## Layout
 
-- `crates/vulpes-core`: time grid, mode/battery types, storage
+- `crates/vulpes-core`: time grid, mode/battery types, error metrics, storage
 - `crates/vulpes-{solar,load,price}`: forecasters
-- `crates/vulpes-ml`: weighted ridge regression and recency weights (used by the evaluation tools only)
 - `crates/vulpes-opt`: DP optimizer
 - `crates/vulpes-sources`: Open-Meteo, ENTSO-E clients
 - `crates/vulpes-py`: PyO3 bindings (PyPI package `vulpes-ems`)

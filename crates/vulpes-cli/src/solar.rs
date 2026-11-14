@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Datelike, NaiveDate};
 use std::collections::HashMap;
 use std::path::Path;
-use vulpes_core::Store;
+use vulpes_core::{ErrorStats, Store, keys};
 use vulpes_solar::calibrate::{FitOptions, GroupMember, HourInput, fit_group};
 use vulpes_solar::model::{PlaneParams, Weather};
 use vulpes_solar::shading::{ShadingMap, ShadingOptions, fit_shading, refit_pdc0};
@@ -475,39 +475,18 @@ fn daily(hourly: &HashMap<i64, f64>) -> HashMap<i64, f64> {
     by_day
 }
 
-struct Score {
-    n: usize,
-    abs: f64,
-    sq: f64,
-    bias: f64,
-}
+type Score = ErrorStats;
 
-impl Score {
-    fn new() -> Self {
-        Self {
-            n: 0,
-            abs: 0.0,
-            sq: 0.0,
-            bias: 0.0,
-        }
-    }
-    fn add(&mut self, forecast: f64, actual: f64) {
-        let e = forecast - actual;
-        self.n += 1;
-        self.abs += e.abs();
-        self.sq += e * e;
-        self.bias += e;
-    }
-    fn line(&self, name: &str, mean_actual: f64) -> String {
-        let n = self.n.max(1) as f64;
-        format!(
-            "{name:28} MAE {:5.2} kWh/day ({:4.1}%)  RMSE {:5.2}  bias {:+5.2}",
-            self.abs / n,
-            100.0 * self.abs / n / mean_actual,
-            (self.sq / n).sqrt(),
-            self.bias / n
-        )
-    }
+/// One report line of daily scores (kWh/day).
+fn line(s: &Score, name: &str, mean_actual: f64) -> String {
+    let n = s.n.max(1) as f64;
+    format!(
+        "{name:28} MAE {:5.2} kWh/day ({:4.1}%)  RMSE {:5.2}  bias {:+5.2}",
+        s.abs / n,
+        100.0 * s.abs / n / mean_actual,
+        (s.sq / n).sqrt(),
+        s.sum / n
+    )
 }
 
 /// Scores on a set of days: our KNMI, ICON-D2 and two-model mean forecasts,
@@ -559,10 +538,10 @@ fn evaluate_days(
         let mut r = DayScores {
             days: ds.len(),
             mean_actual: ds.iter().map(|d| daily_actual[d].0).sum::<f64>() / ds.len().max(1) as f64,
-            knmi: Score::new(),
-            icon: Score::new(),
-            mean: Score::new(),
-            sfml: Score::new(),
+            knmi: Score::default(),
+            icon: Score::default(),
+            mean: Score::default(),
+            sfml: Score::default(),
         };
         for d in ds {
             let a = daily_actual[d].0;
@@ -577,7 +556,7 @@ fn evaluate_days(
     };
     let with_sf: Vec<i64> = days.iter().copied().filter(|&d| sfml_at(d).is_some()).collect();
     // Hourly skill on the evaluated days, daylight hours only (actual or forecast > 0).
-    let (mut hourly, mut persistence, mut sum_a, mut n) = (Score::new(), Score::new(), 0.0, 0usize);
+    let (mut hourly, mut persistence, mut sum_a, mut n) = (Score::default(), Score::default(), 0.0, 0usize);
     for d in &days {
         for k in 0..24 {
             let h = d + k * 3600;
@@ -635,7 +614,7 @@ pub(crate) fn evaluate(
     };
     let forecast = [model("knmi_harmonie_arome_netherlands")?, model("icon_d2")?];
     let actual: HashMap<i64, f64> = store
-        .samples("pv.total.power", 3600, from, to)?
+        .samples(keys::PV_TOTAL_POWER, 3600, from, to)?
         .into_iter()
         .collect();
     // Solar Forecast ML "tomorrow" as it stood at 19:00 UTC the day before.
@@ -648,11 +627,11 @@ pub(crate) fn evaluate(
     let report = |title: &str, r: &DayScores, with_sfml: bool| {
         let m = r.mean_actual;
         println!("\n{title}: {} days, mean actual {m:.2} kWh/day", r.days);
-        println!("  {}", r.knmi.line("vulpes physics (KNMI)", m));
-        println!("  {}", r.icon.line("vulpes physics (ICON-D2)", m));
-        println!("  {}", r.mean.line("vulpes physics (mean of 2)", m));
+        println!("  {}", line(&r.knmi, "vulpes physics (KNMI)", m));
+        println!("  {}", line(&r.icon, "vulpes physics (ICON-D2)", m));
+        println!("  {}", line(&r.mean, "vulpes physics (mean of 2)", m));
         if with_sfml {
-            println!("  {}", r.sfml.line("Solar Forecast ML", m));
+            println!("  {}", line(&r.sfml, "Solar Forecast ML", m));
         }
     };
     report("All evaluated days", &e.all_days, false);
@@ -669,7 +648,7 @@ pub(crate) fn evaluate(
             s.abs / k,
             100.0 * s.abs / k / m,
             (s.sq / k).sqrt(),
-            s.bias / k
+            s.sum / k
         )
     };
     println!("\nHourly, daylight ({n} hours, mean actual {m:.0} W):");
@@ -717,11 +696,11 @@ mod tests {
 
     #[test]
     fn score_line() {
-        let mut s = Score::new();
+        let mut s = Score::default();
         s.add(11.0, 10.0);
         s.add(7.0, 10.0);
-        assert_eq!((s.n, s.abs, s.sq, s.bias), (2, 4.0, 10.0, -2.0));
-        let line = s.line("test", 10.0);
+        assert_eq!((s.n, s.abs, s.sq, s.sum), (2, 4.0, 10.0, -2.0));
+        let line = line(&s, "test", 10.0);
         assert!(
             line.contains("MAE  2.00") && line.contains("(20.0%)") && line.contains("bias -1.00"),
             "{line}"
@@ -1105,13 +1084,13 @@ mod tests {
         assert_eq!(e.all_days.days, 3, "the incomplete day is skipped");
         assert_eq!(e.all_days.knmi.abs, 0.0);
         let day_kwh = e.all_days.mean_actual;
-        assert!((e.all_days.icon.bias / 3.0 - 0.1 * day_kwh).abs() < 1e-9);
-        assert!((e.all_days.mean.bias / 3.0 - 0.05 * day_kwh).abs() < 1e-9);
+        assert!((e.all_days.icon.sum / 3.0 - 0.1 * day_kwh).abs() < 1e-9);
+        assert!((e.all_days.mean.sum / 3.0 - 0.05 * day_kwh).abs() < 1e-9);
         assert_eq!(e.sfml_days.days, 1);
-        assert!((e.sfml_days.sfml.bias - (10.0 - day_kwh)).abs() < 1e-9);
+        assert!((e.sfml_days.sfml.sum - (10.0 - day_kwh)).abs() < 1e-9);
         // Every day has the same shape, so persistence is perfect after the first day.
         assert_eq!(e.persistence.abs, 0.0);
-        assert!(e.hourly.n > 0 && e.hourly.bias > 0.0);
+        assert!(e.hourly.n > 0 && e.hourly.sum > 0.0);
         // The week filter: DAY is in an odd week, the following days in an even one.
         let only_odd = evaluate_days(
             &[actual.clone(), actual.clone()],

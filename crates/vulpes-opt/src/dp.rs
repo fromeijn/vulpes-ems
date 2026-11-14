@@ -19,6 +19,20 @@ pub struct SlotInput {
     pub min_soc_wh: Option<f64>,
 }
 
+impl SlotInput {
+    /// Cost of an outcome in this slot (see [`slot_cost`]).
+    fn cost(&self, o: &crate::SlotOutcome, dt_h: f64, wear: f64) -> f64 {
+        slot_cost(
+            o.grid_w,
+            o.battery_w,
+            self.import_price,
+            self.export_price,
+            dt_h,
+            wear,
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Problem<'a> {
     pub slots: &'a [SlotInput],
@@ -48,13 +62,23 @@ pub struct Plan {
     pub cost: f64,
 }
 
-/// Cost of one slot outcome.
-fn slot_cost(inp: &SlotInput, grid_w: f64, battery_w: f64, dt_h: f64, wear: f64) -> f64 {
+/// Cost of one slot: grid import at the import price, export credited at the
+/// export price, plus battery wear per kWh of AC throughput. Powers in W
+/// (grid positive = import), prices and wear in currency/kWh. The optimizer,
+/// the replay and the review all settle with this one formula.
+pub fn slot_cost(
+    grid_w: f64,
+    battery_w: f64,
+    import_price: f64,
+    export_price: f64,
+    dt_h: f64,
+    wear: f64,
+) -> f64 {
     let kwh = grid_w * dt_h / 1000.0;
     let energy = if kwh >= 0.0 {
-        kwh * inp.import_price
+        kwh * import_price
     } else {
-        kwh * inp.export_price
+        kwh * export_price
     };
     energy + wear * battery_w.abs() * dt_h / 1000.0
 }
@@ -116,7 +140,7 @@ pub fn optimize(p: &Problem<'_>) -> Plan {
                 .iter()
                 .map(|mode| {
                     let o = step(mode, inp.load_w, inp.pv_w, level(i), b, p.grid, p.dt_h);
-                    slot_cost(inp, o.grid_w, o.battery_w, p.dt_h, b.wear_cost_per_kwh)
+                    inp.cost(&o, p.dt_h, b.wear_cost_per_kwh)
                         + reserve_penalty(inp, o.soc_wh)
                         + interp(next, o.soc_wh)
                 })
@@ -133,7 +157,7 @@ pub fn optimize(p: &Problem<'_>) -> Plan {
         let mut best: Option<(f64, usize, crate::SlotOutcome, f64)> = None;
         let score_at = |mode: &ModeDef, load_w: f64| {
             let o = step(mode, load_w, inp.pv_w, soc, b, p.grid, p.dt_h);
-            let c = slot_cost(inp, o.grid_w, o.battery_w, p.dt_h, b.wear_cost_per_kwh);
+            let c = inp.cost(&o, p.dt_h, b.wear_cost_per_kwh);
             (
                 c + reserve_penalty(inp, o.soc_wh) + interp(&value[t + 1], o.soc_wh),
                 o,
@@ -458,6 +482,20 @@ mod tests {
         let plan = solve(&s, 3000.0, 0.02, 0.2);
         let sum: f64 = plan.slots.iter().map(|x| x.cost).sum();
         assert!((plan.cost - sum).abs() < 1e-9);
+    }
+
+    #[test]
+    fn slot_cost_settles_import_export_and_wear() {
+        // Import 2 kWh at 0.30 with 1 kWh through the battery at 0.02/kWh wear.
+        assert!((slot_cost(2000.0, 1000.0, 0.30, 0.10, 1.0, 0.02) - 0.62).abs() < 1e-12);
+        // Export 1 kWh at 0.10 is a credit; discharge wear counts the same as charge.
+        assert!((slot_cost(-1000.0, -500.0, 0.30, 0.10, 1.0, 0.02) - (-0.10 + 0.01)).abs() < 1e-12);
+        // A quarter hour is a quarter of the energy.
+        assert!((slot_cost(2000.0, 0.0, 0.30, 0.10, 0.25, 0.0) - 0.15).abs() < 1e-12);
+        // Zero grid power costs nothing, whichever price applies; negative prices flip the sign.
+        assert_eq!(slot_cost(0.0, 0.0, 0.30, 0.10, 1.0, 0.0), 0.0);
+        assert!((slot_cost(1000.0, 0.0, -0.05, 0.10, 1.0, 0.0) + 0.05).abs() < 1e-12);
+        assert!((slot_cost(-1000.0, 0.0, 0.30, -0.05, 1.0, 0.0) - 0.05).abs() < 1e-12);
     }
 
     #[test]

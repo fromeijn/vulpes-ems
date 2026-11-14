@@ -4,18 +4,17 @@ Guidance for AI coding agents (and humans) working on vulpes-ems.
 
 ## What this is
 
-A home energy manager for Home Assistant. A Rust core does the forecasting (solar, load, prices) and a dynamic-programming optimizer that picks a battery mode per 15-minute slot. The core ships as a Python wheel (`vulpes-ems` on PyPI). A thin Home Assistant integration (`custom_components/vulpes_ems`) feeds it data and publishes the plan as entities.
+A home energy manager for Home Assistant. A Rust core does the forecasting (solar, load, prices) and a dynamic-programming optimizer that picks a battery mode per 15-minute slot. The core ships as a Python wheel (`vulpes-ems` on PyPI). A thin Home Assistant integration (`custom_components/vulpes_ems`) feeds it data and publishes the results as entities. All logic lives in Rust; the Python side is only a shell around it (see Conventions).
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `crates/vulpes-core` | Time grid, mode/battery types, SQLite store |
+| `crates/vulpes-core` | Time grid, mode/battery types, forecast error metrics, SQLite store and shared series keys |
 | `crates/vulpes-sources` | Open-Meteo, EnergyZero and ENTSO-E clients |
 | `crates/vulpes-solar` | Solar position, Perez transposition, PV model, calibration |
 | `crates/vulpes-load` | Similar-day load profile, NL calendar, temperature correction |
 | `crates/vulpes-price` | Tariff fit |
-| `crates/vulpes-ml` | Weighted ridge regression, recency weights |
 | `crates/vulpes-opt` | Slot physics (`step`) and DP optimizer |
 | `crates/vulpes-engine` | JSON request → forecasts → plan, and solar calibration (what the integration calls) |
 | `crates/vulpes-py` | PyO3 bindings, built with maturin (`vulpes_ems._core`) |
@@ -40,6 +39,7 @@ python3 -m venv .venv && .venv/bin/pip install pytest maturin ziglang
 
 ## Conventions
 
+- **Thin Python shell, logic in Rust.** The integration only reads Home Assistant state, calls Rust, and publishes the results as entities, repairs and diagnostics. Everything else is Rust, under the unit-test rules below: calculations, rules and thresholds, parsing, time handling, settings migrations and checks, the control script variables, history and persistence. Python may convert HA objects into JSON (datetimes to Unix seconds, picking attributes from a state), but it makes no decisions. A feature that needs logic adds a Rust function, not Python code.
 - **Rust edition 2024**, small crates, no async. HTTP uses `ureq` with ring + webpki-roots. Don't use reqwest/rustls defaults: aws-lc-sys breaks the zig/musl cross-builds.
 - **Wheels are abi3 (cp313+)**, built for manylinux_2_28 and musllinux_1_2 on x86_64 and aarch64. Home Assistant Container runs Python 3.14 on Alpine (musl).
 - **Engine API is JSON in, JSON out** (`vulpes_engine::plan_json` and `calibrate_json`, exposed as `vulpes_ems.plan` and `vulpes_ems.calibrate_solar`). Python releases the GIL and calls it in the executor.
@@ -53,7 +53,8 @@ python3 -m venv .venv && .venv/bin/pip install pytest maturin ziglang
 - **Integration and engine move together:** the manifest pins `vulpes-ems==x.y.z` exactly. A change to the JSON request/response needs a new wheel *and* a new integration version, released together.
 - **Never change entity `unique_id`s.** Users would lose entity history, customisations and dashboards.
 - **No blocking work on HA's event loop:** calls into Rust and all network or recorder access run in the executor (`async_add_executor_job`, the recorder's own executor).
-- Keep `modes.py`, `control.py`, `solar_setup.py` and `setup_checks.py` free of Home Assistant imports so they stay testable in `tests/`. Flow input checks go in `setup_checks.py`.
+- **No new Python logic modules.** `modes.py`, `control.py`, `solar_setup.py` and `setup_checks.py` are being moved to Rust; until then they stay free of Home Assistant imports so they remain testable in `tests/`.
+- **One store format.** The integration's history file and the CLI's `local/<house>/vulpes.db` are the same `vulpes-core::Store`, with the same series keys, so a copy of a user's file works with the CLI tools. Users' files cannot be rebuilt: add new tables with `CREATE TABLE IF NOT EXISTS` (no version bump); a change to an existing table needs a schema version bump, a migration and a test for it.
 - **Solar setup:** the array form stores engine planes with `inverter: 0` plus integration-only keys (`power_entity`), stripped by `engine_planes()` before any engine call. `solar_setup` in the settings is `form` or `json`; setups from before 0.3.0 have neither and are treated as JSON. Calibration results live in `.storage/vulpes_ems.<entry_id>.calibration` and are only applied by the user, through the options flow.
 - `strings.json` and `translations/en.json` must stay identical, and each options step has the same labels as its config step (`tests/test_strings.py`). The options flow is a menu; each section saves the full settings copy.
 - **Translations:** every string change also updates `translations/nl.json`. It must have the same keys and `{placeholders}` as `en.json` (`tests/test_strings.py`). Mode values in script variables stay English: they are an API.
@@ -75,7 +76,7 @@ Rules:
 - **Refactoring commands:** run the command on real local data before and after, and check that the output is identical.
 - **Serde formats are part of the API:** test the JSON round-trip of engine requests/responses and of `Behaviour`/`ModeDef`, so the Python side doesn't silently break.
 - **Physics against references:** solar changes must keep `crates/vulpes-solar/tests/pvlib_reference.rs` green (pvlib 0.16.1, solar constant 1366.1 W/m²). Regenerate reference values with pvlib, never by copying our own output.
-- **Python:** HA-independent code (like `modes.py`) gets pytest tests in `tests/`.
+- **Python:** pytest covers the bindings (`tests/test_bindings.py`, against the built module), the strings (`tests/test_strings.py`) and HA glue that can be tested without HA. New logic is tested in Rust.
 
 Known coverage gaps to fill:
 - **Network calls** (`open_meteo::fetch`, `entsoe::fetch`, `energyzero::fetch_hourly`): only the request building and response parsing are tested; there are no tests against live services by design.
@@ -141,7 +142,13 @@ All three must be green before a release.
 - **ML forecast corrections are parked.** The oracle replay (`vulpes-cli replay`, the "optimizer + actual …" rows) on a test household over one year showed that even a perfect load or PV forecast each saves only about a tenth of what the optimizer already saves over self-consumption, and a perfect forecast of unpublished prices nothing measurable. Before picking ML up again, run the oracle replay on the house in question and check that the gain justifies the work. Simpler levers (planning horizon, intraday scaling of the forecasts) come first.
 - **HTTP timeout** is 60 s (`vulpes-sources/src/lib.rs`). A hanging API can delay the integration's first refresh, so it should probably be about 20 s.
 
+## Git and releases
+
+Keep all work local. Commit, push, tag, publish or create a release only when explicitly asked, each time: approval for one commit or release does not cover the next. The release process below describes how to release once asked; it is not a trigger to run it.
+
 ## Release process
+
+Only when asked (see Git and releases).
 
 1. **Bump the version everywhere:**
    - `[workspace.package] version` in `Cargo.toml`, and the `version = "x.y.z", path = …` dependency entries in `crates/*/Cargo.toml`;
@@ -157,4 +164,4 @@ This project is developed against a real house. **Never commit personal data:**
 - coordinates, addresses, entity ids that identify devices (serial numbers), meter data, tokens;
 - tuned site values in tests or docs: use generic numbers.
 
-Local data lives in the gitignored `local/` directory (SQLite store, entity mapping, site config, API tokens). Coordinates are rounded to 0.01° before any external request. API tokens (ENTSO-E) come from the environment or `local/`; never print them or include them in errors.
+Local data lives in the gitignored `local/` directory (SQLite store, entity mapping, site config, API tokens). A history file copied from someone's Home Assistant is meter data: keep it in `local/` only. Coordinates are rounded to 0.01° before any external request. API tokens (ENTSO-E) come from the environment or `local/`; never print them or include them in errors.
