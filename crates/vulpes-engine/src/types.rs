@@ -119,6 +119,13 @@ pub struct PlanSummary {
     /// Expected cost over the horizon (excluding the terminal credit).
     pub cost: f64,
     pub pv_kwh_24h: f64,
+    /// Solar forecast per local day (kWh, before curtailment): the whole of
+    /// today, today from the current slot on, tomorrow and the day after.
+    /// `null` when the weather does not cover the daylight of that day.
+    pub pv_kwh_today: Option<f64>,
+    pub pv_kwh_today_remaining: Option<f64>,
+    pub pv_kwh_tomorrow: Option<f64>,
+    pub pv_kwh_day_after: Option<f64>,
     pub load_kwh_24h: f64,
     pub terminal_value_per_kwh: f64,
 }

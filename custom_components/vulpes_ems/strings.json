@@ -371,6 +371,18 @@
       "pv_forecast_24h": {
         "name": "PV forecast next 24h"
       },
+      "pv_today": {
+        "name": "PV forecast today"
+      },
+      "pv_remaining_today": {
+        "name": "PV forecast rest of today"
+      },
+      "pv_tomorrow": {
+        "name": "PV forecast tomorrow"
+      },
+      "pv_day_after": {
+        "name": "PV forecast day after tomorrow"
+      },
       "load_forecast_24h": {
         "name": "Load forecast next 24h"
       },

@@ -371,6 +371,18 @@
       "pv_forecast_24h": {
         "name": "Zonneprognose komende 24 uur"
       },
+      "pv_today": {
+        "name": "Zonneprognose vandaag"
+      },
+      "pv_remaining_today": {
+        "name": "Zonneprognose rest van vandaag"
+      },
+      "pv_tomorrow": {
+        "name": "Zonneprognose morgen"
+      },
+      "pv_day_after": {
+        "name": "Zonneprognose overmorgen"
+      },
       "load_forecast_24h": {
         "name": "Verbruiksprognose komende 24 uur"
       },

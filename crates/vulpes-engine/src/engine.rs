@@ -1,5 +1,5 @@
 use crate::{Error, PlanRequest, PlanResponse, PlanSummary, Result, SlotPlan, WeatherSlot};
-use chrono::{DateTime, Datelike};
+use chrono::{DateTime, Datelike, TimeZone};
 use chrono_tz::Tz;
 use std::collections::{HashMap, HashSet};
 use vulpes_load::{Country, ProfileForecaster, ProfileOptions};
@@ -99,6 +99,80 @@ pub(crate) fn average_models(series: Vec<WeatherSeries>) -> HashMap<i64, Weather
 }
 
 /// Mean of a 15-minute weather series over `[start, start + step)`.
+/// AC power of the planes in the slot starting at `t` (mean W), from the
+/// weather of its quarter hours; `None` without weather. Before curtailment.
+fn slot_pv(req: &PlanRequest, weather: &HashMap<i64, WeatherSlot>, t: i64, step: i64) -> Option<f64> {
+    let ws = weather_for(weather, t, step)?;
+    let mut total = 0.0;
+    for w in &ws {
+        let sun = sun_position((w.start + 450) as f64, req.location.lat, req.location.lon);
+        let doy = DateTime::from_timestamp(w.start, 0).map_or(1, |d| d.ordinal());
+        let wx = Weather {
+            ghi: w.ghi,
+            dni: w.dni,
+            dhi: w.dhi,
+            temp_air: w.temp_air,
+            wind_speed: w.wind_speed,
+        };
+        total += system_ac_power(&req.planes, sun, wx, doy);
+    }
+    Some(total / ws.len() as f64)
+}
+
+/// PV energy per local day (kWh): today, the rest of today from the current
+/// slot, tomorrow and the day after. A slot without weather counts as 0 when
+/// the sun is down (the forecast may start at UTC midnight, after local
+/// midnight); with the sun up it makes that day's figure `None`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PvDays {
+    pub today: Option<f64>,
+    pub today_remaining: Option<f64>,
+    pub tomorrow: Option<f64>,
+    pub day_after: Option<f64>,
+}
+
+fn pv_days(req: &PlanRequest, weather: &HashMap<i64, WeatherSlot>, tz: Tz, start: i64, step: i64) -> PvDays {
+    let dt_h = step as f64 / 3600.0;
+    let midnight = |d: chrono::NaiveDate| {
+        d.and_hms_opt(0, 0, 0)
+            .and_then(|m| tz.from_local_datetime(&m).earliest())
+            .map(|t| t.timestamp())
+    };
+    let today = DateTime::from_timestamp(start, 0).map(|t| t.with_timezone(&tz).date_naive());
+    // Energy of the slots in [from, to); None if a daylight slot has no weather.
+    let energy = |from: i64, to: i64| -> Option<f64> {
+        let first = from + (step - from.rem_euclid(step)) % step;
+        let mut wh = 0.0;
+        let mut t = first;
+        while t < to {
+            let w = match slot_pv(req, weather, t, step) {
+                Some(w) => w,
+                None if sun_position((t + step / 2) as f64, req.location.lat, req.location.lon)
+                    .elevation()
+                    <= 0.0 =>
+                {
+                    0.0
+                }
+                None => return None,
+            };
+            wh += w * dt_h;
+            t += step;
+        }
+        Some(wh / 1000.0)
+    };
+    let day = |offset: u64| -> Option<(i64, i64)> {
+        let d = today?.checked_add_days(chrono::Days::new(offset))?;
+        Some((midnight(d)?, midnight(d.succ_opt()?)?))
+    };
+    let sum = |offset: u64| day(offset).and_then(|(a, b)| energy(a, b));
+    PvDays {
+        today: sum(0),
+        today_remaining: day(0).and_then(|(_, end)| energy(start, end)),
+        tomorrow: sum(1),
+        day_after: sum(2),
+    }
+}
+
 fn weather_for(weather: &HashMap<i64, WeatherSlot>, start: i64, step: i64) -> Option<Vec<WeatherSlot>> {
     let v: Vec<WeatherSlot> = (0..(step / 900).max(1))
         .filter_map(|k| weather.get(&(start + k * 900)).copied())
@@ -202,25 +276,9 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
     // PV forecast per slot.
     let weather = fetch_weather(req)?;
     let mut pv: Vec<Option<f64>> = (0..horizon)
-        .map(|i| {
-            let t = start + i as i64 * step;
-            let ws = weather_for(&weather, t, step)?;
-            let mut total = 0.0;
-            for w in &ws {
-                let sun = sun_position((w.start + 450) as f64, req.location.lat, req.location.lon);
-                let doy = DateTime::from_timestamp(w.start, 0).map_or(1, |d| d.ordinal());
-                let wx = Weather {
-                    ghi: w.ghi,
-                    dni: w.dni,
-                    dhi: w.dhi,
-                    temp_air: w.temp_air,
-                    wind_speed: w.wind_speed,
-                };
-                total += system_ac_power(&req.planes, sun, wx, doy);
-            }
-            Some(total / ws.len() as f64)
-        })
+        .map(|i| slot_pv(req, &weather, start + i as i64 * step, step))
         .collect();
+    let pv_days = pv_days(req, &weather, tz, start, step);
     // Plan as far as the weather reaches: a tail model that is missing must
     // not cost the plan for the days the other models do cover.
     let day_slots = (24 * 3600 / step) as usize;
@@ -353,6 +411,10 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
             mode_now: slots.first().map(|s| s.mode.clone()).unwrap_or_default(),
             cost: plan.cost,
             pv_kwh_24h: kwh(&|s| s.pv_w),
+            pv_kwh_today: pv_days.today,
+            pv_kwh_today_remaining: pv_days.today_remaining,
+            pv_kwh_tomorrow: pv_days.tomorrow,
+            pv_kwh_day_after: pv_days.day_after,
             load_kwh_24h: kwh(&|s| s.load_w),
             terminal_value_per_kwh: terminal,
         },
@@ -512,6 +574,166 @@ mod tests {
         let mut bad = req;
         bad.timezone = "Mars/Olympus".into();
         assert!(plan(&bad).is_err());
+    }
+
+    /// serde_json writes NaN and infinity as null: no nulls in a plan, except
+    /// the day figures that are null by design when the weather doesn't cover a day.
+    fn assert_no_nan(out: &str) {
+        let mut v: serde_json::Value = serde_json::from_str(out).unwrap();
+        for k in [
+            "pv_kwh_today",
+            "pv_kwh_today_remaining",
+            "pv_kwh_tomorrow",
+            "pv_kwh_day_after",
+        ] {
+            v["summary"].as_object_mut().unwrap().remove(k);
+        }
+        assert!(!v.to_string().contains("null"), "{out}");
+    }
+
+    /// Clear-sky-ish weather every quarter hour in `[from, to)`.
+    fn clear_sky(from: i64, to: i64) -> HashMap<i64, WeatherSlot> {
+        let mut out = HashMap::new();
+        let mut t = from - from.rem_euclid(900);
+        while t < to {
+            let s = sun_position((t + 450) as f64, 52.0, 5.0);
+            let cz = s.zenith.to_radians().cos().max(0.0);
+            let dni = if cz > 0.0 {
+                800.0 * (-0.15 / cz.max(0.05)).exp()
+            } else {
+                0.0
+            };
+            out.insert(
+                t,
+                WeatherSlot {
+                    start: t,
+                    ghi: dni * cz + 80.0 * cz,
+                    dni,
+                    dhi: 80.0 * cz,
+                    temp_air: 12.0,
+                    wind_speed: 3.0,
+                },
+            );
+            t += 900;
+        }
+        out
+    }
+
+    const AMS: Tz = chrono_tz::Europe::Amsterdam;
+
+    fn local(y: i32, m: u32, d: u32, h: u32, min: u32) -> i64 {
+        AMS.with_ymd_and_hms(y, m, d, h, min, 0)
+            .earliest()
+            .unwrap()
+            .timestamp()
+    }
+
+    /// Energy of the slots in `[a, b)` summed by hand from `slot_pv`.
+    fn by_hand(req: &PlanRequest, w: &HashMap<i64, WeatherSlot>, a: i64, b: i64) -> f64 {
+        (0..)
+            .map(|k| a + k * 900)
+            .take_while(|t| *t < b)
+            .map(|t| slot_pv(req, w, t, 900).unwrap_or(0.0) * 0.25)
+            .sum::<f64>()
+            / 1000.0
+    }
+
+    #[test]
+    fn pv_days_sum_the_local_days() {
+        let now = local(2026, 6, 10, 13, 7);
+        let req = request(now);
+        let start = now - now.rem_euclid(900);
+        let w = clear_sky(local(2026, 6, 9, 0, 0), local(2026, 6, 14, 0, 0));
+        let d = pv_days(&req, &w, AMS, start, 900);
+        let close = |a: Option<f64>, b: f64| (a.unwrap() - b).abs() < 1e-9;
+        assert!(close(
+            d.today,
+            by_hand(&req, &w, local(2026, 6, 10, 0, 0), local(2026, 6, 11, 0, 0))
+        ));
+        assert!(close(
+            d.today_remaining,
+            by_hand(&req, &w, start, local(2026, 6, 11, 0, 0))
+        ));
+        assert!(close(
+            d.tomorrow,
+            by_hand(&req, &w, local(2026, 6, 11, 0, 0), local(2026, 6, 12, 0, 0))
+        ));
+        assert!(close(
+            d.day_after,
+            by_hand(&req, &w, local(2026, 6, 12, 0, 0), local(2026, 6, 13, 0, 0))
+        ));
+        // Today is what has passed plus what remains, and a clear June day yields something.
+        let past = by_hand(&req, &w, local(2026, 6, 10, 0, 0), start);
+        assert!(close(d.today, past + d.today_remaining.unwrap()));
+        assert!(d.today.unwrap() > 5.0 && d.today_remaining.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn pv_days_around_local_midnight() {
+        let w = clear_sky(local(2026, 6, 9, 0, 0), local(2026, 6, 14, 0, 0));
+        let before = local(2026, 6, 10, 23, 50);
+        let b = pv_days(&request(before), &w, AMS, before - before.rem_euclid(900), 900);
+        assert_eq!(b.today_remaining, Some(0.0), "the sun is down");
+        let after = local(2026, 6, 11, 0, 5);
+        let a = pv_days(&request(after), &w, AMS, after - after.rem_euclid(900), 900);
+        assert_eq!(a.today, b.tomorrow, "after midnight, tomorrow became today");
+        assert_eq!(
+            a.today, a.today_remaining,
+            "nothing of the new day has passed in the dark"
+        );
+    }
+
+    #[test]
+    fn pv_days_on_dst_days_have_23_and_25_hours() {
+        for (y, m, d, slots) in [(2026, 3, 29, 92), (2026, 10, 25, 100)] {
+            let (a, b) = (local(y, m, d, 0, 0), local(y, m, d + 1, 0, 0));
+            assert_eq!((b - a) / 900, slots);
+            let now = a + 600;
+            let req = request(now);
+            let w = clear_sky(a - 86_400, b + 3 * 86_400);
+            let days = pv_days(&req, &w, AMS, now - now.rem_euclid(900), 900);
+            assert!(
+                (days.today.unwrap() - by_hand(&req, &w, a, b)).abs() < 1e-9,
+                "{y}-{m}-{d}"
+            );
+        }
+    }
+
+    #[test]
+    fn pv_days_without_weather() {
+        let now = local(2026, 6, 10, 13, 7);
+        let req = request(now);
+        let start = now - now.rem_euclid(900);
+        // Weather from UTC midnight: the local hour before it is dark, so today still counts.
+        let utc_midnight = DateTime::from_timestamp(start, 0)
+            .unwrap()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let w = clear_sky(utc_midnight, local(2026, 6, 12, 15, 0));
+        let d = pv_days(&req, &w, AMS, start, 900);
+        assert!(d.today.is_some() && d.tomorrow.is_some());
+        // The weather ends in the afternoon of the day after: that day is unknown.
+        assert_eq!(d.day_after, None);
+        // No weather at all: nothing is known, but nothing panics either.
+        let none = pv_days(&req, &HashMap::new(), AMS, start, 900);
+        assert_eq!(
+            (none.today, none.today_remaining, none.tomorrow, none.day_after),
+            (None, None, None, None)
+        );
+    }
+
+    #[test]
+    fn plan_summary_has_the_day_figures() {
+        let now = 1_781_000_000;
+        let resp = plan(&request(now)).unwrap();
+        // The test weather starts now (a June morning) and covers two days: the rest
+        // of today and tomorrow are known; the whole of today and the day after are not.
+        let s = &resp.summary;
+        assert!(s.pv_kwh_today_remaining.unwrap() > 0.0 && s.pv_kwh_tomorrow.unwrap() > 0.0);
+        assert_eq!((s.pv_kwh_today, s.pv_kwh_day_after), (None, None));
     }
 
     fn ws(start: i64, ghi: f64) -> WeatherSlot {
@@ -728,8 +950,7 @@ mod tests {
                 p.import = if h % 2 == 0 { -0.20 } else { 0.0 };
             }
             let out = crate::plan_json(&serde_json::to_string(&r).unwrap()).unwrap();
-            // serde_json writes NaN and infinity as null.
-            assert!(!out.contains("null"), "{out}");
+            assert_no_nan(&out);
             let resp: PlanResponse = serde_json::from_str(&out).unwrap();
             assert_eq!(resp.slots.len(), 96);
             assert!(resp.slots.iter().all(|s| s.grid_w >= -1e-9), "export limit 0");
@@ -855,7 +1076,7 @@ mod tests {
         r.tariff = LinearTariff { a: 0.0, b: 0.30 };
         r.export = ExportTariff { a: 0.0, b: 0.30 };
         let out = crate::plan_json(&serde_json::to_string(&r).unwrap()).unwrap();
-        assert!(!out.contains("null"), "{out}");
+        assert_no_nan(&out);
         let resp: PlanResponse = serde_json::from_str(&out).unwrap();
         assert!(resp.slots.iter().any(|s| s.price_known) && resp.slots.iter().any(|s| !s.price_known));
         for s in &resp.slots {
@@ -1049,6 +1270,10 @@ mod tests {
                 "load_kwh_24h",
                 "mode_now",
                 "pv_kwh_24h",
+                "pv_kwh_day_after",
+                "pv_kwh_today",
+                "pv_kwh_today_remaining",
+                "pv_kwh_tomorrow",
                 "terminal_value_per_kwh"
             ]
         );

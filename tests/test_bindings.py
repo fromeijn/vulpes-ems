@@ -309,6 +309,8 @@ def test_plan_ha_offline():
     assert plan["planned_at"] == NOW
     assert plan["inputs"] == {"load_hours": 24 * 7 - 1, "known_price_slots": 24, "wholesale_hours": 0}
     assert all(":" not in s["mode"] and isinstance(s["pv_off"], bool) for s in plan["slots"])
+    for key in ("pv_kwh_today", "pv_kwh_today_remaining", "pv_kwh_tomorrow", "pv_kwh_day_after"):
+        assert key in plan["summary"], key
     with pytest.raises(ValueError, match="battery SOC from sensor.soc is unavailable"):
         vulpes_ems.plan_ha(json.dumps({**request, "soc_state": "unavailable"}))
     with pytest.raises(ValueError, match="planning failed"):

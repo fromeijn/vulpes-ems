@@ -18,6 +18,8 @@ For a hybrid inverter with the battery on the DC side, the useful limit is the m
 
 The model runs on 15-minute weather. Open-Meteo radiation values are averages over the *preceding* 15 minutes, so they are shifted to the start of their interval. Hourly results are means of four sub-slots.
 
+**Daily figures.** The plan reports the PV energy of today (the whole local day, including the hours that have passed), the rest of today from the current slot, tomorrow and the day after, from the same model and weather. They are what the panels could produce, before curtailment or export limits. A quarter hour without weather counts as zero when the sun is down (the forecast starts at UTC midnight, which can be after local midnight); with the sun up, that day has no figure. Days follow the configured time zone, so they have 23 or 25 hours at the DST changes.
+
 The building blocks are tested against pvlib reference values (`crates/vulpes-solar/tests/pvlib_reference.rs`):
 - solar position: < 0.02° from NREL SPA;
 - Perez, extraterrestrial irradiance, IAM and Faiman: exact to rounding.
