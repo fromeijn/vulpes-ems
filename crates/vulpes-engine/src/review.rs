@@ -6,7 +6,7 @@
 //! and the counterfactuals run through [`vulpes_opt::step`], the one slot
 //! physics shared with the optimizer and the CLI replay.
 
-use crate::history::open;
+use crate::history::{LEAD_DAY_AHEAD_S, LEAD_LATEST_S, open};
 use crate::{Error, ExportTariff, Result};
 use chrono::{DateTime, Days, NaiveDate, TimeZone};
 use chrono_tz::Tz;
@@ -29,10 +29,6 @@ pub const GIVE_UP_S: i64 = 48 * HOUR;
 pub const SOC_TRACKING_LIMIT_PCT: f64 = 5.0;
 /// SOC tracking needs this many scored hours.
 pub const MIN_SOC_HOURS: usize = 12;
-/// "1 hour ahead" and "24 hours ahead": the first plan of the hour before
-/// is issued just after it starts, so the lead is a slot short of the full hour.
-const LEAD_LATEST_S: i64 = HOUR - SLOT_S;
-const LEAD_DAY_AHEAD_S: i64 = 24 * HOUR - SLOT_S;
 
 const META_THROUGH: &str = "review.finalised_through";
 const META_SAVED_ACTUAL: &str = "review.total_saved_actual";

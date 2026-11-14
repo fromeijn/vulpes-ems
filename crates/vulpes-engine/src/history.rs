@@ -20,6 +20,10 @@ const SLOT_S: i64 = 900;
 pub const FORECAST_LEAD_H: i64 = 48;
 /// Vulpes's own forecasts are kept this long (days); the review needs 30.
 pub const FORECAST_KEEP_DAYS: i64 = 35;
+/// "1 hour ahead" and "24 hours ahead": the first plan of the hour before is
+/// issued just after it starts, so the lead is a slot short of the full hour.
+pub const LEAD_LATEST_S: i64 = 3600 - SLOT_S;
+pub const LEAD_DAY_AHEAD_S: i64 = 24 * 3600 - SLOT_S;
 /// Measured series and slot records are kept this long (days): enough for a yearly replay.
 pub const HISTORY_KEEP_DAYS: i64 = 400;
 /// Measured hourly series are rewritten this far back on each tick, so late
@@ -301,8 +305,15 @@ pub struct ExportResponse {
     pub plan_slots: Vec<PlanSlotRecord>,
     /// Series key → `[start, value]`, with the series' step.
     pub samples: BTreeMap<String, Vec<(i64, f64)>>,
-    /// Forecast variable → `[valid, issued, value]`.
-    pub forecasts: BTreeMap<String, Vec<(i64, i64, f64)>>,
+    /// Forecast variable → the forecasts the review scores, `[valid, value]`
+    /// at about a day and an hour ahead (the file keeps every issue).
+    pub forecasts: BTreeMap<String, ForecastLeads>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ForecastLeads {
+    pub day_ahead: Vec<(i64, f64)>,
+    pub latest: Vec<(i64, f64)>,
 }
 
 /// Read a period of history back.
@@ -322,12 +333,14 @@ pub fn export(store: &Store, req: &ExportRequest) -> Result<ExportResponse> {
     }
     let mut forecasts = BTreeMap::new();
     for var in ["pv_w", "load_w", "import_price", "price_known"] {
-        let rows = store
-            .forecasts_range(keys::VULPES_SOURCE, var, req.from, req.to)?
-            .into_iter()
-            .map(|p| (p.valid_ts, p.issued_ts, p.value))
-            .collect();
-        forecasts.insert(var.to_string(), rows);
+        let at = |lead| store.forecasts_at_lead(keys::VULPES_SOURCE, var, req.from, req.to, lead);
+        forecasts.insert(
+            var.to_string(),
+            ForecastLeads {
+                day_ahead: at(LEAD_DAY_AHEAD_S)?,
+                latest: at(LEAD_LATEST_S)?,
+            },
+        );
     }
     Ok(ExportResponse {
         from: req.from,
@@ -613,7 +626,11 @@ mod tests {
         .unwrap();
         assert_eq!(e.plan_slots.len(), 1);
         assert_eq!(e.samples[keys::SOC], [(T0, 55.0)]);
-        assert_eq!(e.forecasts["pv_w"], [(T0 + H, T0 + 20, 1000.0)]);
+        assert_eq!(e.forecasts["pv_w"].latest, [(T0 + H, 1000.0)]);
+        assert!(
+            e.forecasts["pv_w"].day_ahead.is_empty(),
+            "issued only an hour ahead"
+        );
         assert!(
             e.samples[keys::GRID_IMPORT].is_empty(),
             "measured energy is before the period"

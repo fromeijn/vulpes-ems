@@ -4,6 +4,8 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 
 ## Unreleased
 
+The integration now judges itself: a Status sensor, repair issues and performance sensors, from a history file Vulpes keeps (see `docs/monitoring.md`). The performance figures appear once three complete days are recorded. All of the integration's logic moved into the Rust core; the integration and the `vulpes-ems` wheel must be updated together, as always. CLI stores from earlier versions keep working (a new table is added the first time a newer CLI opens them, and older CLIs ignore it).
+
 ### Added
 
 - **History file:** Vulpes keeps its own history in `<config>/vulpes_ems/<entry id>/vulpes.db`: the forecasts as they were made (PV, load and price, up to 48 hours ahead), the planned mode and prices of each quarter hour, whether control followed the plan, the state of charge, and hourly energy, load and wholesale prices. Forecasts are kept 35 days, the rest 400 days. It is the same format as the CLI's store, so a copy works with `vulpes-cli eval-*` and `replay`. It is removed with the integration. The coming performance sensors are computed from it.
