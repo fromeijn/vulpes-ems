@@ -1226,6 +1226,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "vulpes-ha"
+version = "0.4.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "vulpes-engine",
+]
+
+[[package]]
 name = "vulpes-load"
 version = "0.4.0"
 dependencies = [
@@ -1257,6 +1269,7 @@ dependencies = [
  "pyo3",
  "vulpes-core",
  "vulpes-engine",
+ "vulpes-ha",
  "vulpes-opt",
  "vulpes-sources",
 ]

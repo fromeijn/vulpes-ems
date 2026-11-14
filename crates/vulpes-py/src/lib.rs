@@ -29,6 +29,31 @@ fn calibrate_solar(py: Python<'_>, request_json: String) -> PyResult<String> {
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Run a Home Assistant adapter op (`vulpes_ha::OPS`) on a JSON request;
+/// returns its JSON result. Pure and fast (microseconds), so it keeps the GIL.
+#[pyfunction]
+fn ha(op: &str, request_json: &str) -> PyResult<String> {
+    vulpes_ha::call(op, request_json).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Plan from Home Assistant inputs (settings, SOC state, price attributes,
+/// energy statistics); returns the plan with Vulpes modes. Runs without the
+/// GIL (it may fetch weather).
+#[pyfunction]
+fn plan_ha(py: Python<'_>, request_json: String) -> PyResult<String> {
+    py.allow_threads(|| vulpes_ha::plan_ha_json(&request_json))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Calibrate the solar planes from Home Assistant statistics; returns the
+/// result and the planes it is based on. Runs without the GIL (it fetches
+/// archived weather).
+#[pyfunction]
+fn calibrate_ha(py: Python<'_>, request_json: String) -> PyResult<String> {
+    py.allow_threads(|| vulpes_ha::calibrate_ha_json(&request_json))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 /// Hourly NL day-ahead wholesale prices `(hour_start, EUR/kWh excl. VAT)` from
 /// EnergyZero for an inclusive date range `YYYY-MM-DD`.
 #[pyfunction]
@@ -49,5 +74,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(plan, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate_solar, m)?)?;
     m.add_function(wrap_pyfunction!(energyzero_hourly, m)?)?;
+    m.add_function(wrap_pyfunction!(ha, m)?)?;
+    m.add_function(wrap_pyfunction!(plan_ha, m)?)?;
+    m.add_function(wrap_pyfunction!(calibrate_ha, m)?)?;
     Ok(())
 }

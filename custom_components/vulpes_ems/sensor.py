@@ -21,10 +21,9 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from . import VulpesConfigEntry
-from .const import DOMAIN
-from .control import STATES as CONTROL_STATES, state_of
+from .const import CONF_MODE_ENTITY, DOMAIN
 from .coordinator import VulpesCoordinator
-from .modes import CONF_MODE_ENTITY, enabled_modes
+from .core import C, ha
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -135,7 +134,7 @@ class VulpesSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_device_info = device_info(entry)
         if description.device_class == SensorDeviceClass.ENUM:
-            self._attr_options = enabled_modes(coordinator.cfg)
+            self._attr_options = ha("enabled_modes", cfg=coordinator.cfg)
 
     @property
     def native_value(self) -> Any:
@@ -183,7 +182,7 @@ class ControlSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
     _attr_has_entity_name = True
     _attr_translation_key = "control"
     _attr_device_class = SensorDeviceClass.ENUM
-    _attr_options = CONTROL_STATES
+    _attr_options = C["control_states"]
 
     def __init__(self, coordinator: VulpesCoordinator, entry: VulpesConfigEntry) -> None:
         super().__init__(coordinator)
@@ -196,7 +195,8 @@ class ControlSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
 
     @property
     def native_value(self) -> str:
-        return state_of(self.coordinator.active, self.coordinator.last_command, self.coordinator.last_error)
+        c = self.coordinator
+        return ha("control_state", active=c.active, last=c.last_command, error=c.last_error)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

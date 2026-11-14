@@ -29,10 +29,16 @@ def test_options_menu_lists_every_section():
     assert list(STRINGS["options"]["step"]["init"]["menu_options"]) == sections
 
 
+def _rust_error_keys() -> set[str]:
+    """The `ERROR_KEYS` the Rust checks can return (crates/vulpes-ha/src/settings.rs)."""
+    source = (Path(__file__).parents[1] / "crates" / "vulpes-ha" / "src" / "settings.rs").read_text()
+    block = re.search(r"pub const ERROR_KEYS: \[&str; \d+\] = \[(.*?)\];", source, re.S).group(1)
+    return set(re.findall(r'"(\w+)"', block))
+
+
 def test_every_error_and_abort_has_a_string():
-    errors = set(re.findall(r'errors\[[^\]]+\] = "(\w+)"', FLOW)) | {"no_modes"}
-    checks = (_dir / "setup_checks.py").read_text()
-    errors |= set(re.findall(r'\{"base": "(\w+)"\}', checks)) | {"charge_w_too_high", "discharge_w_too_high"}
+    errors = set(re.findall(r'errors\[[^\]]+\] = "(\w+)"', FLOW)) | _rust_error_keys()
+    assert {"no_modes", "soc_range", "charge_w_too_high", "invalid_planes"} <= errors
     aborts = set(re.findall(r'async_abort\(reason="(\w+)"\)', FLOW))
     for section in ("config", "options"):
         assert errors <= STRINGS[section]["error"].keys(), (section, errors - STRINGS[section]["error"].keys())

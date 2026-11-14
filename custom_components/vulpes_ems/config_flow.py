@@ -6,7 +6,6 @@ sections, each saved on its own.
 
 from __future__ import annotations
 
-from datetime import timedelta
 import json
 from typing import Any
 
@@ -18,77 +17,49 @@ from homeassistant.helpers import selector
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_ARRAY_COUNT,
     CONF_BATTERY_CHARGE,
     CONF_BATTERY_DISCHARGE,
     CONF_CAPACITY_KWH,
     CONF_CHARGE_EFF,
+    CONF_CHARGE_W,
+    CONF_CONTROL_SCRIPT,
+    CONF_DIRECTION,
     CONF_DISCHARGE_EFF,
+    CONF_DISCHARGE_W,
     CONF_EXPORT_A,
     CONF_EXPORT_B,
+    CONF_EXPORT_BLOCK,
     CONF_GRID_EXPORT,
     CONF_GRID_IMPORT,
+    CONF_INVERTER_W,
+    CONF_KWP,
     CONF_MAX_CHARGE_W,
     CONF_MAX_DISCHARGE_W,
     CONF_MAX_EXPORT_W,
     CONF_MAX_IMPORT_W,
     CONF_MAX_SOC,
     CONF_MIN_SOC,
+    CONF_MODE_ENTITY,
+    CONF_MODE_MAP,
     CONF_PLANES,
+    CONF_POWER_CONTROL,
+    CONF_POWER_ENTITY,
     CONF_PRICE_ENTITY,
+    CONF_PV_CURTAIL,
     CONF_SOC_ENTITY,
     CONF_SOLAR_ENERGY,
+    CONF_SOLAR_SETUP,
     CONF_TARIFF_A,
     CONF_TARIFF_B,
+    CONF_TILT,
     CONF_WEAR_COST,
     CONF_WHOLESALE_SOURCE,
     DOMAIN,
-    LOAD_HISTORY_DAYS,
     WHOLESALE_SOURCES,
 )
-from .coordinator import async_energy_changes
-from .modes import (
-    CONF_CHARGE_W,
-    CONF_CONTROL_SCRIPT,
-    CONF_DISCHARGE_W,
-    CONF_EXPORT_BLOCK,
-    CONF_MODE_ENTITY,
-    CONF_MODE_MAP,
-    CONF_POWER_CONTROL,
-    CONF_PV_CURTAIL,
-    MODES,
-    POWER_CONTROLS,
-    enabled_modes,
-    settings,
-)
-from .setup_checks import (
-    check_battery,
-    check_modes,
-    check_tariff,
-    dashboard_defaults,
-    duplicate_statistics,
-    energy_ids,
-    load_groups,
-    load_series,
-    parse_price_attributes,
-    soc_value,
-)
-from .solar_setup import (
-    CONF_ARRAY_COUNT,
-    CONF_DIRECTION,
-    CONF_INVERTER_W,
-    CONF_KWP,
-    CONF_POWER_ENTITY,
-    CONF_SOLAR_SETUP,
-    CONF_TILT,
-    DEFAULT_ARRAY,
-    DIRECTIONS,
-    MAX_ARRAYS,
-    apply_proposal,
-    fits_form,
-    form_defaults,
-    plane_from_array,
-    summarize,
-)
+from .coordinator import async_energy_changes, history_start
+from .core import C, ha, stat_rows
 
 _SENSORS = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", multiple=True))
 
@@ -108,7 +79,7 @@ async def energy_dashboard_defaults(hass: HomeAssistant) -> dict[str, Any]:
         prefs = (await async_get_manager(hass)).data
     except Exception:  # noqa: BLE001 - energy is optional
         prefs = None
-    return dashboard_defaults(prefs)
+    return ha("dashboard_defaults", prefs=prefs)
 
 
 def _sources_schema(d: dict[str, Any]) -> vol.Schema:
@@ -170,10 +141,10 @@ def _mode_options(hass: HomeAssistant, entity_id: str | None) -> list[str]:
 def _modes_schema(d: dict[str, Any]) -> vol.Schema:
     fields: dict[Any, Any] = {
         vol.Required(CONF_POWER_CONTROL, default=d.get(CONF_POWER_CONTROL, "grid_setpoint")): selector.SelectSelector(
-            selector.SelectSelectorConfig(options=POWER_CONTROLS, translation_key=CONF_POWER_CONTROL)
+            selector.SelectSelectorConfig(options=C["power_controls"], translation_key=CONF_POWER_CONTROL)
         ),
     }
-    for key, default in MODES.items():
+    for key, default in C["modes"]:
         fields[vol.Required(key, default=d.get(key, default))] = selector.BooleanSelector()
         if key == "charge":
             fields[vol.Required(CONF_CHARGE_W, default=d.get(CONF_CHARGE_W, 3000))] = _num(0, 50000, 1, "W")
@@ -198,19 +169,6 @@ def _compare_schema(modes: list[str], options: list[str], current: dict[str, str
     )
 
 
-def parse_planes(text: str) -> list[dict[str, Any]]:
-    """Accept a list of plane parameter objects, or `calibrate-solar` output."""
-    data = json.loads(text)
-    if isinstance(data, dict):
-        data = [v["params"] if "params" in v else v for v in data.values()]
-    if not isinstance(data, list) or not data:
-        raise ValueError("expected a non-empty list of planes")
-    for p in data:
-        for key in ("azimuth", "tilt", "pdc0", "ac_max"):
-            float(p[key])
-    return data
-
-
 def _solar_json_schema(d: dict[str, Any]) -> vol.Schema:
     default = json.dumps(d.get(CONF_PLANES, []), indent=1) if d.get(CONF_PLANES) else ""
     return vol.Schema(
@@ -225,7 +183,7 @@ def _solar_json_schema(d: dict[str, Any]) -> vol.Schema:
 def _solar_system_schema(count: int, inverter_w: float) -> vol.Schema:
     return vol.Schema(
         {
-            vol.Required(CONF_ARRAY_COUNT, default=count): _num(1, MAX_ARRAYS, 1),
+            vol.Required(CONF_ARRAY_COUNT, default=count): _num(1, C["max_arrays"], 1),
             vol.Required(CONF_INVERTER_W, default=inverter_w): _num(100, 100000, 1, "W"),
         }
     )
@@ -236,7 +194,7 @@ def _solar_array_schema(d: dict[str, Any]) -> vol.Schema:
         {
             vol.Required(CONF_DIRECTION, default=str(d.get(CONF_DIRECTION, "s"))): selector.SelectSelector(
                 selector.SelectSelectorConfig(
-                    options=list(DIRECTIONS),
+                    options=C["directions"],
                     custom_value=True,
                     mode=selector.SelectSelectorMode.DROPDOWN,
                     translation_key=CONF_DIRECTION,
@@ -270,31 +228,21 @@ class _Steps:
 
     async def _validate_sources(self, d: dict[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
         """Errors and placeholders for the source step, checked against live states and statistics."""
-        errors: dict[str, str] = {}
-        placeholders = {"statistic": ""}
         soc = self.hass.states.get(d[CONF_SOC_ENTITY])
-        if soc_value(soc.state if soc else None) is None:
-            errors[CONF_SOC_ENTITY] = "soc_unavailable"
         price = self.hass.states.get(d[CONF_PRICE_ENTITY])
-        unit = price.attributes.get("unit_of_measurement") if price else None
-        if not price or not parse_price_attributes(dict(price.attributes), unit):
-            errors[CONF_PRICE_ENTITY] = "no_prices"
-        if not d.get(CONF_GRID_IMPORT):
-            errors[CONF_GRID_IMPORT] = "grid_import_required"
-            return errors, placeholders
-        if duplicates := duplicate_statistics(d):
-            errors["base"] = "duplicate_statistic"
-            placeholders["statistic"] = ", ".join(duplicates)
-            return errors, placeholders
-        ids = energy_ids(d)
-        start = (dt_util.utcnow() - timedelta(days=LOAD_HISTORY_DAYS)).replace(minute=0, second=0, microsecond=0)
-        stats = await async_energy_changes(self.hass, set(ids), start)
-        if empty := [i for i in ids if not stats.get(i)]:
-            errors["base"] = "no_statistics"
-            placeholders["statistic"] = ", ".join(empty)
-        elif not load_series(load_groups(d), stats):
-            errors["base"] = "no_complete_hours"
-        return errors, placeholders
+        request = {
+            "cfg": d,
+            "soc_state": soc.state if soc else None,
+            "price_attributes": list(price.attributes.items()) if price else None,
+            "price_unit": price.attributes.get("unit_of_measurement") if price else None,
+            "timezone": str(self.hass.config.time_zone),
+        }
+        result = ha("check_sources", **request)
+        if result["fetch"]:
+            start = history_start(dt_util.utcnow(), C["load_history_days"])
+            stats = await async_energy_changes(self.hass, set(result["fetch"]), start)
+            result = ha("check_sources", **request, stats=stat_rows(stats, result["fetch"], "change"))
+        return result["errors"], result["placeholders"]
 
     async def _sources(
         self, step_id: str, user_input: dict[str, Any] | None, defaults: dict[str, Any]
@@ -320,7 +268,7 @@ class _Steps:
         defaults = self.data
         if user_input is not None:
             candidate = {**self.data, **user_input}
-            errors = check_battery(candidate)
+            errors = ha("check_battery", cfg=candidate)
             if not errors:
                 self.data = candidate
                 return await self._next("battery")
@@ -334,7 +282,7 @@ class _Steps:
         defaults = self.data
         if user_input is not None:
             candidate = {**self.data, **user_input}
-            errors = check_tariff(candidate)
+            errors = ha("check_tariff", cfg=candidate)
             if not errors:
                 self.data = candidate
                 return await self._next("tariff")
@@ -352,12 +300,8 @@ class _Steps:
             candidate = {k: v for k, v in self.data.items() if k not in optional}
             candidate.update(user_input)
             mode_entity = candidate.get(CONF_MODE_ENTITY)
-            if not enabled_modes(candidate):
-                errors["base"] = "no_modes"
-            else:
-                errors = check_modes(candidate)
-            if not errors and mode_entity and not _mode_options(self.hass, mode_entity):
-                errors[CONF_MODE_ENTITY] = "no_mode_options"
+            options = _mode_options(self.hass, mode_entity) if mode_entity else None
+            errors = ha("check_modes", cfg=candidate, mode_options=options)
             if not errors:
                 self.data = candidate
                 if mode_entity:
@@ -373,9 +317,9 @@ class _Steps:
         options = _mode_options(self.hass, self.data.get(CONF_MODE_ENTITY))
         if not options:  # the entity lost its options after the modes step
             return self.async_abort(reason="no_mode_options")  # type: ignore[attr-defined]
-        modes = enabled_modes(self.data)
+        modes = ha("enabled_modes", cfg=self.data)
         if user_input is not None:
-            self.data[CONF_MODE_MAP] = {k: v for k, v in user_input.items() if k in modes and v}
+            self.data[CONF_MODE_MAP] = ha("mode_map", cfg=self.data, input=user_input)
             return await self._next("compare")
         return self.async_show_form(  # type: ignore[attr-defined]
             step_id="compare",
@@ -394,34 +338,34 @@ class _Steps:
         proposal = calibration.proposal if calibration else None
         if proposal:
             options.insert(0, "solar_apply")
-            placeholders["calibration"] = "\n\n**Calibration result**\n\n" + summarize(
-                self.data.get(CONF_PLANES, []), proposal
+            placeholders["calibration"] = "\n\n**Calibration result**\n\n" + ha(
+                "summarize", planes=self.data.get(CONF_PLANES, []), result=proposal
             )
         return self.async_show_menu(  # type: ignore[attr-defined]
             step_id="solar", menu_options=options, description_placeholders=placeholders
         )
 
     async def async_step_solar_system(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        count, inverter_w, arrays = form_defaults(self.data.get(CONF_PLANES, []))
+        defaults = ha("form_defaults", planes=self.data.get(CONF_PLANES, []))
         if user_input is not None:
             self._array_count = int(user_input[CONF_ARRAY_COUNT])
             self._inverter_w = float(user_input[CONF_INVERTER_W])
-            self._prefill = arrays
+            self._prefill = defaults["arrays"]
             self._new_planes: list[dict[str, Any]] = []
             return await self.async_step_solar_array()
         return self.async_show_form(  # type: ignore[attr-defined]
-            step_id="solar_system", data_schema=_solar_system_schema(count, inverter_w)
+            step_id="solar_system", data_schema=_solar_system_schema(defaults["count"], defaults["inverter_w"])
         )
 
     async def async_step_solar_array(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         i = len(self._new_planes)
         planes = self.data.get(CONF_PLANES, [])
-        existing = planes[i] if fits_form(planes) and i < len(planes) else None
-        defaults = self._prefill[i] if i < len(self._prefill) else DEFAULT_ARRAY
+        existing = planes[i] if ha("fits_form", planes=planes) and i < len(planes) else None
+        defaults = self._prefill[i] if i < len(self._prefill) else C["default_array"]
         errors: dict[str, str] = {}
         if user_input is not None:
             try:
-                plane = plane_from_array(user_input, self._inverter_w, existing)
+                plane = ha("plane_from_array", array=user_input, inverter_w=self._inverter_w, existing=existing)
             except ValueError:
                 errors[CONF_DIRECTION] = "invalid_direction"
                 defaults = user_input
@@ -443,8 +387,8 @@ class _Steps:
         errors: dict[str, str] = {}
         if user_input is not None:
             try:
-                self.data[CONF_PLANES] = parse_planes(user_input[CONF_PLANES])
-            except (ValueError, KeyError, TypeError):
+                self.data[CONF_PLANES] = ha("parse_planes", text=user_input[CONF_PLANES])
+            except ValueError:
                 errors[CONF_PLANES] = "invalid_planes"
             else:
                 self.data[CONF_SOLAR_SETUP] = "json"
@@ -458,7 +402,7 @@ class _Steps:
         proposal = calibration.proposal if calibration else None
         if not proposal:
             return self.async_abort(reason="no_calibration")  # type: ignore[attr-defined]
-        self.data[CONF_PLANES] = apply_proposal(self.data.get(CONF_PLANES, []), proposal)
+        self.data[CONF_PLANES] = ha("apply_proposal", planes=self.data.get(CONF_PLANES, []), result=proposal)
         await calibration.async_mark_applied(self.data[CONF_PLANES])
         return self._finish()
 
@@ -466,7 +410,7 @@ class _Steps:
 class VulpesEmsConfigFlow(_Steps, ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Vulpes EMS."""
 
-    VERSION = 3
+    VERSION = 3  # core.C["config_version"]; async_migrate_entry migrates older entries
 
     def __init__(self) -> None:
         self.data: dict[str, Any] = {}
@@ -506,7 +450,7 @@ class VulpesEmsOptionsFlow(_Steps, OptionsFlow):
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if not self.data:
-            self.data = settings(self.config_entry.data, self.config_entry.options)
+            self.data = ha("settings", data=dict(self.config_entry.data), options=dict(self.config_entry.options))
         return self.async_show_menu(step_id="init", menu_options=OPTIONS_MENU)
 
     async def async_step_sources(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:

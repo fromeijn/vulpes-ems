@@ -3,7 +3,8 @@
 By default the integration runs in shadow mode: it only reads Home Assistant
 data and publishes its own entities with the plan. Control is handed over
 explicitly: the user picks a control script and turns the Active switch on,
-after which Vulpes runs that script every 15 minutes (see `control.py`).
+after which Vulpes runs that script every 15 minutes (see `docs/control.md`).
+All logic lives in the Rust core (`vulpes_ems`); this package is a thin shell.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from homeassistant.core import HomeAssistant
 
 from .calibration import SolarCalibration
 from .coordinator import VulpesCoordinator
-from .modes import migrate_v1, migrate_v2
+from .core import C, ha
 
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON, Platform.SWITCH]
 
@@ -39,19 +40,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: VulpesConfigEntry) -> bo
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: VulpesConfigEntry) -> bool:
-    """Version 1 (0.1.0) had user-named modes; version 2 had a net metering switch."""
-    if entry.version > 3:
+    """Bring older settings to the current version (1: user-named modes; 2: a net metering switch)."""
+    current = C["config_version"]
+    if entry.version > current:
         return False
-    if entry.version == 1:
+    if entry.version < current:
+        old = entry.version
         hass.config_entries.async_update_entry(
-            entry, data=migrate_v1(dict(entry.data)), options=migrate_v1(dict(entry.options)), version=2
+            entry,
+            data=ha("migrate", cfg=dict(entry.data), version=old),
+            options=ha("migrate", cfg=dict(entry.options), version=old),
+            version=current,
         )
-        _LOGGER.info("Migrated Vulpes EMS settings to Vulpes modes")
-    if entry.version == 2:
-        hass.config_entries.async_update_entry(
-            entry, data=migrate_v2(dict(entry.data)), options=migrate_v2(dict(entry.options)), version=3
-        )
-        _LOGGER.info("Migrated Vulpes EMS settings: net metering is now set through the export tariff")
+        _LOGGER.info("Migrated Vulpes EMS settings from version %d to %d", old, current)
     return True
 
 

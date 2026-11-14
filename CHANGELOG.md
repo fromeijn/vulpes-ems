@@ -10,6 +10,7 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 
 ### Fixed
 
+- **Price times without a time zone** in the price sensor's attributes are read in Home Assistant's time zone. Before, they were read in the system time zone of the machine or container, which can differ (Docker containers often run in UTC). Price sensors that include the offset, as most do, are not affected.
 - **Agreement while Active:** with the Active switch on and a mode entity that the control script sets, every mode change counted as a disagreement, because the plan was compared with the mode of the previous quarter hour. The comparison now happens after the script has run, so "Current mode matches plan" and "Agreement with current mode today" show whether the script applied the plan.
 
 ## 0.4.0 - 2026-11-12
