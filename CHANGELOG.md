@@ -6,10 +6,13 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 
 ### Added
 
+- **History file:** Vulpes keeps its own history in `<config>/vulpes_ems/<entry id>/vulpes.db`: the forecasts as they were made (PV, load and price, up to 48 hours ahead), the planned mode and prices of each quarter hour, whether control followed the plan, the state of charge, and hourly energy, load and wholesale prices. Forecasts are kept 35 days, the rest 400 days. It is the same format as the CLI's store, so a copy works with `vulpes-cli eval-*` and `replay`. It is removed with the integration. The coming performance sensors are computed from it.
+- **Diagnostics download** (device page → Download diagnostics): the settings with entity ids and names redacted, the plan's inputs and warnings, control and calibration state, and the last 35 days of the history file. That includes your meter data; share it only with people you trust.
 - **Solar forecast per day:** four new sensors, "PV forecast today" (the whole day, including the hours that have passed), "PV forecast rest of today", "PV forecast tomorrow" and "PV forecast day after tomorrow", in kWh. A sensor is unknown when the weather forecast doesn't cover that day's daylight. The engine response has them as `summary.pv_kwh_today`, `pv_kwh_today_remaining`, `pv_kwh_tomorrow` and `pv_kwh_day_after`.
 
 ### Changed
 
+- **Agreement with your mode entity survives restarts:** "Agreement with current mode today" is counted from the history file, so a restart or settings change no longer resets it to empty for the rest of the day.
 - **Hold or self-consume on a solar surplus is now a choice, not a coincidence.** When the forecast has more solar than load, both modes do the same, and the plan used to say hold. If the house then used more than forecast, hold imported that power, even at a high price with a full battery. The plan now takes the mode that is cheaper when the load forecast is off: self-consume when the stored energy is worth less than importing now, hold when it is worth more. You will see self-consume instead of hold in more daytime slots. Nothing to do; the integration and the wheel must be updated together.
 
 ### Fixed

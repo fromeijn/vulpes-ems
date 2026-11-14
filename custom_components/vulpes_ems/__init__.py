@@ -10,12 +10,14 @@ All logic lives in the Rust core (`vulpes_ems`); this package is a thin shell.
 from __future__ import annotations
 
 import logging
+import shutil
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
 from .calibration import SolarCalibration
+from .const import DOMAIN
 from .coordinator import VulpesCoordinator
 from .core import C, ha
 
@@ -32,6 +34,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: VulpesConfigEntry) -> bo
     await coordinator.calibration.async_load()
     entry.async_on_unload(coordinator.calibration.async_unload)
     await coordinator.async_config_entry_first_refresh()
+    await coordinator.async_record()
     coordinator.start_schedule()
     entry.runtime_data = coordinator
     entry.async_on_unload(entry.add_update_listener(_async_reload))
@@ -67,5 +70,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: VulpesConfigEntry) -> b
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: VulpesConfigEntry) -> None:
-    """Delete the stored solar calibration with the entry."""
+    """Delete the stored solar calibration and the history file with the entry."""
     await SolarCalibration(hass, entry).async_remove()
+    folder = hass.config.path(DOMAIN, entry.entry_id)
+    await hass.async_add_executor_job(lambda: shutil.rmtree(folder, ignore_errors=True))

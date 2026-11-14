@@ -52,10 +52,16 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._unsub: Callable[[], None] | None = None
         self._wholesale: list[tuple[int, float]] = []
         self._wholesale_fetched: float | None = None
-        self.agreement_day: str | None = None
+        self._stats: dict[str, list] = {}
+        # Agreement with the user's mode entity today, counted from the history file.
         self.agree = 0
         self.compared = 0
         self.agrees_now: bool | None = None
+        # The history file (same format as the CLI's store); see vulpes_ha::history.
+        self.history_path = hass.config.path(DOMAIN, entry.entry_id, "vulpes.db")
+        self._history_lock = asyncio.Lock()
+        self.history_error: str | None = None
+        self.newest_energy_ts: int | None = None
         self.calibration = SolarCalibration(hass, entry)
         # Active control: set by the Active switch (restored across restarts).
         # The script is fixed for this setup: changing it reloads the entry.
@@ -87,11 +93,44 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_refresh_and_apply(self) -> None:
         await self.async_refresh()
         await self.async_apply()
-        # While Vulpes sets the mode itself, compare after the script ran:
-        # before it, the mode entity still shows the previous slot.
-        if self._controlling and self.last_update_success and self.data:
-            self._track_agreement(self.data)
-            self.async_update_listeners()
+        # Recorded after the script ran: the mode entity then shows this slot's mode.
+        await self.async_record()
+
+    async def async_record(self) -> None:
+        """Record this tick in the history file; agreement comes back from it."""
+        cfg = self.cfg
+        soc = self.hass.states.get(cfg.get(CONF_SOC_ENTITY, ""))
+        entity = cfg.get(CONF_MODE_ENTITY)
+        mode = self.hass.states.get(entity) if entity else None
+        request = {
+            "cfg": cfg,
+            "now": dt_util.utcnow().timestamp(),
+            "timezone": str(self.hass.config.time_zone),
+            "plan": self.data if self.last_update_success else None,
+            "soc_state": soc.state if soc else None,
+            "mode_state": mode.state if mode else None,
+            "active": self._controlling,
+            "last_command": self.last_command,
+            "last_error": self.last_error,
+            "stats": self._stats,
+            "wholesale": self._wholesale,
+        }
+        async with self._history_lock:
+            try:
+                raw = await self.hass.async_add_executor_job(vulpes_ems.record_ha, self.history_path, dumps(request))
+            except ValueError as err:
+                if self.history_error != str(err):
+                    _LOGGER.warning("Could not record the history: %s", err)
+                self.history_error = str(err)
+                self.async_update_listeners()
+                return
+        out = json.loads(raw)
+        self.history_error = None
+        self.compared = out["agreement_today"]["compared"]
+        self.agree = out["agreement_today"]["agreed"]
+        self.agrees_now = out["agrees_now"]
+        self.newest_energy_ts = out["newest_energy_ts"]
+        self.async_update_listeners()
 
     def _safe_command(self) -> dict[str, Any]:
         return ha("safe_command", cfg=self.cfg, now=dt_util.utcnow().timestamp(), fallback=False)
@@ -112,6 +151,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         was_active, self.active = self.active, active
         if active:
             await self.async_apply()
+            await self.async_record()
         elif was_active and self.control_script:
             await self._async_run_script(self._safe_command())
         else:
@@ -175,6 +215,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if ids
             else {}
         )
+        self._stats = stat_rows(stats, ids, "change")
         request = {
             "cfg": cfg,
             "now": now.timestamp(),
@@ -185,29 +226,11 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "soc_state": soc.state if soc else None,
             "price_attributes": list(price.attributes.items()) if price else None,
             "price_unit": price.attributes.get("unit_of_measurement") if price else None,
-            "stats": stat_rows(stats, ids, "change"),
+            "stats": self._stats,
             "wholesale": await self._wholesale_history(cfg, now),
         }
         try:
             raw = await self.hass.async_add_executor_job(vulpes_ems.plan_ha, dumps(request))
         except ValueError as err:
             raise UpdateFailed(str(err)) from err
-        plan = json.loads(raw)
-        if not self._controlling:
-            self._track_agreement(plan)
-        return plan
-
-    def _track_agreement(self, plan: dict[str, Any]) -> None:
-        """Compare the plan with the user's own mode entity, if one is mapped."""
-        cfg = self.cfg
-        entity_id = cfg.get(CONF_MODE_ENTITY)
-        state = self.hass.states.get(entity_id) if entity_id else None
-        today = dt_util.now().date().isoformat()
-        if today != self.agreement_day:
-            self.agreement_day, self.agree, self.compared = today, 0, 0
-        self.agrees_now = ha(
-            "agrees", cfg=cfg, state=state.state if state else None, mode_now=plan["summary"]["mode_now"]
-        )
-        if self.agrees_now is not None:
-            self.compared += 1
-            self.agree += int(self.agrees_now)
+        return json.loads(raw)

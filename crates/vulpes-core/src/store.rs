@@ -57,6 +57,16 @@ pub mod keys {
     pub const PV_TOTAL_POWER: &str = "pv.total.power";
     /// Day-ahead wholesale price for the Netherlands (EUR/kWh, hourly mean).
     pub const WHOLESALE_NL: &str = "price.wholesale.nl";
+    /// Energy from and to the grid, from PV, into and out of the battery (kWh per hour).
+    pub const GRID_IMPORT: &str = "grid.import";
+    pub const GRID_EXPORT: &str = "grid.export";
+    pub const PV_TOTAL: &str = "pv.total";
+    pub const BATTERY_CHARGE: &str = "battery.charge";
+    pub const BATTERY_DISCHARGE: &str = "battery.discharge";
+    /// Battery state of charge (%, mean per 15 minutes).
+    pub const SOC: &str = "soc";
+    /// Source of Vulpes's own forecasts in the `forecasts` table.
+    pub const VULPES_SOURCE: &str = "vulpes";
 }
 
 /// What happened in one 15-minute slot: the planned mode and prices as the
@@ -289,6 +299,50 @@ impl Store {
             Ok((r.get(0)?, r.get(1)?))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The newest issue time of a forecast variable, if any.
+    pub fn latest_issue(&self, source: &str, var: &str) -> crate::Result<Option<i64>> {
+        Ok(self.conn.query_row(
+            "SELECT MAX(issued_ts) FROM forecasts WHERE source = ?1 AND var = ?2",
+            params![source, var],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Every stored forecast of a variable valid in `[from, to)`, by valid then issue time.
+    pub fn forecasts_range(
+        &self,
+        source: &str,
+        var: &str,
+        from: i64,
+        to: i64,
+    ) -> crate::Result<Vec<ForecastPoint>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT valid_ts, issued_ts, value FROM forecasts
+             WHERE source = ?1 AND var = ?2 AND valid_ts >= ?3 AND valid_ts < ?4
+             ORDER BY valid_ts, issued_ts",
+        )?;
+        let rows = stmt.query_map(params![source, var, from, to], |r| {
+            Ok(ForecastPoint {
+                valid_ts: r.get(0)?,
+                issued_ts: r.get(1)?,
+                value: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The newest sample time of a series at a step, if any.
+    pub fn last_sample_ts(&self, key: &str, step_s: i64) -> crate::Result<Option<i64>> {
+        let Some(id) = self.series_id(key)? else {
+            return Ok(None);
+        };
+        Ok(self.conn.query_row(
+            "SELECT MAX(ts) FROM samples WHERE series_id = ?1 AND step_s = ?2",
+            params![id, step_s],
+            |r| r.get(0),
+        )?)
     }
 
     /// Insert or replace the record of one slot.
@@ -618,6 +672,32 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn latest_issue_range_and_last_sample() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert_eq!(s.latest_issue("vulpes", "pv_w").unwrap(), None);
+        let p = |valid_ts, issued_ts| ForecastPoint {
+            valid_ts,
+            issued_ts,
+            value: 1.0,
+        };
+        s.put_forecasts("vulpes", "pv_w", &[p(10, 1), p(10, 5), p(20, 3)])
+            .unwrap();
+        assert_eq!(s.latest_issue("vulpes", "pv_w").unwrap(), Some(5));
+        assert_eq!(s.latest_issue("vulpes", "load_w").unwrap(), None);
+        let r = s.forecasts_range("vulpes", "pv_w", 0, 20).unwrap();
+        assert_eq!(
+            r.iter().map(|x| (x.valid_ts, x.issued_ts)).collect::<Vec<_>>(),
+            [(10, 1), (10, 5)]
+        );
+        assert_eq!(s.last_sample_ts("x", 3600).unwrap(), None);
+        s.ensure_series("x", "W", SeriesKind::Mean).unwrap();
+        assert_eq!(s.last_sample_ts("x", 3600).unwrap(), None);
+        s.put_samples("x", 3600, &[(0, 1.0), (7200, 2.0)]).unwrap();
+        assert_eq!(s.last_sample_ts("x", 3600).unwrap(), Some(7200));
+        assert_eq!(s.last_sample_ts("x", 900).unwrap(), None);
     }
 
     #[test]

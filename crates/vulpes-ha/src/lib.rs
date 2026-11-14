@@ -14,6 +14,7 @@
 
 pub mod cfg;
 pub mod control;
+pub mod history;
 pub mod inputs;
 pub mod modes;
 pub mod request;
@@ -204,6 +205,9 @@ pub const OPS: &[(&str, Op)] = &[
         Ok(solar_form::calibration_inputs(obj(r, "cfg")?))
     }),
     ("wholesale_fetch", request::wholesale_fetch),
+    ("redact_settings", |r| {
+        Ok(history::redact_settings(obj(r, "cfg")?))
+    }),
     ("known_prices", |r| {
         let attributes = r.get("price_attributes").and_then(Value::as_array).map(|a| {
             a.iter()
@@ -239,6 +243,16 @@ pub fn call(op: &str, request: &str) -> Result<String> {
         .ok_or_else(|| Error::Message(format!("unknown op '{op}'")))?;
     let req: Value = serde_json::from_str(request)?;
     Ok(f(&req)?.to_string())
+}
+
+/// Record a tick in the history file at `path` (see [`history::record_ha`]).
+pub fn record_ha_json(path: &str, request: &str) -> Result<String> {
+    Ok(history::record_ha(path, &serde_json::from_str(request)?)?.to_string())
+}
+
+/// The recent history from the file at `path`, for diagnostics (see [`history::export_ha`]).
+pub fn export_history_json(path: &str, request: &str) -> Result<String> {
+    Ok(history::export_ha(path, &serde_json::from_str(request)?)?.to_string())
 }
 
 /// Plan with Home Assistant inputs (see [`request::plan_ha`]). May fetch weather.

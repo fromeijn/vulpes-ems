@@ -337,3 +337,44 @@ def test_calibrate_ha_offline():
     assert out["result"]["warnings"][0].startswith("no hourly statistics for sensor.pv")
     with pytest.raises(ValueError, match="no solar arrays configured"):
         vulpes_ems.calibrate_ha(json.dumps({**request, "cfg": {}}))
+
+
+def test_record_and_export_history(tmp_path):
+    db = str(tmp_path / "entry" / "vulpes.db")
+    start = NOW - NOW % 900
+    plan = {
+        "planned_at": NOW,
+        "summary": {"terminal_value_per_kwh": 0.2, "mode_now": "hold"},
+        "slots": [
+            {"start": start + 900 * k, "mode": "hold", "pv_off": False, "no_export": False, "pv_w": 100.0,
+             "load_w": 300.0, "import_price": 0.2, "export_price": 0.05, "price_known": True}
+            for k in range(8)
+        ],
+    }
+    hour = NOW - NOW % 3600
+    request = {
+        "cfg": {**HA_CFG, "mode_entity": "input_select.m", "mode_map": {"hold": "Grid"}},
+        "now": NOW + 0.5,
+        "timezone": "Europe/Amsterdam",
+        "plan": plan,
+        "soc_state": "60",
+        "mode_state": "Grid",
+        "active": True,
+        "last_command": {"fallback": False},
+        "last_error": None,
+        "stats": {"sensor.import": [[hour - 3600, 0.5]], "sensor.export": [[hour - 3600, 0.0]],
+                  "sensor.pv_energy": [[hour - 3600, 1.0]]},
+        "wholesale": [[hour - 3600, 0.1]],
+    }
+    out = json.loads(vulpes_ems.record_ha(db, json.dumps(request)))
+    assert out["agreement_today"] == {"compared": 1, "agreed": 1}
+    assert out["agrees_now"] is True
+    assert out["newest_energy_ts"] == hour - 3600
+    history = json.loads(vulpes_ems.export_history(db, json.dumps({"now": NOW})))
+    assert history["plan_slots"][0]["mode"] == "hold" and history["plan_slots"][0]["followed"] is True
+    assert history["samples"]["soc"] == [[start, 60.0]]
+    assert history["forecasts"]["pv_w"]
+    redacted = ha("redact_settings", cfg=request["cfg"])
+    assert "sensor." not in json.dumps(redacted)
+    with pytest.raises(ValueError, match="history"):
+        vulpes_ems.record_ha("", json.dumps(request))

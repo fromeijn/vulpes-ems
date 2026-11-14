@@ -13,4 +13,5 @@ chrono-tz = "0.10.4"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 thiserror.workspace = true
+vulpes-core.workspace = true
 vulpes-engine.workspace = true

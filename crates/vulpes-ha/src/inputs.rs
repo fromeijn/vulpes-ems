@@ -160,6 +160,22 @@ pub fn load_series(groups: &LoadGroups, stats: &EnergyRows) -> Vec<(i64, f64)> {
         .collect()
 }
 
+/// Hourly energy (kWh) summed over the statistics `ids`, for hours every one
+/// of them has. Hours where a counter went down are left out (see [`load_series`]).
+pub fn hourly_sums(ids: &[String], stats: &EnergyRows) -> Vec<(i64, f64)> {
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    per_hour(stats)
+        .into_iter()
+        .filter(|(_, vals)| {
+            ids.iter()
+                .all(|s| vals.get(s.as_str()).is_some_and(|v| *v >= -COUNTER_JITTER_KWH))
+        })
+        .map(|(t, vals)| (t, ids.iter().map(|s| vals[s.as_str()]).sum::<f64>().max(0.0)))
+        .collect()
+}
+
 /// Recorder rows → `(hour_start, value × scale)`, skipping empty hours, sorted.
 pub fn hourly_series(rows: &[(Value, Option<f64>)], scale: f64) -> Vec<(i64, f64)> {
     let mut out: Vec<(i64, f64)> = rows
@@ -414,6 +430,20 @@ mod tests {
         assert_eq!(g.minus, ["sensor.e", "sensor.bc"]);
         let empty = load_groups(&Cfg::new());
         assert!(empty.plus.is_empty() && empty.minus.is_empty());
+    }
+
+    #[test]
+    fn hourly_sums_over_a_group() {
+        let mut stats = EnergyRows::new();
+        stats.insert("a".into(), rows(&[Some(0.5), Some(0.2), Some(-3.0), Some(0.1)]));
+        stats.insert("b".into(), rows(&[Some(0.25), None, Some(0.1), Some(-0.001)]));
+        let ids = ["a".to_string(), "b".to_string()];
+        // Hour 1 lacks b, hour 2 is a counter reset; jitter in hour 3 is kept (and clamped at 0 in sum).
+        let sums = hourly_sums(&ids, &stats);
+        assert_eq!(sums.iter().map(|x| x.0).collect::<Vec<_>>(), [T, T + 10_800]);
+        assert!((sums[0].1 - 0.75).abs() < 1e-12 && (sums[1].1 - 0.099).abs() < 1e-12);
+        assert!(hourly_sums(&[], &stats).is_empty());
+        assert!(hourly_sums(&["c".to_string()], &stats).is_empty());
     }
 
     // --- solar statistics ---------------------------------------------------------

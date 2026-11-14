@@ -54,6 +54,22 @@ fn calibrate_ha(py: Python<'_>, request_json: String) -> PyResult<String> {
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Record a 15-minute tick in the history file at `db_path` (created with its
+/// folder); returns agreement and data freshness. Runs without the GIL (disk I/O).
+#[pyfunction]
+fn record_ha(py: Python<'_>, db_path: String, request_json: String) -> PyResult<String> {
+    py.allow_threads(|| vulpes_ha::record_ha_json(&db_path, &request_json))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// The recent history from the file at `db_path`, for the diagnostics download.
+/// Runs without the GIL (disk I/O).
+#[pyfunction]
+fn export_history(py: Python<'_>, db_path: String, request_json: String) -> PyResult<String> {
+    py.allow_threads(|| vulpes_ha::export_history_json(&db_path, &request_json))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 /// Hourly NL day-ahead wholesale prices `(hour_start, EUR/kWh excl. VAT)` from
 /// EnergyZero for an inclusive date range `YYYY-MM-DD`.
 #[pyfunction]
@@ -77,5 +93,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ha, m)?)?;
     m.add_function(wrap_pyfunction!(plan_ha, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate_ha, m)?)?;
+    m.add_function(wrap_pyfunction!(record_ha, m)?)?;
+    m.add_function(wrap_pyfunction!(export_history, m)?)?;
     Ok(())
 }

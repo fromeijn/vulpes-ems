@@ -16,7 +16,7 @@ A home energy manager for Home Assistant. A Rust core does the forecasting (sola
 | `crates/vulpes-load` | Similar-day load profile, NL calendar, temperature correction |
 | `crates/vulpes-price` | Tariff fit |
 | `crates/vulpes-opt` | Slot physics (`step`) and DP optimizer |
-| `crates/vulpes-engine` | JSON request → forecasts → plan, and solar calibration |
+| `crates/vulpes-engine` | JSON request → forecasts → plan, solar calibration, and the history file (`history.rs`: record a tick, export) |
 | `crates/vulpes-ha` | Home Assistant adapter: settings and migrations, flow checks, input parsing, plan/calibration requests, control script variables, solar form (`vulpes_ems.ha`, `plan_ha`, `calibrate_ha`) |
 | `crates/vulpes-py` | PyO3 bindings, built with maturin (`vulpes_ems._core`) |
 | `crates/vulpes-cli` | Backfill, calibration, evaluation and replay tools |
@@ -43,6 +43,7 @@ python3 -m venv .venv && .venv/bin/pip install pytest maturin ziglang
 - **Thin Python shell, logic in Rust.** The integration only reads Home Assistant state, calls Rust, and publishes the results as entities, repairs and diagnostics. Everything else is Rust, under the unit-test rules below: calculations, rules and thresholds, parsing, time handling, settings migrations and checks, the control script variables, history and persistence. Python may convert HA objects into JSON (datetimes to Unix seconds, picking attributes from a state), but it makes no decisions. A feature that needs logic adds a Rust function, not Python code.
 - **Rust edition 2024**, small crates, no async. HTTP uses `ureq` with ring + webpki-roots. Don't use reqwest/rustls defaults: aws-lc-sys breaks the zig/musl cross-builds.
 - **Wheels are abi3 (cp313+)**, built for manylinux_2_28 and musllinux_1_2 on x86_64 and aarch64. Home Assistant Container runs Python 3.14 on Alpine (musl).
+- **History file:** `<config>/vulpes_ems/<entry_id>/vulpes.db`, written each tick by `vulpes_ems.record_ha` (forecasts by issue time, slot records, SOC, hourly energy). The history functions take the database path; `plan_json` stays pure. A failing write is logged and never blocks planning or control.
 - **Engine API is JSON in, JSON out** (`vulpes_engine::plan_json` and `calibrate_json`, exposed as `vulpes_ems.plan` and `vulpes_ems.calibrate_solar`; the integration calls them through `vulpes_ha`'s `plan_ha` and `calibrate_ha`). These release the GIL and run in the executor.
 - **Units:** power in W, energy in Wh (kWh at the HA boundary), prices in currency/kWh, timestamps in Unix seconds UTC. 15-minute slots start on the quarter hour.
 - **Signs:** battery power positive = charging; grid power positive = import.
