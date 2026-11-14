@@ -101,9 +101,18 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _tick(self, _now: datetime) -> None:
         self.hass.async_create_task(self._async_refresh_and_apply())
 
+    @property
+    def _controlling(self) -> bool:
+        return self.active and bool(self.control_script)
+
     async def _async_refresh_and_apply(self) -> None:
         await self.async_refresh()
         await self.async_apply()
+        # While Vulpes sets the mode itself, compare after the script ran:
+        # before it, the mode entity still shows the previous slot.
+        if self._controlling and self.last_update_success and self.data:
+            self._track_agreement(self.data)
+            self.async_update_listeners()
 
     async def async_release(self) -> None:
         """On unload (settings changed, entry removed or disabled): hand control back.
@@ -237,7 +246,8 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         summary["mode_now"], summary["pv_off_now"], summary["no_export_now"] = split_mode(summary["mode_now"])
         plan["inputs"] = {"load_hours": len(load), "known_price_slots": len(known), "wholesale_hours": len(wholesale)}
         plan["planned_at"] = int(now.timestamp())
-        self._track_agreement(plan)
+        if not self._controlling:
+            self._track_agreement(plan)
         return plan
 
     def _track_agreement(self, plan: dict[str, Any]) -> None:

@@ -4,6 +4,14 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 
 ## Unreleased
 
+### Changed
+
+- **Hold or self-consume on a solar surplus is now a choice, not a coincidence.** When the forecast has more solar than load, both modes do the same, and the plan used to say hold. If the house then used more than forecast, hold imported that power, even at a high price with a full battery. The plan now takes the mode that is cheaper when the load forecast is off: self-consume when the stored energy is worth less than importing now, hold when it is worth more. You will see self-consume instead of hold in more daytime slots. Nothing to do; the integration and the wheel must be updated together.
+
+### Fixed
+
+- **Agreement while Active:** with the Active switch on and a mode entity that the control script sets, every mode change counted as a disagreement, because the plan was compared with the mode of the previous quarter hour. The comparison now happens after the script has run, so "Current mode matches plan" and "Agreement with current mode today" show whether the script applied the plan.
+
 ## 0.4.0 - 2026-11-12
 
 ### Added
