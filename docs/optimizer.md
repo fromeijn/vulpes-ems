@@ -44,6 +44,8 @@ The optimizer does backward induction over slot × SOC grid × mode, interpolati
 
 **Ties:** when modes score the same in a slot, the plan takes the least active one: a mode without a power setpoint before charge or discharge, and a plain mode before its `pv_curtail` or `no_export` variant. A full battery, for example, gives "charge" and "hold" the same outcome, and the plan says "hold".
 
+Modes that are equally active can still tie: hold and self-consume do the same whenever the forecast has a solar surplus, and only differ when the house uses more than forecast. Each of them is then scored again with the load 500 W higher and 500 W lower, and the plan takes the cheaper one. That is self-consume when the stored energy is worth less than importing now, and hold when it is worth more. If they are still equal, the first mode in the list is planned. The replay shows what this is worth, because it settles every decision against the actual load.
+
 **Charge can mean discharge:** with a grid setpoint, "charge" in a slot with a forecast load above the setpoint is a partial discharge. The optimizer uses it that way when it pays.
 
 **Horizon:** 84 hours. The length was chosen with the replay's horizon comparison (see [Replay](#replay)), which gives each lead time the forecast that was available then. When the weather forecast stops earlier, the plan ends where the weather ends, with a warning: slots without a solar forecast are not planned. The weather must reach three quarters of the first day (or of a shorter horizon), with at most a quarter of the covered slots missing; otherwise planning fails.

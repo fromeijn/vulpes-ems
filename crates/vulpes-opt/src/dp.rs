@@ -77,6 +77,14 @@ fn activity(mode: &ModeDef) -> u8 {
     2 * u8::from(powered) + u8::from(mode.pv_curtail || mode.no_export)
 }
 
+/// Load error (W) that settles a tie between equally active modes. Hold and
+/// self-consume do the same on a forecast solar surplus, and differ as soon
+/// as the house uses more than forecast. Each tied mode is scored again with
+/// the load this much higher and this much lower, and the cheaper one is
+/// planned: self-consume when the stored energy is worth less than importing
+/// now, hold when it is worth more.
+const TIE_PROBE_W: f64 = 500.0;
+
 pub fn optimize(p: &Problem<'_>) -> Plan {
     let b = p.battery;
     let (lo, hi) = (b.min_soc * b.capacity_wh, b.max_soc * b.capacity_wh);
@@ -123,12 +131,32 @@ pub fn optimize(p: &Problem<'_>) -> Plan {
     for t in 0..t_len {
         let inp = &p.slots[t];
         let mut best: Option<(f64, usize, crate::SlotOutcome, f64)> = None;
-        for (m, mode) in p.modes.iter().enumerate() {
-            let o = step(mode, inp.load_w, inp.pv_w, soc, b, p.grid, p.dt_h);
+        let score_at = |mode: &ModeDef, load_w: f64| {
+            let o = step(mode, load_w, inp.pv_w, soc, b, p.grid, p.dt_h);
             let c = slot_cost(inp, o.grid_w, o.battery_w, p.dt_h, b.wear_cost_per_kwh);
-            let score = c + reserve_penalty(inp, o.soc_wh) + interp(&value[t + 1], o.soc_wh);
+            (
+                c + reserve_penalty(inp, o.soc_wh) + interp(&value[t + 1], o.soc_wh),
+                o,
+                c,
+            )
+        };
+        // Score of a mode when the load forecast is off by the probe, both ways.
+        let probe = |mode: &ModeDef| {
+            score_at(mode, inp.load_w + TIE_PROBE_W).0 + score_at(mode, (inp.load_w - TIE_PROBE_W).max(0.0)).0
+        };
+        for (m, mode) in p.modes.iter().enumerate() {
+            let (score, o, c) = score_at(mode, inp.load_w);
             let better = best.as_ref().is_none_or(|x| {
-                score < x.0 - TIE_EPS || (score <= x.0 + TIE_EPS && activity(mode) < activity(&p.modes[x.1]))
+                if score < x.0 - TIE_EPS {
+                    return true;
+                }
+                if score > x.0 + TIE_EPS {
+                    return false;
+                }
+                // A tie: the least active mode, then the one that does best
+                // when the forecast is off, then the first in the list.
+                let (a, a_best) = (activity(mode), activity(&p.modes[x.1]));
+                a < a_best || (a == a_best && probe(mode) < probe(&p.modes[x.1]) - TIE_EPS)
             });
             if better {
                 best = Some((score, m, o, c));
@@ -463,5 +491,56 @@ mod tests {
         });
         // 1 kW for one hour in four quarters at 0.40/kWh.
         assert!((p.cost - 0.40).abs() < 1e-9, "{}", p.cost);
+    }
+
+    /// A slot with its own (low) export price, so selling is never the best use.
+    fn slot_x(load: f64, pv: f64, import: f64) -> SlotInput {
+        SlotInput {
+            export_price: 0.05,
+            ..slot(load, pv, import)
+        }
+    }
+
+    #[test]
+    fn tie_on_a_surplus_goes_to_self_consume_when_stored_energy_is_worth_less() {
+        // Dear now with a forecast solar surplus, cheap later, plenty of charge:
+        // hold and self-consume both charge 300 W. If the house uses more,
+        // the battery is the cheaper source, so plan self-consume (index 2).
+        let mut s = vec![slot_x(500.0, 800.0, 0.60)];
+        s.extend(vec![slot_x(500.0, 0.0, 0.20); 3]);
+        let plan = solve(&s, 9000.0, 0.0, 0.10);
+        assert_eq!(plan.slots[0].mode, 2, "{plan:?}");
+        assert_eq!((plan.slots[0].battery_w, plan.slots[0].grid_w), (300.0, 0.0));
+    }
+
+    #[test]
+    fn tie_on_a_surplus_goes_to_hold_when_stored_energy_is_worth_more() {
+        // Cheap now, then more dear load than the full battery can cover:
+        // every stored kWh is worth 0.80 later, so a shortfall now is better
+        // imported at 0.20. Plan hold (index 1).
+        let mut s = vec![slot_x(500.0, 800.0, 0.20)];
+        s.extend(vec![slot_x(3000.0, 0.0, 0.80); 4]);
+        let plan = solve(&s, 10_000.0, 0.0, 0.0);
+        assert_eq!(plan.slots[0].mode, 1, "{plan:?}");
+    }
+
+    #[test]
+    fn tie_with_an_empty_battery_keeps_the_list_order() {
+        // At the minimum SOC neither mode can discharge, whatever the load
+        // does: still a tie, so the first in the list (hold).
+        let mut s = vec![slot_x(500.0, 800.0, 0.60)];
+        s.extend(vec![slot_x(500.0, 0.0, 0.20); 3]);
+        let plan = solve(&s, 1000.0, 0.0, 0.10);
+        assert_eq!(plan.slots[0].mode, 1, "{plan:?}");
+    }
+
+    #[test]
+    fn tie_break_does_not_change_the_planned_cost() {
+        // Only the name of the mode changes in a tie, never the outcome on the forecast.
+        let mut s = vec![slot_x(500.0, 800.0, 0.60)];
+        s.extend(vec![slot_x(500.0, 0.0, 0.20); 3]);
+        let plan = solve(&s, 9000.0, 0.0, 0.10);
+        let hold = step(&modes()[1], 500.0, 800.0, 9000.0, &bat(0.0), &GRID, 1.0);
+        assert_eq!(plan.slots[0].soc_wh, hold.soc_wh);
     }
 }
