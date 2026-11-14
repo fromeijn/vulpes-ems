@@ -383,6 +383,27 @@
       "pv_day_after": {
         "name": "Zonneprognose overmorgen"
       },
+      "saved_7d": {
+        "name": "Bespaard afgelopen 7 dagen"
+      },
+      "plan_saved_7d": {
+        "name": "Plan zou besparen afgelopen 7 dagen"
+      },
+      "total_saved": {
+        "name": "Totaal bespaard"
+      },
+      "solar_forecast_error": {
+        "name": "Fout zonneprognose"
+      },
+      "load_forecast_error": {
+        "name": "Fout verbruiksprognose"
+      },
+      "control_uptime": {
+        "name": "Aansturing volgde het plan"
+      },
+      "soc_tracking_error": {
+        "name": "Afwijking laadtoestand"
+      },
       "load_forecast_24h": {
         "name": "Verbruiksprognose komende 24 uur"
       },

@@ -378,3 +378,16 @@ def test_record_and_export_history(tmp_path):
     assert "sensor." not in json.dumps(redacted)
     with pytest.raises(ValueError, match="history"):
         vulpes_ems.record_ha("", json.dumps(request))
+
+
+def test_review_history(tmp_path):
+    db = str(tmp_path / "vulpes.db")
+    cfg = {**HA_CFG, "wholesale_source": "none"}
+    vulpes_ems.record_ha(db, json.dumps({"cfg": cfg, "now": NOW, "timezone": "Europe/Amsterdam"}))
+    out = json.loads(vulpes_ems.review_ha(db, json.dumps({"cfg": cfg, "now": NOW, "timezone": "Europe/Amsterdam"})))
+    assert set(out["windows"]) == {"yesterday", "days_7", "days_30"}
+    assert out["windows"]["days_7"]["saved_actual"] is None, "not enough days yet"
+    assert out["totals"] == {"since": None, "saved_actual": 0.0, "saved_plan": 0.0}
+    assert {c["check"] for c in out["checks"]} >= {"load_forecast", "solar_forecast", "soc_tracking", "coverage"}
+    with pytest.raises(ValueError, match="missing setting"):
+        vulpes_ems.review_ha(db, json.dumps({"cfg": {}, "now": NOW}))

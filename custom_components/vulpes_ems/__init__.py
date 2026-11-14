@@ -35,6 +35,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: VulpesConfigEntry) -> bo
     entry.async_on_unload(coordinator.calibration.async_unload)
     await coordinator.async_config_entry_first_refresh()
     await coordinator.async_record()
+    await coordinator.async_review()
     coordinator.start_schedule()
     entry.runtime_data = coordinator
     entry.async_on_unload(entry.add_update_listener(_async_reload))

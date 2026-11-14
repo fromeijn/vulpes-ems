@@ -120,17 +120,8 @@ fn engine_request(
         "location": {"lat": req_num(req, "lat")?, "lon": req_num(req, "lon")?},
         "timezone": req.get("timezone").and_then(Value::as_str).unwrap_or("UTC"),
         "country": req.get("country").and_then(Value::as_str).unwrap_or("").to_lowercase(),
-        "battery": {
-            "capacity_wh": cap_wh,
-            "max_charge_w": num(cfg, "max_charge_w")?,
-            "max_discharge_w": num(cfg, "max_discharge_w")?,
-            "charge_eff": num(cfg, "charge_eff")?,
-            "discharge_eff": num(cfg, "discharge_eff")?,
-            "min_soc": num(cfg, "min_soc")? / 100.0,
-            "max_soc": num(cfg, "max_soc")? / 100.0,
-            "wear_cost_per_kwh": num(cfg, "wear_cost")?,
-        },
-        "grid": {"max_import_w": num(cfg, "max_import_w")?, "max_export_w": num(cfg, "max_export_w")?},
+        "battery": battery_json(cfg)?,
+        "grid": grid_json(cfg)?,
         "modes": engine_modes(cfg)?,
         "soc_wh": soc_pct / 100.0 * cap_wh,
         "planes": engine_planes(&planes),
@@ -140,6 +131,25 @@ fn engine_request(
         "export": {"a": num(cfg, "export_a")?, "b": num(cfg, "export_b")?},
         "wholesale_history": wholesale,
     }))
+}
+
+/// The engine's `BatteryParams` from the settings (kWh → Wh, % → fraction).
+pub fn battery_json(cfg: &Cfg) -> Result<Value> {
+    Ok(json!({
+        "capacity_wh": num(cfg, "capacity_kwh")? * 1000.0,
+        "max_charge_w": num(cfg, "max_charge_w")?,
+        "max_discharge_w": num(cfg, "max_discharge_w")?,
+        "charge_eff": num(cfg, "charge_eff")?,
+        "discharge_eff": num(cfg, "discharge_eff")?,
+        "min_soc": num(cfg, "min_soc")? / 100.0,
+        "max_soc": num(cfg, "max_soc")? / 100.0,
+        "wear_cost_per_kwh": num(cfg, "wear_cost")?,
+    }))
+}
+
+/// The engine's `GridLimits` from the settings.
+pub fn grid_json(cfg: &Cfg) -> Result<Value> {
+    Ok(json!({"max_import_w": num(cfg, "max_import_w")?, "max_export_w": num(cfg, "max_export_w")?}))
 }
 
 /// Split each engine mode name into the Vulpes mode and its flags.

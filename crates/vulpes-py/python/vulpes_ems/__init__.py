@@ -11,6 +11,7 @@ from ._core import (
     plan_ha,
     quarter_hour_floor,
     record_ha,
+    review_ha,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "plan_ha",
     "quarter_hour_floor",
     "record_ha",
+    "review_ha",
 ]

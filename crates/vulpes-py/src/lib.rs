@@ -62,6 +62,14 @@ fn record_ha(py: Python<'_>, db_path: String, request_json: String) -> PyResult<
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Review the history file at `db_path` with the current settings: savings,
+/// forecast quality and control. Runs without the GIL (disk I/O).
+#[pyfunction]
+fn review_ha(py: Python<'_>, db_path: String, request_json: String) -> PyResult<String> {
+    py.allow_threads(|| vulpes_ha::review_ha_json(&db_path, &request_json))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 /// The recent history from the file at `db_path`, for the diagnostics download.
 /// Runs without the GIL (disk I/O).
 #[pyfunction]
@@ -94,6 +102,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(plan_ha, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate_ha, m)?)?;
     m.add_function(wrap_pyfunction!(record_ha, m)?)?;
+    m.add_function(wrap_pyfunction!(review_ha, m)?)?;
     m.add_function(wrap_pyfunction!(export_history, m)?)?;
     Ok(())
 }

@@ -180,6 +180,34 @@ pub fn export_ha(path: &str, req: &Value) -> Result<Value> {
     Ok(serde_json::to_value(e)?)
 }
 
+/// Review the history file at `path` with the current settings: savings,
+/// forecast quality, control and the review's checks. `req` holds `cfg`,
+/// `now` and `timezone`.
+pub fn review_ha(path: &str, req: &Value) -> Result<Value> {
+    let cfg = obj(req, "cfg")?;
+    let nonempty = |k: &str| !str_list(cfg, k).is_empty();
+    let planes = cfg
+        .get(CONF_PLANES)
+        .and_then(Value::as_array)
+        .is_some_and(|p| !p.is_empty());
+    let request = json!({
+        "now": req_num(req, "now")? as i64,
+        "timezone": req.get("timezone").and_then(Value::as_str).unwrap_or("UTC"),
+        "battery": crate::request::battery_json(cfg)?,
+        "grid": crate::request::grid_json(cfg)?,
+        "modes": crate::modes::engine_modes(cfg)?,
+        "tariff": {"a": crate::cfg::num(cfg, "tariff_a")?, "b": crate::cfg::num(cfg, "tariff_b")?},
+        "export": {"a": crate::cfg::num(cfg, "export_a")?, "b": crate::cfg::num(cfg, "export_b")?},
+        "has_export": nonempty(CONF_GRID_EXPORT),
+        "has_solar": nonempty(CONF_SOLAR_ENERGY),
+        "has_battery": nonempty(CONF_BATTERY_CHARGE) && nonempty(CONF_BATTERY_DISCHARGE),
+        "has_pv": planes,
+    });
+    let raw = vulpes_engine::review::review_json(path, &request.to_string())
+        .map_err(|e| Error::Message(format!("review: {e}")))?;
+    Ok(serde_json::from_str(&raw)?)
+}
+
 /// Keys whose values name the user's entities, scripts or mode names.
 const PRIVATE_KEYS: [&str; 10] = [
     "soc_entity",
@@ -365,6 +393,57 @@ mod tests {
                 .to_string()
                 .starts_with("history:")
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn review_from_settings() {
+        let dir = std::env::temp_dir().join(format!("vulpes-ha-review-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("vulpes.db");
+        let path = path.to_str().unwrap();
+        let mut c = cfg();
+        for (k, v) in [
+            ("max_charge_w", 3000.0),
+            ("max_discharge_w", 3000.0),
+            ("min_soc", 10.0),
+            ("max_soc", 100.0),
+            ("max_import_w", 17250.0),
+            ("max_export_w", 17250.0),
+            ("charge_w", 3000.0),
+            ("charge_eff", 0.95),
+            ("discharge_eff", 0.95),
+            ("wear_cost", 0.02),
+            ("tariff_a", 1.21),
+            ("tariff_b", 0.13),
+            ("export_a", 1.0),
+            ("export_b", 0.0),
+        ] {
+            c[k] = json!(v);
+        }
+        record_ha(
+            path,
+            &json!({"cfg": c, "now": T0, "timezone": "Europe/Amsterdam", "plan": plan()}),
+        )
+        .unwrap();
+        let out = review_ha(
+            path,
+            &json!({"cfg": c, "now": T0 + 3600, "timezone": "Europe/Amsterdam"}),
+        )
+        .unwrap();
+        assert_eq!(out["windows"]["days_7"]["days"], json!(0));
+        let coverage = out["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["check"] == "coverage")
+            .unwrap();
+        assert!(
+            coverage["detail"].as_str().unwrap().contains("battery"),
+            "{coverage}"
+        );
+        c.as_object_mut().unwrap().remove("wear_cost");
+        assert!(review_ha(path, &json!({"cfg": c, "now": T0, "timezone": "UTC"})).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

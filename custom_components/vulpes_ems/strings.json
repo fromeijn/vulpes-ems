@@ -383,6 +383,27 @@
       "pv_day_after": {
         "name": "PV forecast day after tomorrow"
       },
+      "saved_7d": {
+        "name": "Saved last 7 days"
+      },
+      "plan_saved_7d": {
+        "name": "Plan would save last 7 days"
+      },
+      "total_saved": {
+        "name": "Total saved"
+      },
+      "solar_forecast_error": {
+        "name": "Solar forecast error"
+      },
+      "load_forecast_error": {
+        "name": "Load forecast error"
+      },
+      "control_uptime": {
+        "name": "Control followed the plan"
+      },
+      "soc_tracking_error": {
+        "name": "SOC tracking error"
+      },
       "load_forecast_24h": {
         "name": "Load forecast next 24h"
       },

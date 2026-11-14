@@ -250,6 +250,11 @@ pub fn record_ha_json(path: &str, request: &str) -> Result<String> {
     Ok(history::record_ha(path, &serde_json::from_str(request)?)?.to_string())
 }
 
+/// Review the history file at `path` (see [`history::review_ha`]).
+pub fn review_ha_json(path: &str, request: &str) -> Result<String> {
+    Ok(history::review_ha(path, &serde_json::from_str(request)?)?.to_string())
+}
+
 /// The recent history from the file at `path`, for diagnostics (see [`history::export_ha`]).
 pub fn export_history_json(path: &str, request: &str) -> Result<String> {
     Ok(history::export_ha(path, &serde_json::from_str(request)?)?.to_string())

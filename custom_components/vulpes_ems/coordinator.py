@@ -62,6 +62,9 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._history_lock = asyncio.Lock()
         self.history_error: str | None = None
         self.newest_energy_ts: int | None = None
+        # The review of the history file: savings, forecast quality, control.
+        self.review: dict[str, Any] | None = None
+        self.review_error: str | None = None
         self.calibration = SolarCalibration(hass, entry)
         # Active control: set by the Active switch (restored across restarts).
         # The script is fixed for this setup: changing it reloads the entry.
@@ -95,6 +98,23 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.async_apply()
         # Recorded after the script ran: the mode entity then shows this slot's mode.
         await self.async_record()
+        await self.async_review()
+
+    async def async_review(self) -> None:
+        """Review the history file (savings, forecasts, control); never blocks planning."""
+        request = {"cfg": self.cfg, "now": dt_util.utcnow().timestamp(), "timezone": str(self.hass.config.time_zone)}
+        async with self._history_lock:
+            try:
+                raw = await self.hass.async_add_executor_job(vulpes_ems.review_ha, self.history_path, dumps(request))
+            except ValueError as err:
+                if self.review_error != str(err):
+                    _LOGGER.warning("Could not review the history: %s", err)
+                self.review_error = str(err)
+                self.async_update_listeners()
+                return
+        self.review = json.loads(raw)
+        self.review_error = None
+        self.async_update_listeners()
 
     async def async_record(self) -> None:
         """Record this tick in the history file; agreement comes back from it."""
