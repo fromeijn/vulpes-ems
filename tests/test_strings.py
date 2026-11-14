@@ -64,3 +64,14 @@ def test_other_translations_match_english_keys_and_placeholders():
         for key, text in english.items():
             assert set(re.findall(r"\{\w+\}", translated[key])) == set(re.findall(r"\{\w+\}", text)), (path.name, key)
             assert translated[key].strip(), (path.name, key)
+
+
+def test_every_repair_issue_has_a_title_and_description():
+    source = (Path(__file__).parents[1] / "crates" / "vulpes-ha" / "src" / "health.rs").read_text()
+    block = re.search(r"pub const ISSUES: \[&str; \d+\] = \[(.*?)\];", source, re.S).group(1)
+    issues = set(re.findall(r'"(\w+)"', block))
+    assert issues == {"soc_unavailable", "no_plan", "energy_stopped", "script_failing"}
+    for issue in issues:
+        assert STRINGS["issues"][issue]["title"] and STRINGS["issues"][issue]["description"], issue
+    for state in ("ok", "degraded", "problem"):
+        assert STRINGS["entity"]["sensor"]["status"]["state"][state]

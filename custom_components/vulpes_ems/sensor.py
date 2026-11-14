@@ -269,6 +269,7 @@ async def async_setup_entry(
         VulpesSensor(coordinator, entry, d) for d in SENSORS if compare or d.key != "agreement_today"
     ]
     entities.append(SolarCalibrationSensor(coordinator, entry))
+    entities += [StatusSensor(coordinator, entry), LastPlanSensor(coordinator, entry), EnergyDataSensor(coordinator, entry)]
     has = {"planes": bool(coordinator.cfg.get(CONF_PLANES)), "script": bool(coordinator.control_script)}
     for d in REVIEW_SENSORS:
         if d.needs is None or has[d.needs]:
@@ -367,6 +368,81 @@ class ControlSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
         if c.last_error:
             attrs["error"] = c.last_error
         return attrs
+
+
+class StatusSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
+    """Is Vulpes working: ok, degraded or problem, with every check in the attributes."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "status"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["ok", "degraded", "problem"]
+
+    def __init__(self, coordinator: VulpesCoordinator, entry: VulpesConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_status"
+        self._attr_device_info = device_info(entry)
+
+    @property
+    def available(self) -> bool:
+        return True  # most useful exactly when planning fails
+
+    @property
+    def native_value(self) -> str:
+        return self.coordinator.health["status"]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        h = self.coordinator.health
+        return {
+            "checks": h["checks"],
+            "problems": [f"{c['check']}: {c['detail']}" for c in h["checks"] if c["state"] in ("degraded", "problem")],
+            "review_warnings": (self.coordinator.review or {}).get("warnings", []),
+        }
+
+
+class _TimestampSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _key = ""
+
+    def __init__(self, coordinator: VulpesCoordinator, entry: VulpesConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_translation_key = self._key
+        self._attr_unique_id = f"{entry.entry_id}_{self._key}"
+        self._attr_device_info = device_info(entry)
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def _ts(self) -> float | None:
+        raise NotImplementedError
+
+    @property
+    def native_value(self) -> Any:
+        ts = self._ts()
+        return dt_util.utc_from_timestamp(ts) if ts is not None else None
+
+
+class LastPlanSensor(_TimestampSensor):
+    """When the last plan was made."""
+
+    _key = "last_plan"
+
+    def _ts(self) -> float | None:
+        return self.coordinator.last_success_ts
+
+
+class EnergyDataSensor(_TimestampSensor):
+    """The end of the newest hour of energy statistics in the history file."""
+
+    _key = "newest_energy_data"
+
+    def _ts(self) -> float | None:
+        t = self.coordinator.newest_energy_ts
+        return t + 3600 if t is not None else None
 
 
 class ReviewSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):

@@ -14,6 +14,7 @@
 
 pub mod cfg;
 pub mod control;
+pub mod health;
 pub mod history;
 pub mod inputs;
 pub mod modes;
@@ -208,6 +209,8 @@ pub const OPS: &[(&str, Op)] = &[
     ("redact_settings", |r| {
         Ok(history::redact_settings(obj(r, "cfg")?))
     }),
+    ("health", health::health),
+    ("issue_ids", |_| Ok(json!(health::ISSUES))),
     ("known_prices", |r| {
         let attributes = r.get("price_attributes").and_then(Value::as_array).map(|a| {
             a.iter()

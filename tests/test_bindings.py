@@ -391,3 +391,11 @@ def test_review_history(tmp_path):
     assert {c["check"] for c in out["checks"]} >= {"load_forecast", "solar_forecast", "soc_tracking", "coverage"}
     with pytest.raises(ValueError, match="missing setting"):
         vulpes_ems.review_ha(db, json.dumps({"cfg": {}, "now": NOW}))
+
+
+def test_health_op():
+    out = ha("health", cfg={"wholesale_source": "none"}, now=NOW, timezone="UTC", refresh_ok=True,
+             last_success=NOW, soc_state="50", newest_energy_ts=NOW - 7200,
+             price_attributes=[["today", [{"start": NOW - 3600, "price": 0.2}, {"start": NOW, "price": 0.2}]]])
+    assert out["status"] == "ok", out
+    assert ha("issue_ids") == ["soc_unavailable", "no_plan", "energy_stopped", "script_failing"]

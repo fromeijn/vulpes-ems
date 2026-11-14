@@ -16,6 +16,7 @@ from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.statistics import statistics_during_period
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -65,6 +66,12 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # The review of the history file: savings, forecast quality, control.
         self.review: dict[str, Any] | None = None
         self.review_error: str | None = None
+        # Health: plain facts for the Rust checks, and the result.
+        self.started_at = dt_util.utcnow().timestamp()
+        self.last_success_ts: float | None = None
+        self.script_failures = 0
+        self.health: dict[str, Any] = {"status": "ok", "checks": [], "issues": []}
+        self._open_issues: set[str] = set()
         self.calibration = SolarCalibration(hass, entry)
         # Active control: set by the Active switch (restored across restarts).
         # The script is fixed for this setup: changing it reloads the entry.
@@ -99,6 +106,62 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Recorded after the script ran: the mode entity then shows this slot's mode.
         await self.async_record()
         await self.async_review()
+        self.update_health()
+
+    @callback
+    def update_health(self) -> None:
+        """Run the health checks on what Home Assistant shows now; open or close repair issues."""
+        cfg = self.cfg
+        soc = self.hass.states.get(cfg.get(CONF_SOC_ENTITY, ""))
+        price = self.hass.states.get(cfg.get(CONF_PRICE_ENTITY, ""))
+        snapshot = {
+            "cfg": cfg,
+            "now": dt_util.utcnow().timestamp(),
+            "timezone": str(self.hass.config.time_zone),
+            "started_at": self.started_at,
+            "refresh_ok": self.last_update_success,
+            "last_success": self.last_success_ts,
+            "refresh_error": str(self.last_exception) if self.last_exception else None,
+            "plan": self.data,
+            "soc_state": soc.state if soc else None,
+            "soc_last_changed": soc.last_changed.timestamp() if soc else None,
+            "soc_last_reported": soc.last_reported.timestamp() if soc else None,
+            "price_attributes": list(price.attributes.items()) if price else None,
+            "price_unit": price.attributes.get("unit_of_measurement") if price else None,
+            "wholesale_fetched_at": self._wholesale_fetched,
+            "newest_energy_ts": self.newest_energy_ts,
+            "active": self.active,
+            "control_script": self.control_script,
+            "last_command": self.last_command,
+            "last_error": self.last_error,
+            "script_failures": self.script_failures,
+            "history_error": self.history_error,
+            "review_error": self.review_error,
+            "review_checks": (self.review or {}).get("checks", []),
+        }
+        self.health = ha("health", **snapshot)
+        entry_id = self.config_entry.entry_id
+        wanted = set(self.health["issues"])
+        for issue in wanted - self._open_issues:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                f"{issue}_{entry_id}",
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=issue,
+            )
+        for issue in self._open_issues - wanted:
+            ir.async_delete_issue(self.hass, DOMAIN, f"{issue}_{entry_id}")
+        self._open_issues = wanted
+        self.async_update_listeners()
+
+    @callback
+    def clear_issues(self) -> None:
+        """Close this entry's repair issues (on unload)."""
+        for issue in self._open_issues:
+            ir.async_delete_issue(self.hass, DOMAIN, f"{issue}_{self.config_entry.entry_id}")
+        self._open_issues = set()
 
     async def async_review(self) -> None:
         """Review the history file (savings, forecasts, control); never blocks planning."""
@@ -163,6 +226,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         plan again right away.
         """
         self.stop_schedule()
+        self.clear_issues()
         if self.active and self.control_script:
             await self._async_run_script(self._safe_command())
 
@@ -172,6 +236,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if active:
             await self.async_apply()
             await self.async_record()
+            self.update_health()
         elif was_active and self.control_script:
             await self._async_run_script(self._safe_command())
         else:
@@ -208,6 +273,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.last_error = str(err) or type(err).__name__
         else:
             self.last_error = None
+        self.script_failures = self.script_failures + 1 if self.last_error else 0
         self.last_command = {**cmd, "sent": dt_util.utcnow().isoformat()}
         self.async_update_listeners()
 
@@ -253,4 +319,5 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raw = await self.hass.async_add_executor_job(vulpes_ems.plan_ha, dumps(request))
         except ValueError as err:
             raise UpdateFailed(str(err)) from err
+        self.last_success_ts = now.timestamp()
         return json.loads(raw)

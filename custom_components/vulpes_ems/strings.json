@@ -430,6 +430,20 @@
           "fallback": "Fallback (self-consume)",
           "script_error": "Script failed (see the error attribute)"
         }
+      },
+      "status": {
+        "name": "Status",
+        "state": {
+          "ok": "OK",
+          "degraded": "Degraded",
+          "problem": "Problem"
+        }
+      },
+      "last_plan": {
+        "name": "Last plan"
+      },
+      "newest_energy_data": {
+        "name": "Energy data up to"
       }
     },
     "binary_sensor": {
@@ -449,6 +463,24 @@
       "active": {
         "name": "Active"
       }
+    }
+  },
+  "issues": {
+    "soc_unavailable": {
+      "title": "Vulpes EMS: battery state of charge unavailable",
+      "description": "The state of charge sensor has had no usable value for more than an hour. Vulpes cannot plan without it; with control active it sends the safe mode (self-consume). Check the sensor in your battery integration."
+    },
+    "no_plan": {
+      "title": "Vulpes EMS has had no plan for over an hour",
+      "description": "Planning keeps failing. The Status sensor of Vulpes EMS shows why. With control active, Vulpes sends the safe mode (self-consume) until planning works again."
+    },
+    "energy_stopped": {
+      "title": "Vulpes EMS: energy statistics stopped",
+      "description": "The energy statistics Vulpes uses (grid, solar, battery) have had no new data for more than a day. The load forecast and the performance figures depend on them. Check the energy sensors and the recorder."
+    },
+    "script_failing": {
+      "title": "Vulpes EMS: control script keeps failing",
+      "description": "The control script failed three times in a row. The Battery control sensor shows the error. Vulpes keeps trying every 15 minutes."
     }
   }
 }

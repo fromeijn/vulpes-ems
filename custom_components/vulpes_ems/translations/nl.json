@@ -430,6 +430,20 @@
           "fallback": "Terugvalstand (eigen verbruik)",
           "script_error": "Script mislukt (zie het attribuut error)"
         }
+      },
+      "status": {
+        "name": "Status",
+        "state": {
+          "ok": "OK",
+          "degraded": "Verminderd",
+          "problem": "Probleem"
+        }
+      },
+      "last_plan": {
+        "name": "Laatste plan"
+      },
+      "newest_energy_data": {
+        "name": "Energiegegevens tot"
       }
     },
     "binary_sensor": {
@@ -449,6 +463,24 @@
       "active": {
         "name": "Actief"
       }
+    }
+  },
+  "issues": {
+    "soc_unavailable": {
+      "title": "Vulpes EMS: laadtoestand van de batterij niet beschikbaar",
+      "description": "De laadtoestandsensor heeft al meer dan een uur geen bruikbare waarde. Zonder die waarde kan Vulpes niet plannen; met actieve aansturing stuurt Vulpes de veilige modus (eigen verbruik). Controleer de sensor in je batterij-integratie."
+    },
+    "no_plan": {
+      "title": "Vulpes EMS heeft al meer dan een uur geen plan",
+      "description": "Het plannen mislukt steeds. De Status-sensor van Vulpes EMS laat zien waarom. Met actieve aansturing stuurt Vulpes de veilige modus (eigen verbruik) tot het plannen weer lukt."
+    },
+    "energy_stopped": {
+      "title": "Vulpes EMS: energiestatistieken gestopt",
+      "description": "De energiestatistieken die Vulpes gebruikt (net, zon, batterij) hebben al meer dan een dag geen nieuwe gegevens. De verbruiksprognose en de prestatiecijfers hangen ervan af. Controleer de energiesensoren en de recorder."
+    },
+    "script_failing": {
+      "title": "Vulpes EMS: aansturingsscript faalt steeds",
+      "description": "Het aansturingsscript is drie keer achter elkaar mislukt. De sensor Batterijaansturing toont de fout. Vulpes blijft het elke 15 minuten proberen."
     }
   }
 }
