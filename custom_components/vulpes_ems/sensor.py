@@ -396,7 +396,7 @@ class StatusSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
         h = self.coordinator.health
         return {
             "checks": h["checks"],
-            "problems": [f"{c['check']}: {c['detail']}" for c in h["checks"] if c["state"] in ("degraded", "problem")],
+            "problems": h["problems"],
             "review_warnings": (self.coordinator.review or {}).get("warnings", []),
         }
 

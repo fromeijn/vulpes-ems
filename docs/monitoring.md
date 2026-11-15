@@ -21,11 +21,11 @@ Agreement with the user's mode entity ("Agreement with current mode today") is c
 
 ## The review
 
-After recording, Vulpes reviews the last 30 local days. Days follow the configured time zone, so DST days have 23 or 25 hours.
+After recording, Vulpes reviews the last 30 local days. Days follow the configured time zone, so DST days have 23 or 25 hours. The measurements are hourly on UTC hours, so in a time zone with a 30 or 45-minute offset a day starts on the whole hour before local midnight.
 
 ### Savings
 
-For every complete day (every hour has the measured energy and load, every slot a price, and the SOC is known at both midnights):
+For every complete day (every hour has the measured energy, including the battery's charge and discharge, and the load, every slot a price, and the SOC is known at both midnights):
 
 - **Actual cost:** measured import at the hour's mean import price, minus measured export at the hour's mean export price, plus battery wear on the measured charge and discharge. Prices are the ones the plan had for each slot; slots without a plan use the wholesale price through the tariff.
 - **Self-consumption baseline:** the battery only covering the house, simulated on the measured load and PV in 15-minute steps with the same slot physics as the optimizer (`vulpes_opt::step`), from the SOC measured at midnight.
@@ -73,11 +73,11 @@ The Status sensor is the worst state of these checks (`not_enough_data` counts a
 | `history` | recording or the review failed | – |
 | `load_forecast`, `solar_forecast` | day-ahead RMSE over 7 days worse than persistence | – |
 | `soc_tracking` | above 5 points per hour over 7 days | – |
-| `coverage` | PV planes without solar energy statistics (no load, no savings) | – |
+| `coverage` | PV planes without solar energy statistics (no load, no savings), or no battery charge/discharge statistics (no savings) | – |
 
 A silent SOC sensor only counts while the plan expects the battery to move, because a full or empty battery can legitimately report nothing new for hours.
 
-**Repairs:** a repair issue opens when the battery SOC has been unavailable for an hour, there has been no plan for an hour, the energy statistics have had no new data for a day, or the control script failed three times in a row. It closes by itself when the cause is gone.
+**Repairs:** a repair issue opens when the battery SOC has been unavailable for an hour, there has been no plan for an hour, the energy statistics have had no new data for a day, or the control script failed three times in a row while Active is on. It closes by itself when the cause is gone; the script issue also closes when Active is switched off.
 
 ## Diagnostics
 
@@ -90,3 +90,4 @@ The diagnostics download contains the settings with entity ids, the script and m
 - Past days are reviewed with the current battery settings; after a settings change they are scored again with the new ones.
 - When the first plan fails at startup, Home Assistant retries the setup and no entities exist yet, the Status sensor included.
 - With PV planes but no solar energy statistics, the house load cannot be derived: savings and load accuracy are left out, and the coverage check says why.
+- Without the battery's charge and discharge statistics, the house load includes the battery's own power: a baseline simulated on it would count the battery twice, so the savings are left out, and the coverage check says why.

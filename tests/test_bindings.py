@@ -398,4 +398,5 @@ def test_health_op():
              last_success=NOW, soc_state="50", newest_energy_ts=NOW - 7200,
              price_attributes=[["today", [{"start": NOW - 3600, "price": 0.2}, {"start": NOW, "price": 0.2}]]])
     assert out["status"] == "ok", out
+    assert out["problems"] == []
     assert ha("issue_ids") == ["soc_unavailable", "no_plan", "energy_stopped", "script_failing"]

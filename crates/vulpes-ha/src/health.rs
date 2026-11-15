@@ -219,7 +219,8 @@ pub fn health(snap: &Value) -> Result<Value> {
     // Control.
     if truthy(snap.get("control_script")) {
         let failures = num("script_failures").unwrap_or(0.0) as u64;
-        if failures >= ISSUE_SCRIPT_FAILURES {
+        // Only while active: once control is handed back no script runs, so nothing could close it.
+        if truthy(snap.get("active")) && failures >= ISSUE_SCRIPT_FAILURES {
             issues.push("script_failing");
         }
         checks.push(if !truthy(snap.get("active")) {
@@ -256,7 +257,20 @@ pub fn health(snap: &Value) -> Result<Value> {
         .filter_map(|c| c.get("state").and_then(Value::as_str))
         .max_by_key(|s| rank(s))
         .map_or(OK, |s| if rank(s) == 0 { OK } else { s });
-    Ok(json!({"status": status, "checks": checks, "issues": issues}))
+    // The checks that aren't ok, as `check: detail` lines.
+    let problems: Vec<String> = checks
+        .iter()
+        .filter(|c| {
+            c.get("state")
+                .and_then(Value::as_str)
+                .is_some_and(|s| rank(s) > 0)
+        })
+        .map(|c| {
+            let text = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or("");
+            format!("{}: {}", text("check"), text("detail"))
+        })
+        .collect();
+    Ok(json!({"status": status, "checks": checks, "problems": problems, "issues": issues}))
 }
 
 #[cfg(test)]
@@ -481,6 +495,11 @@ mod tests {
             with(json!({"script_failures": 3}))["issues"],
             json!(["script_failing"])
         );
+        // Handed back: no script runs any more, so the issue must not stay open.
+        assert_eq!(
+            with(json!({"active": false, "script_failures": 9}))["issues"],
+            json!([])
+        );
         let h = with(json!({"control_script": null}));
         assert!(
             h["checks"]
@@ -488,6 +507,16 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|c| c["check"] != "control")
+        );
+    }
+
+    #[test]
+    fn problems_list_the_checks_that_are_not_ok() {
+        assert_eq!(health(&snap()).unwrap()["problems"], json!([]));
+        let h = with(json!({"history_error": "disk full", "last_error": "boom"}));
+        assert_eq!(
+            h["problems"],
+            json!(["control: the control script failed: boom", "history: disk full"])
         );
     }
 

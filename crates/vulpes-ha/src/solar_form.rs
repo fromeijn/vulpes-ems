@@ -67,6 +67,7 @@ pub fn azimuth_of(direction: &Value) -> Result<f64> {
     }
     let az: f64 = key
         .trim_end_matches('°')
+        .trim()
         .parse()
         .map_err(|_| Error::Message(format!("invalid direction '{key}'")))?;
     if !(0.0..=360.0).contains(&az) {
@@ -517,6 +518,7 @@ mod tests {
         assert_eq!(azimuth_of(&json!("NW")).unwrap(), 315.0);
         assert_eq!(azimuth_of(&json!("200")).unwrap(), 200.0);
         assert_eq!(azimuth_of(&json!(" 95° ")).unwrap(), 95.0);
+        assert_eq!(azimuth_of(&json!("200 °")).unwrap(), 200.0);
         assert_eq!(azimuth_of(&json!(360)).unwrap(), 0.0);
         assert_eq!(azimuth_of(&json!(200.0)).unwrap(), 200.0);
         for bad in ["up", "-5", "361", ""] {

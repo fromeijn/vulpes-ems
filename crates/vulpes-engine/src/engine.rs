@@ -38,7 +38,9 @@ fn fetch_weather(req: &PlanRequest) -> Result<HashMap<i64, WeatherSlot>> {
         },
         models: &models,
         vars: WEATHER_VARS,
-        range: open_meteo::Range::Forecast { days },
+        // One past day: the forecast starts at UTC midnight, after sunrise in the far east,
+        // and "PV forecast today" needs the weather since local midnight.
+        range: open_meteo::Range::Forecast { days, past_days: 1 },
     })
     .map_err(|e| Error::Weather(e.to_string()))?;
     Ok(with_tail(series, tail))
@@ -697,6 +699,34 @@ mod tests {
                 "{y}-{m}-{d}"
             );
         }
+    }
+
+    #[test]
+    fn pv_days_east_of_utc_need_weather_from_before_utc_midnight() {
+        // Tokyo, 13:00 local on 10 June = 04:00 UTC. The sun rose around 19:30 UTC the day before.
+        let tz = chrono_tz::Asia::Tokyo;
+        let now = tz.with_ymd_and_hms(2026, 6, 10, 13, 0, 0).unwrap().timestamp();
+        let mut req = request(now);
+        req.location = Location {
+            lat: 35.7,
+            lon: 139.7,
+        };
+        let utc_midnight = now - now.rem_euclid(86_400);
+        // A forecast from UTC midnight misses the morning: today is unknown, the rest is not.
+        let d = pv_days(
+            &req,
+            &clear_sky(utc_midnight, utc_midnight + 4 * 86_400),
+            tz,
+            now,
+            900,
+        );
+        assert_eq!(d.today, None);
+        assert!(d.today_remaining.is_some() && d.tomorrow.is_some());
+        // With one past day, as the engine requests it, the whole local day is covered.
+        let w = clear_sky(utc_midnight - 86_400, utc_midnight + 4 * 86_400);
+        let d = pv_days(&req, &w, tz, now, 900);
+        assert!(d.today.unwrap() >= d.today_remaining.unwrap());
+        assert!(d.tomorrow.is_some() && d.day_after.is_some());
     }
 
     #[test]

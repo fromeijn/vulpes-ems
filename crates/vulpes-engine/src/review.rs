@@ -288,11 +288,12 @@ impl Review<'_> {
             (false, false) => 0.0,
             (false, true) => return None, // PV without statistics: the load is unknown
         };
-        let throughput = if r.has_battery {
-            d.get(keys::BATTERY_CHARGE, h)? + d.get(keys::BATTERY_DISCHARGE, h)?
-        } else {
-            0.0
-        };
+        // Without battery statistics the house load includes the battery's own power: the
+        // costs and savings would run a second battery on top of it, so they stay unknown.
+        if !r.has_battery {
+            return None;
+        }
+        let throughput = d.get(keys::BATTERY_CHARGE, h)? + d.get(keys::BATTERY_DISCHARGE, h)?;
         let prices: Option<Vec<(f64, f64)>> =
             (0..HOUR / SLOT_S).map(|k| self.price(h + k * SLOT_S)).collect();
         Some(Hour {
@@ -396,11 +397,11 @@ impl Review<'_> {
         }
     }
 
-    /// Forecast scores of `var` against measured `actual` over `hours`.
+    /// Forecast scores of `var` against measured `actual` over the hours of the local days `spans`.
     fn forecast(
         &self,
         var: &str,
-        hours: &[i64],
+        spans: &[(i64, i64)],
         actual: &dyn Fn(i64) -> Option<f64>,
         daylight_only: bool,
     ) -> ForecastScores {
@@ -412,7 +413,10 @@ impl Review<'_> {
         let (mut da_common, mut pe_common) = (ErrorStats::default(), ErrorStats::default());
         let (mut sum, mut n) = (0.0, 0usize);
         let mut days = std::collections::HashSet::new();
-        for &h in hours {
+        for (start, h) in spans
+            .iter()
+            .flat_map(|&(s, e)| (s..e).step_by(HOUR as usize).map(move |h| (s, h)))
+        {
             let Some(a) = actual(h) else { continue };
             let f_da = self.data.fc_day_ahead.get(var).and_then(|m| m.get(&h)).copied();
             if daylight_only && a <= 0.0 && f_da.is_none_or(|f| f <= 0.0) {
@@ -423,7 +427,7 @@ impl Review<'_> {
                 da.add(f, a);
                 sum += a;
                 n += 1;
-                days.insert(h.div_euclid(86_400));
+                days.insert(start); // local days, as the windows and MIN_DAYS count them
                 if let Some(p) = prev {
                     da_common.add(f, a);
                     pe_common.add(p, a);
@@ -535,9 +539,10 @@ impl Review<'_> {
 
     fn window(&self, days: &[(NaiveDate, i64, i64, DayResult)]) -> Window {
         let complete: Vec<&DayResult> = days.iter().map(|d| &d.3).filter(|d| d.complete).collect();
-        let hours: Vec<i64> = days
+        let spans: Vec<(i64, i64)> = days.iter().map(|(_, s, e, _)| (*s, *e)).collect();
+        let hours: Vec<i64> = spans
             .iter()
-            .flat_map(|(_, s, e, _)| (*s..*e).step_by(HOUR as usize))
+            .flat_map(|&(s, e)| (s..e).step_by(HOUR as usize))
             .collect();
         let recorded: Vec<&PlanSlotRecord> = hours
             .iter()
@@ -561,36 +566,28 @@ impl Review<'_> {
             cost_plan: sum(|d| d.cost_plan),
             solar: self.forecast(
                 "pv_w",
-                &hours,
+                &spans,
                 &|h| match (self.req.has_solar, self.req.has_pv) {
                     (true, true) => d.get(keys::PV_TOTAL, h).map(|kwh| kwh * 1000.0),
                     _ => None,
                 },
                 true,
             ),
-            load: self.forecast("load_w", &hours, &|h| d.get(keys::LOAD_HOUSE, h), false),
+            load: self.forecast("load_w", &spans, &|h| d.get(keys::LOAD_HOUSE, h), false),
             price: self.prices(&hours),
             control: self.control(&hours),
         }
     }
 }
 
+/// Start of local day `d`, on the whole UTC hour at or before local midnight: the hourly
+/// samples and forecasts are keyed on UTC hours, also where the offset has 30 or 45 minutes.
 fn midnight(tz: Tz, d: NaiveDate) -> Option<i64> {
-    Some(
-        tz.from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
-            .earliest()?
-            .timestamp(),
-    )
-}
-
-fn add_meta(store: &Store, key: &str, add: f64) -> Result<f64> {
-    let total = store
-        .meta(key)?
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(0.0)
-        + add;
-    store.set_meta(key, &total.to_string())?;
-    Ok(total)
+    let t = tz
+        .from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
+        .earliest()?
+        .timestamp();
+    Some(t - t.rem_euclid(HOUR))
 }
 
 /// Review the history up to `now`, and add newly complete days to the totals.
@@ -647,19 +644,29 @@ pub fn review(store: &mut Store, req: &ReviewRequest) -> Result<ReviewResponse> 
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.0),
     );
+    let mut counting = store.meta(META_SINCE)?.is_some();
     for (date, start, end, day) in days.iter().filter(|d| through.is_none_or(|t| d.1 > t)) {
+        let through = start.to_string();
         if day.complete {
-            saved_actual = add_meta(store, META_SAVED_ACTUAL, day.saved_actual.unwrap_or(0.0))?;
-            saved_plan = add_meta(store, META_SAVED_PLAN, day.saved_plan.unwrap_or(0.0))?;
-            if store.meta(META_SINCE)?.is_none() {
-                store.set_meta(META_SINCE, &date.to_string())?;
+            // One transaction per day: a crash can't count a day and forget that it did.
+            let actual = saved_actual + day.saved_actual.unwrap_or(0.0);
+            let plan = saved_plan + day.saved_plan.unwrap_or(0.0);
+            let (actual_s, plan_s, since) = (actual.to_string(), plan.to_string(), date.to_string());
+            let mut pairs = vec![
+                (META_SAVED_ACTUAL, actual_s.as_str()),
+                (META_SAVED_PLAN, plan_s.as_str()),
+                (META_THROUGH, through.as_str()),
+            ];
+            if !counting {
+                pairs.push((META_SINCE, since.as_str()));
             }
+            store.set_meta_all(&pairs)?;
+            (saved_actual, saved_plan, counting) = (actual, plan, true);
         } else if req.now - end < GIVE_UP_S {
             break; // may still complete: wait, so the days after it keep their order
-        } else if store.meta(META_SINCE)?.is_none() {
-            continue; // nothing counted yet: no need to remember skipped days
-        }
-        store.set_meta(META_THROUGH, &start.to_string())?;
+        } else if counting {
+            store.set_meta_all(&[(META_THROUGH, through.as_str())])?;
+        } // else nothing counted yet: no need to remember skipped days
     }
 
     let mut warnings = Vec::new();
@@ -742,20 +749,12 @@ fn checks(req: &ReviewRequest, w: &Windows) -> Vec<Check> {
         missing.push("solar energy statistics (needed for the house load and savings)");
     }
     if !req.has_battery {
-        missing.push("battery charge/discharge statistics (battery wear in the actual cost)");
+        missing.push("battery charge/discharge statistics (needed for the house load and savings)");
     }
-    out.push(if req.has_pv && !req.has_solar {
-        check("coverage", "degraded", format!("missing: {}", missing.join("; ")))
+    out.push(if missing.is_empty() {
+        check("coverage", "ok", "")
     } else {
-        check(
-            "coverage",
-            "ok",
-            if missing.is_empty() {
-                String::new()
-            } else {
-                format!("missing: {}", missing.join("; "))
-            },
-        )
+        check("coverage", "degraded", format!("missing: {}", missing.join("; ")))
     });
     out
 }
@@ -997,10 +996,17 @@ mod tests {
         let coverage = resp.checks.iter().find(|c| c.check == "coverage").unwrap();
         assert_eq!(coverage.state, "degraded");
         assert!(coverage.detail.contains("solar energy statistics"));
-        // Without battery statistics the day still counts (without measured wear).
+        // Without battery statistics the load includes the battery: no costs either.
         let mut r = request(d1 + HOUR);
         r.has_battery = false;
-        assert!(review(&mut s, &r).unwrap().days.last().unwrap().complete);
+        let resp = review(&mut s, &r).unwrap();
+        let day = resp.days.last().unwrap();
+        assert!(!day.complete && day.saved_actual.is_none() && day.saved_plan.is_none());
+        assert_eq!(resp.windows.yesterday.saved_actual, None);
+        assert_eq!(resp.totals.since, None);
+        let coverage = resp.checks.iter().find(|c| c.check == "coverage").unwrap();
+        assert_eq!(coverage.state, "degraded");
+        assert!(coverage.detail.contains("battery charge/discharge statistics"));
     }
 
     #[test]
@@ -1094,6 +1100,54 @@ mod tests {
         assert_eq!(w.solar.day_ahead, None);
         assert_eq!(w.control.uptime_pct, Some(100.0));
         assert_eq!(w.active_share_pct, Some(100.0));
+    }
+
+    #[test]
+    fn half_hour_time_zones_review_whole_utc_hours() {
+        // Kolkata is UTC+5:30: local midnight is 18:30 UTC, the review day starts at 18:00.
+        let tz: Tz = "Asia/Kolkata".parse().unwrap();
+        let d: Vec<i64> = (6..=10)
+            .map(|d| midnight(tz, NaiveDate::from_ymd_opt(2026, 11, d).unwrap()).unwrap())
+            .collect();
+        assert_eq!(d[0].rem_euclid(HOUR), 0);
+        assert_eq!(d[1] - d[0], 24 * HOUR);
+        let mut s = Store::open_in_memory().unwrap();
+        for w in d.windows(2) {
+            write_day(&mut s, w[0], w[1], &|_| "self_consume", 0.0);
+        }
+        let hours: Vec<i64> = (d[0]..d[4]).step_by(HOUR as usize).collect();
+        forecasts(&mut s, "load_w", &hours, &|_| 1100.0, None);
+        let mut r = request(d[4] + 12 * HOUR);
+        r.timezone = "Asia/Kolkata".into();
+        let resp = review(&mut s, &r).unwrap();
+        let complete = resp.days.iter().filter(|d| d.complete).count();
+        assert_eq!(complete, 4, "{:?}", resp.days);
+        let load = resp.windows.days_7.load;
+        assert_eq!((load.days, load.hours), (4, 96));
+        assert!((load.day_ahead.unwrap().bias - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn scored_days_are_local_days() {
+        // Two local days in New York (UTC-5) touch three UTC days: still two days, not enough.
+        let tz: Tz = "America/New_York".parse().unwrap();
+        let d: Vec<i64> = (9..=11)
+            .map(|d| midnight(tz, NaiveDate::from_ymd_opt(2026, 11, d).unwrap()).unwrap())
+            .collect();
+        let mut s = Store::open_in_memory().unwrap();
+        for w in d.windows(2) {
+            write_day(&mut s, w[0], w[1], &|_| "self_consume", 0.0);
+        }
+        let hours: Vec<i64> = (d[0]..d[2]).step_by(HOUR as usize).collect();
+        forecasts(&mut s, "load_w", &hours, &|_| 1000.0, None);
+        let mut r = request(d[2] + 12 * HOUR);
+        r.timezone = "America/New_York".into();
+        let resp = review(&mut s, &r).unwrap();
+        let load = &resp.windows.days_7.load;
+        assert_eq!((load.days, load.hours), (2, 48));
+        assert_eq!((load.day_ahead, load.error_pct), (None, None));
+        let check = resp.checks.iter().find(|c| c.check == "load_forecast").unwrap();
+        assert_eq!(check.detail, format!("2 of {MIN_DAYS} days scored"));
     }
 
     #[test]

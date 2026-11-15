@@ -409,6 +409,24 @@ impl Store {
         Ok(())
     }
 
+    /// Set several `meta` values in one transaction: all of them, or none.
+    pub fn set_meta_all(&mut self, pairs: &[(&str, &str)]) -> crate::Result<()> {
+        if pairs.iter().any(|(k, _)| *k == "schema_version") {
+            return Err(crate::Error::Config(
+                "schema_version is managed by the store".into(),
+            ));
+        }
+        let tx = self.conn.transaction()?;
+        for (key, value) in pairs {
+            tx.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+                params![key, value],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Delete forecasts valid before `before`. Returns rows deleted.
     pub fn prune_forecasts(&self, source: &str, before: i64) -> crate::Result<usize> {
         Ok(self.conn.execute(
@@ -757,13 +775,24 @@ mod tests {
 
     #[test]
     fn meta_values_and_protected_schema_version() {
-        let s = Store::open_in_memory().unwrap();
+        let mut s = Store::open_in_memory().unwrap();
         assert_eq!(s.meta("review.since").unwrap(), None);
         s.set_meta("review.since", "2026-11-14").unwrap();
         s.set_meta("review.since", "2026-11-15").unwrap();
         assert_eq!(s.meta("review.since").unwrap().as_deref(), Some("2026-11-15"));
         assert!(s.set_meta("schema_version", "2").is_err());
         assert_eq!(s.meta("schema_version").unwrap().as_deref(), Some("1"));
+        // Several at once: all of them, or none.
+        s.set_meta_all(&[("review.a", "1"), ("review.b", "2")]).unwrap();
+        assert_eq!(s.meta("review.a").unwrap().as_deref(), Some("1"));
+        assert_eq!(s.meta("review.b").unwrap().as_deref(), Some("2"));
+        assert!(
+            s.set_meta_all(&[("review.a", "9"), ("schema_version", "2")])
+                .is_err()
+        );
+        assert_eq!(s.meta("review.a").unwrap().as_deref(), Some("1"));
+        assert_eq!(s.meta("schema_version").unwrap().as_deref(), Some("1"));
+        s.set_meta_all(&[]).unwrap();
     }
 
     #[test]

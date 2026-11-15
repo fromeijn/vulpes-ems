@@ -70,7 +70,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.started_at = dt_util.utcnow().timestamp()
         self.last_success_ts: float | None = None
         self.script_failures = 0
-        self.health: dict[str, Any] = {"status": "ok", "checks": [], "issues": []}
+        self.health: dict[str, Any] = {"status": "ok", "checks": [], "problems": [], "issues": []}
         self._open_issues: set[str] = set()
         self.calibration = SolarCalibration(hass, entry)
         # Active control: set by the Active switch (restored across restarts).
@@ -173,11 +173,9 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if self.review_error != str(err):
                     _LOGGER.warning("Could not review the history: %s", err)
                 self.review_error = str(err)
-                self.async_update_listeners()
                 return
         self.review = json.loads(raw)
         self.review_error = None
-        self.async_update_listeners()
 
     async def async_record(self) -> None:
         """Record this tick in the history file; agreement comes back from it."""
@@ -205,7 +203,6 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if self.history_error != str(err):
                     _LOGGER.warning("Could not record the history: %s", err)
                 self.history_error = str(err)
-                self.async_update_listeners()
                 return
         out = json.loads(raw)
         self.history_error = None
@@ -213,7 +210,6 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.agree = out["agreement_today"]["agreed"]
         self.agrees_now = out["agrees_now"]
         self.newest_energy_ts = out["newest_energy_ts"]
-        self.async_update_listeners()
 
     def _safe_command(self) -> dict[str, Any]:
         return ha("safe_command", cfg=self.cfg, now=dt_util.utcnow().timestamp(), fallback=False)
@@ -237,10 +233,10 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self.async_apply()
             await self.async_record()
             self.update_health()
-        elif was_active and self.control_script:
-            await self._async_run_script(self._safe_command())
         else:
-            self.async_update_listeners()
+            if was_active and self.control_script:
+                await self._async_run_script(self._safe_command())
+            self.update_health()  # Status and repairs follow at once; notifies the listeners
 
     async def async_apply(self) -> None:
         """Run the control script for the current slot, or the safe command without a usable plan."""
