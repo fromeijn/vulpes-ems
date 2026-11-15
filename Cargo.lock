@@ -1180,7 +1180,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vulpes-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1200,7 +1200,7 @@ dependencies = [
 
 [[package]]
 name = "vulpes-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "rusqlite",
  "serde",
@@ -1210,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "vulpes-engine"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -1227,7 +1227,7 @@ dependencies = [
 
 [[package]]
 name = "vulpes-ha"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -1240,7 +1240,7 @@ dependencies = [
 
 [[package]]
 name = "vulpes-load"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -1249,14 +1249,14 @@ dependencies = [
 
 [[package]]
 name = "vulpes-opt"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "vulpes-core",
 ]
 
 [[package]]
 name = "vulpes-price"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "vulpes-core",
@@ -1264,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "vulpes-py"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "pyo3",
@@ -1277,7 +1277,7 @@ dependencies = [
 
 [[package]]
 name = "vulpes-solar"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1287,7 +1287,7 @@ dependencies = [
 
 [[package]]
 name = "vulpes-sources"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "quick-xml",

@@ -4,6 +4,8 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 
 ## Unreleased
 
+## 0.5.0 - 2026-11-15
+
 The integration now judges itself: a Status sensor, repair issues and performance sensors, from a history file Vulpes keeps (see `docs/monitoring.md`). The performance figures appear once three complete days are recorded. All of the integration's logic moved into the Rust core; the integration and the `vulpes-ems` wheel must be updated together, as always. CLI stores from earlier versions keep working (a new table is added the first time a newer CLI opens them, and older CLIs ignore it).
 
 ### Added
