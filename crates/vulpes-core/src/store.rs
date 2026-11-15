@@ -262,13 +262,11 @@ impl Store {
         to: i64,
         asof: i64,
     ) -> crate::Result<Vec<(i64, f64)>> {
+        // One pass over the primary key; see `forecasts_at_lead`.
         let mut stmt = self.conn.prepare_cached(
-            "SELECT f.valid_ts, f.value FROM forecasts f
-             WHERE f.source = ?1 AND f.var = ?2 AND f.valid_ts >= ?3 AND f.valid_ts < ?4
-               AND f.issued_ts = (SELECT MAX(g.issued_ts) FROM forecasts g
-                                  WHERE g.source = f.source AND g.var = f.var
-                                    AND g.valid_ts = f.valid_ts AND g.issued_ts <= ?5)
-             ORDER BY f.valid_ts",
+            "SELECT valid_ts, value, MAX(issued_ts) FROM forecasts
+             WHERE source = ?1 AND var = ?2 AND valid_ts >= ?3 AND valid_ts < ?4 AND issued_ts <= ?5
+             GROUP BY valid_ts ORDER BY valid_ts",
         )?;
         let rows = stmt.query_map(params![source, var, from, to, asof], |r| {
             Ok((r.get(0)?, r.get(1)?))
@@ -287,13 +285,15 @@ impl Store {
         to: i64,
         lead_s: i64,
     ) -> crate::Result<Vec<(i64, f64)>> {
+        // One pass over the primary key: with a single MAX() aggregate, SQLite
+        // takes the bare columns (`value`) from the row that holds the maximum.
+        // A correlated subquery per row cost a lookup per stored issue, which
+        // grew with the square of the issues per hour.
         let mut stmt = self.conn.prepare_cached(
-            "SELECT f.valid_ts, f.value FROM forecasts f
-             WHERE f.source = ?1 AND f.var = ?2 AND f.valid_ts >= ?3 AND f.valid_ts < ?4
-               AND f.issued_ts = (SELECT MAX(g.issued_ts) FROM forecasts g
-                                  WHERE g.source = f.source AND g.var = f.var
-                                    AND g.valid_ts = f.valid_ts AND g.issued_ts <= f.valid_ts - ?5)
-             ORDER BY f.valid_ts",
+            "SELECT valid_ts, value, MAX(issued_ts) FROM forecasts
+             WHERE source = ?1 AND var = ?2 AND valid_ts >= ?3 AND valid_ts < ?4
+               AND issued_ts <= valid_ts - ?5
+             GROUP BY valid_ts ORDER BY valid_ts",
         )?;
         let rows = stmt.query_map(params![source, var, from, to, lead_s], |r| {
             Ok((r.get(0)?, r.get(1)?))
@@ -553,6 +553,53 @@ mod tests {
             vec![(100, 1.0)]
         );
         assert!(s.forecasts_asof("om", "ghi", 0, 300, -1).unwrap().is_empty());
+    }
+
+    /// Many issues per hour, stored out of order: both queries must return the
+    /// value of the newest qualifying issue, as a brute-force search does.
+    #[test]
+    fn forecast_queries_match_brute_force_with_many_issues() {
+        let h = 3600;
+        let mut points = Vec::new();
+        for hour in 0..30_i64 {
+            for k in 0..48_i64 {
+                // Scrambled issue order; values differ per issue.
+                let issue = (k * 29 + hour * 7) % 48;
+                points.push(ForecastPoint {
+                    valid_ts: 100 * h + hour * h,
+                    issued_ts: 100 * h + hour * h - issue * h,
+                    value: (hour * 1000 + issue) as f64,
+                });
+            }
+        }
+        let mut s = Store::open_in_memory().unwrap();
+        s.put_forecasts("vulpes", "pv_w", &points).unwrap();
+        s.put_forecasts("vulpes", "load_w", &points[..10]).unwrap();
+        let (from, to) = (100 * h + 3 * h, 100 * h + 25 * h);
+        let brute = |ok: &dyn Fn(&ForecastPoint) -> bool| -> Vec<(i64, f64)> {
+            let mut best: std::collections::BTreeMap<i64, (i64, f64)> = Default::default();
+            for p in points
+                .iter()
+                .filter(|p| p.valid_ts >= from && p.valid_ts < to && ok(p))
+            {
+                let e = best.entry(p.valid_ts).or_insert((i64::MIN, 0.0));
+                if p.issued_ts > e.0 {
+                    *e = (p.issued_ts, p.value);
+                }
+            }
+            best.into_iter().map(|(t, (_, v))| (t, v)).collect()
+        };
+        for lead in [0, 15 * 60, h, 23 * h + 45 * 60, 24 * h, 47 * h, 48 * h] {
+            let want = brute(&|p| p.issued_ts <= p.valid_ts - lead);
+            assert_eq!(
+                s.forecasts_at_lead("vulpes", "pv_w", from, to, lead).unwrap(),
+                want
+            );
+        }
+        for asof in [0, 80 * h, 100 * h + 10 * h, 200 * h] {
+            let want = brute(&|p| p.issued_ts <= asof);
+            assert_eq!(s.forecasts_asof("vulpes", "pv_w", from, to, asof).unwrap(), want);
+        }
     }
 
     #[test]
