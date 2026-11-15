@@ -23,11 +23,13 @@ Agreement with the user's mode entity ("Agreement with current mode today") is c
 
 After recording, Vulpes reviews the last 30 local days. Days follow the configured time zone, so DST days have 23 or 25 hours. The measurements are hourly on UTC hours, so in a time zone with a 30 or 45-minute offset a day starts on the whole hour before local midnight.
 
+The review covers complete past days only, so its figures can change only when a new hour of energy statistics arrives, the local date changes, or the settings change. The result is stored in the `meta` table with what it was computed from, and later ticks reuse it until one of these changes. In practice the review runs about once an hour, at the first tick after the hour's statistics land.
+
 ### Savings
 
 For every complete day (every hour has the measured energy, including the battery's charge and discharge, and the load, every slot a price, and the SOC is known at both midnights):
 
-- **Actual cost:** measured import at the hour's mean import price, minus measured export at the hour's mean export price, plus battery wear on the measured charge and discharge. Prices are the ones the plan had for each slot; slots without a plan use the wholesale price through the tariff.
+- **Actual cost:** measured import at the hour's mean import price, minus measured export at the hour's mean export price, plus battery wear on the measured charge and discharge. Prices are the ones the plan had for each slot. A slot without a plan (a failed tick, Home Assistant down) takes, in this order: the hour's price from an earlier plan's forecasts when it was already published then (the hourly mean, with the export price derived from it through the tariffs), the wholesale price through the tariff, or the mean of the hour's other recorded slots. Only an hour with none of these makes the day incomplete.
 - **Self-consumption baseline:** the battery only covering the house, simulated on the measured load and PV in 15-minute steps with the same slot physics as the optimizer (`vulpes_opt::step`), from the SOC measured at midnight.
 - **Plan replayed:** the same simulation with each slot's planned mode. A slot without a plan, or with a mode that is no longer enabled, uses self-consumption (counted in a warning).
 - **Energy left in the battery** at the end of the day differs between these. It is valued at the terminal value of the day's last plan (the expected future price after discharge losses): `saved = baseline − actual − (baseline end SOC − measured end SOC) × value`, and the same for the plan.

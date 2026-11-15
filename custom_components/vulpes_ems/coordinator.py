@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 import logging
 from typing import Any
@@ -28,7 +28,7 @@ from .core import C, dumps, ha, stat_rows
 _LOGGER = logging.getLogger(__name__)
 # The control script runs to completion before the next step; errors in it
 # show up on the Battery control sensor.
-SCRIPT_TIMEOUT_S = 60
+SCRIPT_TIMEOUT_S = C["script_timeout_s"]
 
 
 async def async_energy_changes(
@@ -40,9 +40,9 @@ async def async_energy_changes(
     )
 
 
-def history_start(now: datetime, days: int) -> datetime:
-    """The start of the hour `days` before `now`."""
-    return (now - timedelta(days=days)).replace(minute=0, second=0, microsecond=0)
+def stats_start(now: datetime) -> datetime:
+    """Where the energy statistics the plan reads start (decided in Rust)."""
+    return dt_util.utc_from_timestamp(ha("stats_start", now=now.timestamp()))
 
 
 class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -57,12 +57,14 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Agreement with the user's mode entity today, counted from the history file.
         self.agree = 0
         self.compared = 0
+        self.agreement_pct: float | None = None
         self.agrees_now: bool | None = None
         # The history file (same format as the CLI's store); see vulpes_ha::history.
         self.history_path = hass.config.path(DOMAIN, entry.entry_id, "vulpes.db")
         self._history_lock = asyncio.Lock()
         self.history_error: str | None = None
         self.newest_energy_ts: int | None = None
+        self.energy_until: int | None = None
         # The review of the history file: savings, forecast quality, control.
         self.review: dict[str, Any] | None = None
         self.review_error: str | None = None
@@ -71,7 +73,11 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.last_success_ts: float | None = None
         self.script_failures = 0
         self.health: dict[str, Any] = {"status": "ok", "checks": [], "problems": [], "issues": []}
-        self._open_issues: set[str] = set()
+        # Every issue counts as open at first, so the first check closes any that an
+        # earlier run of this entry left behind (closing a missing issue does nothing).
+        self._open_issues: set[str] = set(ha("issue_ids"))
+        # Set on unload: a tick still running then stops before its next step.
+        self._closed = False
         self.calibration = SolarCalibration(hass, entry)
         # Active control: set by the Active switch (restored across restarts).
         # The script is fixed for this setup: changing it reloads the entry.
@@ -102,6 +108,8 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_refresh_and_apply(self) -> None:
         await self.async_refresh()
+        if self._closed:
+            return
         await self.async_apply()
         # Recorded after the script ran: the mode entity then shows this slot's mode.
         await self.async_record()
@@ -111,6 +119,8 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @callback
     def update_health(self) -> None:
         """Run the health checks on what Home Assistant shows now; open or close repair issues."""
+        if self._closed:
+            return
         cfg = self.cfg
         soc = self.hass.states.get(cfg.get(CONF_SOC_ENTITY, ""))
         price = self.hass.states.get(cfg.get(CONF_PRICE_ENTITY, ""))
@@ -167,6 +177,8 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Review the history file (savings, forecasts, control); never blocks planning."""
         request = {"cfg": self.cfg, "now": dt_util.utcnow().timestamp(), "timezone": str(self.hass.config.time_zone)}
         async with self._history_lock:
+            if self._closed:
+                return
             try:
                 raw = await self.hass.async_add_executor_job(vulpes_ems.review_ha, self.history_path, dumps(request))
             except ValueError as err:
@@ -197,6 +209,8 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "wholesale": self._wholesale,
         }
         async with self._history_lock:
+            if self._closed:
+                return
             try:
                 raw = await self.hass.async_add_executor_job(vulpes_ems.record_ha, self.history_path, dumps(request))
             except ValueError as err:
@@ -208,8 +222,10 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.history_error = None
         self.compared = out["agreement_today"]["compared"]
         self.agree = out["agreement_today"]["agreed"]
+        self.agreement_pct = out["agreement_today"]["pct"]
         self.agrees_now = out["agrees_now"]
         self.newest_energy_ts = out["newest_energy_ts"]
+        self.energy_until = out["energy_until"]
 
     def _safe_command(self) -> dict[str, Any]:
         return ha("safe_command", cfg=self.cfg, now=dt_util.utcnow().timestamp(), fallback=False)
@@ -220,14 +236,24 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Without this, the inverter would stay in the last mode Vulpes sent. A
         reload with the same script restores the Active switch and applies the
         plan again right away.
+
+        A tick that is still planning stops before its next step, so it can't
+        send the plan after the safe command, write the history file after the
+        entry is removed, or reopen repair issues.
         """
+        self._closed = True
         self.stop_schedule()
+        # Let a history write that is already running finish before the entry's folder goes.
+        async with self._history_lock:
+            pass
         self.clear_issues()
         if self.active and self.control_script:
             await self._async_run_script(self._safe_command())
 
     async def async_set_active(self, active: bool) -> None:
         """Hand over control (apply the plan now) or take it back (send the safe command once)."""
+        if self._closed:
+            return
         was_active, self.active = self.active, active
         if active:
             await self.async_apply()
@@ -240,7 +266,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_apply(self) -> None:
         """Run the control script for the current slot, or the safe command without a usable plan."""
-        if not self.active or not self.control_script:
+        if self._closed or not self.active or not self.control_script:
             return
         cmd = ha(
             "command",
@@ -257,20 +283,29 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         script = self.control_script
         if script is None:
             return
+        error: str | None = None
+        timed_out = False
         try:
             # Call the script's own service so errors in its actions reach us.
             async with asyncio.timeout(SCRIPT_TIMEOUT_S):
                 await self.hass.services.async_call("script", script.split(".", 1)[1], cmd, blocking=True)
         except TimeoutError:
             _LOGGER.warning("Control script %s did not finish within %d s", script, SCRIPT_TIMEOUT_S)
-            self.last_error = f"did not finish within {SCRIPT_TIMEOUT_S} s"
+            timed_out = True
         except Exception as err:  # noqa: BLE001 - a failing script must not stop the schedule
             _LOGGER.warning("Control script %s failed: %s", script, err)
-            self.last_error = str(err) or type(err).__name__
-        else:
-            self.last_error = None
-        self.script_failures = self.script_failures + 1 if self.last_error else 0
-        self.last_command = {**cmd, "sent": dt_util.utcnow().isoformat()}
+            error = str(err) or type(err).__name__
+        result = ha(
+            "script_result",
+            cmd=cmd,
+            error=error,
+            timed_out=timed_out,
+            failures=self.script_failures,
+            now=dt_util.utcnow().timestamp(),
+        )
+        self.last_command = result["last_command"]
+        self.last_error = result["last_error"]
+        self.script_failures = result["script_failures"]
         self.async_update_listeners()
 
     async def _wholesale_history(self, cfg: dict[str, Any], now: datetime) -> list[tuple[int, float]]:
@@ -293,7 +328,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         price = self.hass.states.get(cfg.get(CONF_PRICE_ENTITY, ""))
         ids = ha("energy_ids", cfg=cfg)
         stats = (
-            await async_energy_changes(self.hass, set(ids), history_start(now, C["load_history_days"]))
+            await async_energy_changes(self.hass, set(ids), stats_start(now))
             if ids
             else {}
         )

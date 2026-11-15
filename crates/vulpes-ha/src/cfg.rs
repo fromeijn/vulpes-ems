@@ -111,6 +111,19 @@ pub fn int_value(x: f64) -> Value {
     }
 }
 
+/// `[ts, value]` pairs under `key` as `(i64, f64)`; malformed pairs are skipped,
+/// a missing key gives none.
+pub fn ts_pairs(req: &Value, key: &str) -> Vec<(i64, f64)> {
+    req.get(key)
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| Some((p.get(0).and_then(as_f64)? as i64, p.get(1).and_then(as_f64)?)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +131,14 @@ mod tests {
 
     fn cfg(v: Value) -> Cfg {
         v.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn ts_pairs_skip_malformed_rows() {
+        let r = json!({"w": [[3600, 0.1], [7200.0, "0.2"], ["x", 1], [1], null]});
+        assert_eq!(ts_pairs(&r, "w"), [(3600, 0.1), (7200, 0.2)]);
+        assert!(ts_pairs(&r, "missing").is_empty());
+        assert!(ts_pairs(&json!({"w": 3}), "w").is_empty());
     }
 
     #[test]

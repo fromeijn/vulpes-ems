@@ -106,7 +106,6 @@ SENSORS = (
         key="plan_cost",
         translation_key="plan_cost",
         device_class=SensorDeviceClass.MONETARY,
-        native_unit_of_measurement="EUR",
         suggested_display_precision=2,
         value=lambda c: c.data["summary"]["cost"],
     ),
@@ -116,7 +115,7 @@ SENSORS = (
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=0,
-        value=lambda c: round(100.0 * c.agree / c.compared, 1) if c.compared else None,
+        value=lambda c: c.agreement_pct,
     ),
 )
 
@@ -170,7 +169,6 @@ REVIEW_SENSORS = (
         key="saved_7d",
         translation_key="saved_7d",
         device_class=SensorDeviceClass.MONETARY,
-        native_unit_of_measurement="EUR",
         suggested_display_precision=2,
         value=lambda c: _r(c, "windows", "days_7", "saved_actual"),
         attrs=lambda c: _window(c, "saved_actual"),
@@ -179,7 +177,6 @@ REVIEW_SENSORS = (
         key="plan_saved_7d",
         translation_key="plan_saved_7d",
         device_class=SensorDeviceClass.MONETARY,
-        native_unit_of_measurement="EUR",
         suggested_display_precision=2,
         value=lambda c: _r(c, "windows", "days_7", "saved_plan"),
         attrs=lambda c: _window(c, "saved_plan"),
@@ -189,9 +186,8 @@ REVIEW_SENSORS = (
         translation_key="total_saved",
         device_class=SensorDeviceClass.MONETARY,
         state_class=SensorStateClass.TOTAL,
-        native_unit_of_measurement="EUR",
         suggested_display_precision=2,
-        value=lambda c: _r(c, "totals", "saved_actual") if _r(c, "totals", "since") else None,
+        value=lambda c: _r(c, "totals", "saved_actual"),
         attrs=lambda c: {"since": _r(c, "totals", "since"), "plan_total": _r(c, "totals", "saved_plan")},
     ),
     ReviewSensorDescription(
@@ -254,6 +250,13 @@ def remove_stale(hass: HomeAssistant, entry: VulpesConfigEntry, domain: str, key
             registry.async_remove(reg.entity_id)
 
 
+def currency(coordinator: VulpesCoordinator, description: SensorEntityDescription) -> str | None:
+    """Money in Home Assistant's currency, the one the tariffs are entered in."""
+    if description.device_class == SensorDeviceClass.MONETARY:
+        return coordinator.hass.config.currency
+    return description.native_unit_of_measurement
+
+
 def device_info(entry: VulpesConfigEntry) -> DeviceInfo:
     return DeviceInfo(identifiers={(DOMAIN, entry.entry_id)}, name="Vulpes EMS", manufacturer="vulpes-ems")
 
@@ -296,6 +299,7 @@ class VulpesSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_device_info = device_info(entry)
+        self._attr_native_unit_of_measurement = currency(coordinator, description)
         if description.device_class == SensorDeviceClass.ENUM:
             self._attr_options = ha("enabled_modes", cfg=coordinator.cfg)
 
@@ -441,8 +445,7 @@ class EnergyDataSensor(_TimestampSensor):
     _key = "newest_energy_data"
 
     def _ts(self) -> float | None:
-        t = self.coordinator.newest_energy_ts
-        return t + 3600 if t is not None else None
+        return self.coordinator.energy_until
 
 
 class ReviewSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
@@ -456,6 +459,7 @@ class ReviewSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_device_info = device_info(entry)
+        self._attr_native_unit_of_measurement = currency(coordinator, description)
 
     @property
     def available(self) -> bool:

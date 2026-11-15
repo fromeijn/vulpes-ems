@@ -5,7 +5,7 @@
 //!
 //! [`record`] runs once per 15-minute tick; [`export`] reads a period back
 //! for the diagnostics download. Both take an open store, so they are tested
-//! on an in-memory one; the `*_json` entry points open the file.
+//! on an in-memory one; [`record_file`] and [`export_file`] open the file.
 
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -363,21 +363,17 @@ pub fn open(path: &str) -> Result<Store> {
     Ok(Store::open(path)?)
 }
 
-/// JSON entry point: record a tick in the history file at `path`.
-pub fn record_json(path: &str, request: &str) -> Result<String> {
-    let req: RecordRequest = serde_json::from_str(request).map_err(|e| Error::Request(e.to_string()))?;
+/// Record a tick in the history file at `path` (created with its folder).
+pub fn record_file(path: &str, req: &RecordRequest) -> Result<RecordResponse> {
     let mut store = open(path)?;
-    let resp = record(&mut store, &req)?;
+    let resp = record(&mut store, req)?;
     store.checkpoint()?;
-    serde_json::to_string(&resp).map_err(|e| Error::Request(e.to_string()))
+    Ok(resp)
 }
 
-/// JSON entry point: export a period of the history file at `path`.
-pub fn export_json(path: &str, request: &str) -> Result<String> {
-    let req: ExportRequest = serde_json::from_str(request).map_err(|e| Error::Request(e.to_string()))?;
-    let store = open(path)?;
-    let resp = export(&store, &req)?;
-    serde_json::to_string(&resp).map_err(|e| Error::Request(e.to_string()))
+/// Export a period of the history file at `path`.
+pub fn export_file(path: &str, req: &ExportRequest) -> Result<ExportResponse> {
+    export(&open(path)?, req)
 }
 
 #[cfg(test)]
@@ -654,16 +650,19 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vulpes-history-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("entry").join("vulpes.db");
-        let out = record_json(
-            path.to_str().unwrap(),
-            &serde_json::to_string(&request(T0)).unwrap(),
+        let path = path.to_str().unwrap();
+        let out = record_file(path, &request(T0)).unwrap();
+        assert_eq!(out.forecasts_written, 4 * 48);
+        let back = export_file(
+            path,
+            &ExportRequest {
+                from: 0,
+                to: i64::MAX,
+            },
         )
         .unwrap();
-        assert!(out.contains("forecasts_written"));
-        let back = export_json(path.to_str().unwrap(), r#"{"from": 0, "to": 9999999999}"#).unwrap();
-        assert!(back.contains("plan_slots"));
-        assert!(record_json("", "{}").is_err());
-        assert!(record_json(path.to_str().unwrap(), "{").is_err());
+        assert_eq!(back.plan_slots.len(), 1);
+        assert!(record_file("", &request(T0)).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

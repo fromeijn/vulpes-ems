@@ -5,7 +5,7 @@
 
 use crate::Result;
 use crate::cfg::{Cfg, as_f64, obj, req_num, truthy};
-use crate::inputs::{parse_price_attributes, soc_value};
+use crate::inputs::{attribute_pairs, parse_price_attributes, soc_value};
 use crate::time::zone;
 use chrono::{DateTime, Timelike};
 use serde_json::{Value, json};
@@ -132,13 +132,7 @@ pub fn health(snap: &Value) -> Result<Value> {
     });
 
     // Prices.
-    let attrs: Option<Vec<(String, Value)>> =
-        snap.get("price_attributes").and_then(Value::as_array).map(|a| {
-            a.iter()
-                .filter_map(|p| Some((p.get(0)?.as_str()?.to_string(), p.get(1)?.clone())))
-                .collect()
-        });
-    let known = attrs
+    let known = attribute_pairs(snap, "price_attributes")
         .map(|a| parse_price_attributes(&a, text("price_unit"), tz))
         .unwrap_or_default();
     let local = DateTime::from_timestamp(now as i64, 0).map(|t| t.with_timezone(&tz));
@@ -150,12 +144,11 @@ pub fn health(snap: &Value) -> Result<Value> {
         {
             check("prices", PROBLEM, "the price sensor has no price for now")
         } else if let Some(local) = local.filter(|l| l.hour() >= PRICES_TOMORROW_HOUR) {
+            // The start of tomorrow's last hour.
             let day_end = local
                 .date_naive()
                 .succ_opt()
-                .and_then(|d| d.and_hms_opt(23, 0, 0))
-                .and_then(|m| chrono::TimeZone::from_local_datetime(&tz, &m).earliest())
-                .map(|t| t.timestamp());
+                .and_then(|d| vulpes_engine::time::local_time(tz, d, 23));
             if last_known.zip(day_end).is_some_and(|(k, e)| k < e) {
                 check(
                     "prices",

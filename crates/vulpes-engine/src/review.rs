@@ -8,7 +8,7 @@
 
 use crate::history::{LEAD_DAY_AHEAD_S, LEAD_LATEST_S, open};
 use crate::{Error, ExportTariff, Result};
-use chrono::{DateTime, Days, NaiveDate, TimeZone};
+use chrono::{Days, NaiveDate};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -34,6 +34,9 @@ const META_THROUGH: &str = "review.finalised_through";
 const META_SAVED_ACTUAL: &str = "review.total_saved_actual";
 const META_SAVED_PLAN: &str = "review.total_saved_plan";
 const META_SINCE: &str = "review.since";
+/// The last response, and what it was computed from (see [`cache_key`]).
+const META_CACHE: &str = "review.cache";
+const META_CACHE_KEY: &str = "review.cache_key";
 
 /// What the review needs besides the history: the current settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,8 +166,9 @@ pub struct DayResult {
 pub struct Totals {
     /// The first day counted.
     pub since: Option<String>,
-    pub saved_actual: f64,
-    pub saved_plan: f64,
+    /// The running totals; `None` until the first day is counted.
+    pub saved_actual: Option<f64>,
+    pub saved_plan: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -266,18 +270,42 @@ struct Review<'a> {
 }
 
 impl Review<'_> {
+    /// The import and export price of the slot at `ts`, as the plan had it. A slot without
+    /// a plan (a failed tick, Home Assistant down) takes, in this order: the hour's published
+    /// price from an earlier plan's forecasts, the wholesale price through the tariff, or the
+    /// mean of the hour's other recorded slots. Only an hour with none of these is unknown.
     fn price(&self, ts: i64) -> Option<(f64, f64)> {
-        if let Some(s) = self.data.slots.get(&ts) {
-            if let (Some(i), Some(e)) = (s.import_price, s.export_price) {
-                return Some((i, e));
+        let recorded = |ts: i64| {
+            let s = self.data.slots.get(&ts)?;
+            s.import_price.zip(s.export_price)
+        };
+        if let Some(p) = recorded(ts) {
+            return Some(p);
+        }
+        let r = self.req;
+        let h = ts - ts.rem_euclid(HOUR);
+        let latest = |var: &str| self.data.fc_latest.get(var).and_then(|m| m.get(&h)).copied();
+        // All four quarter hours were published when the forecast was issued.
+        if latest("price_known").is_some_and(|k| k >= 1.0) {
+            if let Some(p) =
+                latest("import_price").and_then(|i| Some((i, r.export.from_import(i, &r.tariff)?)))
+            {
+                return Some(p);
             }
         }
-        // No plan for the slot: the price through the tariff from the wholesale price.
-        let w = self.data.get(keys::WHOLESALE_NL, ts - ts.rem_euclid(HOUR))?;
-        Some((
-            self.req.tariff.price(w),
-            self.req.export.a * w + self.req.export.b,
-        ))
+        if let Some(w) = self.data.get(keys::WHOLESALE_NL, h) {
+            return Some((r.tariff.price(w), r.export.a * w + r.export.b));
+        }
+        let known: Vec<(f64, f64)> = (0..HOUR / SLOT_S)
+            .filter_map(|k| recorded(h + k * SLOT_S))
+            .collect();
+        let n = known.len() as f64;
+        (n > 0.0).then(|| {
+            (
+                known.iter().map(|p| p.0).sum::<f64>() / n,
+                known.iter().map(|p| p.1).sum::<f64>() / n,
+            )
+        })
     }
 
     fn hour(&self, h: i64) -> Option<Hour> {
@@ -582,25 +610,53 @@ impl Review<'_> {
 
 /// Start of local day `d`, on the whole UTC hour at or before local midnight: the hourly
 /// samples and forecasts are keyed on UTC hours, also where the offset has 30 or 45 minutes.
+/// (Slot records are per quarter hour, so agreement in the integration uses the exact
+/// midnight of [`crate::time::local_midnight`].)
 fn midnight(tz: Tz, d: NaiveDate) -> Option<i64> {
-    let t = tz
-        .from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
-        .earliest()?
-        .timestamp();
+    let t = crate::time::local_midnight(tz, d)?;
     Some(t - t.rem_euclid(HOUR))
+}
+
+/// What a review's result depends on besides the stored history of past days: the
+/// settings, the local date, and the newest hour of energy data. The figures cover
+/// complete past days only, so they can change only when one of these does (new hourly
+/// statistics come with every hour, so corrected ones are picked up within the hour).
+fn cache_key(store: &Store, req: &ReviewRequest, today: NaiveDate) -> Result<String> {
+    let settings = ReviewRequest {
+        now: 0,
+        ..req.clone()
+    };
+    let settings = serde_json::to_string(&settings).map_err(|e| Error::Request(e.to_string()))?;
+    let newest = store.last_sample_ts(keys::GRID_IMPORT, HOUR)?;
+    Ok(format!(
+        "{}|{today}|{newest:?}|{settings}",
+        env!("CARGO_PKG_VERSION")
+    ))
 }
 
 /// Review the history up to `now`, and add newly complete days to the totals.
 pub fn review(store: &mut Store, req: &ReviewRequest) -> Result<ReviewResponse> {
+    Ok(review_cached(store, req)?.0)
+}
+
+/// [`review`], and whether it computed anything (false: the stored result was still valid).
+fn review_cached(store: &mut Store, req: &ReviewRequest) -> Result<(ReviewResponse, bool)> {
     req.battery.validate()?;
     let tz: Tz = req
         .timezone
         .parse()
         .map_err(|_| Error::Request(format!("unknown time zone '{}'", req.timezone)))?;
-    let today = DateTime::from_timestamp(req.now, 0)
-        .ok_or_else(|| Error::Request("now is out of range".into()))?
-        .with_timezone(&tz)
-        .date_naive();
+    let today =
+        crate::time::local_date(req.now, tz).ok_or_else(|| Error::Request("now is out of range".into()))?;
+    let key = cache_key(store, req, today)?;
+    if store.meta(META_CACHE_KEY)?.as_deref() == Some(key.as_str()) {
+        if let Some(resp) = store
+            .meta(META_CACHE)?
+            .and_then(|c| serde_json::from_str::<ReviewResponse>(&c).ok())
+        {
+            return Ok((resp, false));
+        }
+    }
     // Local days from LOOKBACK_DAYS ago to yesterday, plus the day before for persistence.
     let first = today - Days::new(LOOKBACK_DAYS);
     let dates: Vec<NaiveDate> = first.iter_days().take_while(|d| *d < today).collect();
@@ -685,18 +741,21 @@ pub fn review(store: &mut Store, req: &ReviewRequest) -> Result<ReviewResponse> 
         ));
     }
     let checks = checks(req, &windows);
-    Ok(ReviewResponse {
+    let resp = ReviewResponse {
         version: env!("CARGO_PKG_VERSION").into(),
         days: days.into_iter().map(|d| d.3).collect(),
         windows,
         totals: Totals {
             since: store.meta(META_SINCE)?,
-            saved_actual,
-            saved_plan,
+            saved_actual: counting.then_some(saved_actual),
+            saved_plan: counting.then_some(saved_plan),
         },
         checks,
         warnings,
-    })
+    };
+    let cached = serde_json::to_string(&resp).map_err(|e| Error::Request(e.to_string()))?;
+    store.set_meta_all(&[(META_CACHE_KEY, key.as_str()), (META_CACHE, cached.as_str())])?;
+    Ok((resp, true))
 }
 
 fn check(check: &str, state: &str, detail: impl Into<String>) -> Check {
@@ -763,14 +822,17 @@ fn checks(req: &ReviewRequest, w: &Windows) -> Vec<Check> {
 pub fn review_json(path: &str, request: &str) -> Result<String> {
     let req: ReviewRequest = serde_json::from_str(request).map_err(|e| Error::Request(e.to_string()))?;
     let mut store = open(path)?;
-    let resp = review(&mut store, &req)?;
-    store.checkpoint()?;
+    let (resp, computed) = review_cached(&mut store, &req)?;
+    if computed {
+        store.checkpoint()?;
+    }
     serde_json::to_string(&resp).map_err(|e| Error::Request(e.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::DateTime;
     use vulpes_core::{ForecastPoint, SeriesKind};
 
     const AMS: Tz = chrono_tz::Europe::Amsterdam;
@@ -836,6 +898,18 @@ mod tests {
     /// Measured history of the local day starting at `start` (ending at `end`) where the
     /// house imported everything: the battery stayed at `soc0` %, and the plan said `plan_mode`.
     fn write_day(s: &mut Store, start: i64, end: i64, plan_mode: &dyn Fn(i64) -> &'static str, soc0: f64) {
+        write_day_without(s, start, end, plan_mode, soc0, &|_| false);
+    }
+
+    /// [`write_day`] without slot records where `missing` (Home Assistant was down).
+    fn write_day_without(
+        s: &mut Store,
+        start: i64,
+        end: i64,
+        plan_mode: &dyn Fn(i64) -> &'static str,
+        soc0: f64,
+        missing: &dyn Fn(i64) -> bool,
+    ) {
         for (k, unit, kind) in [
             (keys::GRID_IMPORT, "kWh", SeriesKind::Sum),
             (keys::GRID_EXPORT, "kWh", SeriesKind::Sum),
@@ -858,7 +932,7 @@ mod tests {
             .map(|t| (t, soc0))
             .collect();
         s.put_samples(keys::SOC, SLOT_S, &socs).unwrap();
-        for ts in (start..end).step_by(SLOT_S as usize) {
+        for ts in (start..end).step_by(SLOT_S as usize).filter(|t| !missing(*t)) {
             s.put_plan_slot(&PlanSlotRecord {
                 ts,
                 mode: Some(plan_mode(ts).into()),
@@ -980,8 +1054,8 @@ mod tests {
             resp.totals,
             Totals {
                 since: None,
-                saved_actual: 0.0,
-                saved_plan: 0.0
+                saved_actual: None,
+                saved_plan: None
             }
         );
         let states: Vec<&str> = resp.checks.iter().map(|c| c.state.as_str()).collect();
@@ -1027,12 +1101,12 @@ mod tests {
         write_day(&mut s, d[1], d[2], &charge_at_night, 0.0);
         let first = review(&mut s, &request(d[2] + HOUR)).unwrap();
         assert_eq!(first.totals.since.as_deref(), Some("2026-11-09"));
-        assert!((first.totals.saved_plan - 3.6).abs() < 1e-9);
+        assert!((first.totals.saved_plan.unwrap() - 3.6).abs() < 1e-9);
         let again = review(&mut s, &request(d[2] + 2 * HOUR)).unwrap();
         assert_eq!(again.totals, first.totals);
         write_day(&mut s, d[2], d[3], &charge_at_night, 0.0);
         let next = review(&mut s, &request(d[3] + HOUR)).unwrap();
-        assert!((next.totals.saved_plan - 5.4).abs() < 1e-9);
+        assert!((next.totals.saved_plan.unwrap() - 5.4).abs() < 1e-9);
     }
 
     #[test]
@@ -1043,10 +1117,10 @@ mod tests {
         write_day(&mut s, d[2], d[3], &charge_at_night, 0.0); // the 9th is missing
         // The 10th is complete, but the 9th ended less than 48 h ago: wait.
         let soon = review(&mut s, &request(d[2] + 12 * HOUR)).unwrap();
-        assert!((soon.totals.saved_plan - 1.8).abs() < 1e-9);
+        assert!((soon.totals.saved_plan.unwrap() - 1.8).abs() < 1e-9);
         // Two days on, the 9th is given up and the 10th counts.
         let later = review(&mut s, &request(d[3] + 26 * HOUR)).unwrap();
-        assert!((later.totals.saved_plan - 3.6).abs() < 1e-9);
+        assert!((later.totals.saved_plan.unwrap() - 3.6).abs() < 1e-9);
     }
 
     fn forecasts(s: &mut Store, var: &str, hours: &[i64], value: &dyn Fn(i64) -> f64, known: Option<f64>) {
@@ -1100,6 +1174,111 @@ mod tests {
         assert_eq!(w.solar.day_ahead, None);
         assert_eq!(w.control.uptime_pct, Some(100.0));
         assert_eq!(w.active_share_pct, Some(100.0));
+    }
+
+    /// The slot record at `ts` as a failed tick leaves it: no mode and no prices.
+    fn failed_tick(s: &mut Store, ts: i64) {
+        s.put_plan_slot(&PlanSlotRecord {
+            ts,
+            mode: None,
+            import_price: None,
+            export_price: None,
+            terminal_value: None,
+            active: true,
+            followed: false,
+            user_mode: None,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_slot_without_a_plan_takes_the_published_price_from_an_earlier_plan() {
+        // No wholesale prices (any country but NL): before, this day was incomplete.
+        let mut s = Store::open_in_memory().unwrap();
+        let (d0, d1) = (midnight_of(2026, 11, 10), midnight_of(2026, 11, 11));
+        // 08:00-09:00 local: one slot missing (a restart), and one failed tick.
+        let h = d0 + 8 * HOUR;
+        write_day_without(&mut s, d0, d1, &|_| "self_consume", 0.0, &|t| t == h + 2 * SLOT_S);
+        failed_tick(&mut s, h + SLOT_S);
+        // An earlier plan had the hour at a published 0.50 (the recorded slots say 0.30).
+        forecasts(&mut s, "import_price", &[h], &|_| 0.50, Some(1.0));
+        let day = review(&mut s, &request(d1 + HOUR)).unwrap().days.pop().unwrap();
+        assert!(day.complete, "{day:?}");
+        // 6 h × 0.10 + 17 h × 0.30, plus the hour: 2 slots at 0.30 and 2 at 0.50 (1 kWh/h).
+        assert!(close(day.cost_baseline, 0.6 + 5.1 + 0.15 + 0.25), "{day:?}");
+    }
+
+    #[test]
+    fn a_slot_without_a_plan_or_forecast_takes_the_mean_of_its_hour() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (d0, d1) = (midnight_of(2026, 11, 10), midnight_of(2026, 11, 11));
+        let h = d0 + 8 * HOUR;
+        write_day_without(&mut s, d0, d1, &|_| "self_consume", 0.0, &|t| t == h + 3 * SLOT_S);
+        failed_tick(&mut s, h);
+        // An unpublished price forecast is not used.
+        forecasts(&mut s, "import_price", &[h], &|_| 9.0, Some(0.0));
+        let day = review(&mut s, &request(d1 + HOUR)).unwrap().days.pop().unwrap();
+        assert!(day.complete && close(day.cost_baseline, 6.0), "{day:?}");
+    }
+
+    #[test]
+    fn an_hour_without_any_price_leaves_the_day_incomplete() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (d0, d1) = (midnight_of(2026, 11, 10), midnight_of(2026, 11, 11));
+        write_day(&mut s, d0, d1, &|_| "self_consume", 0.0);
+        let h = d0 + 8 * HOUR;
+        for k in 0..4 {
+            failed_tick(&mut s, h + k * SLOT_S);
+        }
+        let day = review(&mut s, &request(d1 + HOUR)).unwrap().days.pop().unwrap();
+        assert!(!day.complete, "{day:?}");
+        // With the wholesale price stored (it comes with the next hour's data), the tariff fills it in.
+        s.ensure_series(keys::WHOLESALE_NL, "EUR/kWh", SeriesKind::Mean)
+            .unwrap();
+        s.put_samples(keys::WHOLESALE_NL, HOUR, &[(h, 0.30)]).unwrap();
+        s.put_samples(keys::GRID_IMPORT, HOUR, &[(d1, 1.0)]).unwrap();
+        let day = review(&mut s, &request(d1 + 2 * HOUR))
+            .unwrap()
+            .days
+            .pop()
+            .unwrap();
+        assert!(day.complete && close(day.cost_baseline, 6.0), "{day:?}");
+    }
+
+    #[test]
+    fn the_result_is_reused_until_new_data_a_new_day_or_other_settings() {
+        let mut s = Store::open_in_memory().unwrap();
+        let (d0, d1) = (midnight_of(2026, 11, 10), midnight_of(2026, 11, 11));
+        write_day(&mut s, d0, d1, &|_| "self_consume", 0.0);
+        let (first, computed) = review_cached(&mut s, &request(d1 + HOUR)).unwrap();
+        assert!(computed);
+        // A changed price of a past slot without new energy data: the stored result stands.
+        let cheaper = PlanSlotRecord {
+            ts: d0 + 8 * HOUR,
+            mode: Some("self_consume".into()),
+            import_price: Some(0.0),
+            export_price: Some(0.05),
+            terminal_value: Some(0.2),
+            active: true,
+            followed: true,
+            user_mode: None,
+        };
+        s.put_plan_slot(&cheaper).unwrap();
+        let (again, computed) = review_cached(&mut s, &request(d1 + 2 * HOUR)).unwrap();
+        assert!(!computed);
+        assert_eq!(again, first);
+        // A new hour of energy data: computed again, with the new price.
+        s.put_samples(keys::GRID_IMPORT, HOUR, &[(d1, 1.0)]).unwrap();
+        let (fresh, computed) = review_cached(&mut s, &request(d1 + 2 * HOUR)).unwrap();
+        assert!(computed);
+        assert!(close(fresh.days.last().unwrap().cost_baseline, 6.0 - 0.3 / 4.0));
+        // Other settings: computed again.
+        let mut r = request(d1 + 2 * HOUR);
+        r.battery.capacity_wh = 5000.0;
+        assert!(review_cached(&mut s, &r).unwrap().1);
+        assert!(!review_cached(&mut s, &r).unwrap().1);
+        // A new day: computed again.
+        assert!(review_cached(&mut s, &request(d1 + 26 * HOUR)).unwrap().1);
     }
 
     #[test]

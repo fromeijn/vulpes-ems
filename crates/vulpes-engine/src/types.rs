@@ -32,6 +32,23 @@ pub struct ExportTariff {
     pub b: f64,
 }
 
+impl ExportTariff {
+    /// The export price that goes with an all-in `import` price: the wholesale
+    /// price behind it through this tariff. `None` when `tariff.a` is 0 and
+    /// this tariff follows the wholesale price, which can't be recovered then.
+    pub fn from_import(&self, import: f64, tariff: &LinearTariff) -> Option<f64> {
+        if self.a == 0.0 {
+            // Fixed export price; `tariff.a` may be 0 here, so don't divide by it.
+            return Some(self.b);
+        }
+        if tariff.a == 0.0 {
+            return None;
+        }
+        let wholesale = (import - tariff.b) / tariff.a;
+        Some(self.a * wholesale + self.b)
+    }
+}
+
 /// A published all-in price for `[start, end)`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -202,4 +219,31 @@ pub struct CalibrateResponse {
     pub from: i64,
     pub to: i64,
     pub warnings: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_price_from_the_import_price() {
+        let tariff = LinearTariff { a: 1.21, b: 0.13 };
+        let wholesale = 0.10;
+        let import = tariff.price(wholesale);
+        let fixed = ExportTariff { a: 0.0, b: 0.07 };
+        assert_eq!(fixed.from_import(import, &tariff), Some(0.07));
+        let market = ExportTariff { a: 1.0, b: -0.02 };
+        let e = market.from_import(import, &tariff).unwrap();
+        assert!((e - 0.08).abs() < 1e-12, "{e}");
+        // Net metering: export a/b equal import a/b pays the import price.
+        let net = ExportTariff {
+            a: tariff.a,
+            b: tariff.b,
+        };
+        assert!((net.from_import(import, &tariff).unwrap() - import).abs() < 1e-12);
+        // A fixed import price hides the wholesale price.
+        let flat = LinearTariff { a: 0.0, b: 0.25 };
+        assert_eq!(market.from_import(0.25, &flat), None);
+        assert_eq!(fixed.from_import(0.25, &flat), Some(0.07));
+    }
 }

@@ -16,6 +16,9 @@ pub const SLOT_S: f64 = 900.0;
 /// A plan older than this is not followed: the safe command is sent instead.
 pub const STALE_AFTER_S: f64 = 1800.0;
 pub const SAFE_MODE: &str = "self_consume";
+/// How long the control script may run (s). Vulpes waits for it, so errors in its
+/// actions show on the Battery control sensor.
+pub const SCRIPT_TIMEOUT_S: f64 = 60.0;
 
 /// States of the Battery control sensor.
 pub const OFF: &str = "off";
@@ -105,6 +108,24 @@ pub fn state_of(active: bool, last: Option<&Value>, error: Option<&str>) -> &'st
     } else {
         FOLLOWING
     }
+}
+
+/// What one run of the control script leaves: the command as sent (with the time it
+/// was `sent`), the error (none when it ran fine), and how many runs in a row failed.
+/// `error` is the exception's text; `timed_out` when it ran past [`SCRIPT_TIMEOUT_S`].
+pub fn script_result(cmd: &Value, error: Option<&str>, timed_out: bool, failures: u64, now: f64) -> Value {
+    let error = if timed_out {
+        Some(format!("did not finish within {SCRIPT_TIMEOUT_S:.0} s"))
+    } else {
+        error.filter(|e| !e.is_empty()).map(String::from)
+    };
+    let mut sent = cmd.as_object().cloned().unwrap_or_default();
+    sent.insert("sent".into(), json!(iso_utc(now)));
+    json!({
+        "last_command": sent,
+        "script_failures": if error.is_some() { failures + 1 } else { 0 },
+        "last_error": error,
+    })
 }
 
 #[cfg(test)]
@@ -297,5 +318,31 @@ mod tests {
         );
         assert_eq!(state_of(true, Some(&following), Some("")), FOLLOWING);
         assert_eq!(state_of(false, Some(&following), Some("boom")), OFF);
+    }
+
+    #[test]
+    fn script_results_count_failures_in_a_row() {
+        let cmd = json!({"mode": "hold", "fallback": false});
+        let ok = script_result(&cmd, None, false, 2, 1_794_139_200.0);
+        assert_eq!(
+            ok,
+            json!({
+                "last_command": {"mode": "hold", "fallback": false, "sent": "2026-11-08T12:00:00+00:00"},
+                "script_failures": 0,
+                "last_error": null,
+            })
+        );
+        let failed = script_result(&cmd, Some("Action notify.x not found"), false, 2, 0.0);
+        assert_eq!(failed["script_failures"], 3);
+        assert_eq!(failed["last_error"], "Action notify.x not found");
+        let slow = script_result(&cmd, None, true, 0, 0.0);
+        assert_eq!(slow["last_error"], "did not finish within 60 s");
+        assert_eq!(slow["script_failures"], 1);
+        // An empty error text counts as no error; a command that isn't an object still gets `sent`.
+        assert_eq!(script_result(&cmd, Some(""), false, 5, 0.0)["script_failures"], 0);
+        assert_eq!(
+            script_result(&json!(null), None, false, 0, 0.0)["last_command"],
+            json!({"sent": "1970-01-01T00:00:00+00:00"})
+        );
     }
 }

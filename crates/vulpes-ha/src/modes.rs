@@ -124,13 +124,6 @@ pub fn mode_of_state(cfg: &Cfg, state: &str) -> Option<String> {
         .map(String::from)
 }
 
-/// Whether the user's mode entity agrees with the planned mode: `None` when
-/// the entity's state is unknown. A state that maps to no mode disagrees.
-pub fn agrees(cfg: &Cfg, state: Option<&str>, mode_now: &str) -> Option<bool> {
-    let state = state.filter(|s| !matches!(*s, "unknown" | "unavailable"))?;
-    Some(mode_of_state(cfg, state).as_deref() == Some(mode_now))
-}
-
 /// The comparison mapping from the compare step: enabled modes with a state picked.
 pub fn mode_map(cfg: &Cfg, input: &Map<String, Value>) -> Map<String, Value> {
     enabled_modes(cfg)
@@ -275,19 +268,13 @@ mod tests {
     }
 
     #[test]
-    fn mode_of_state_and_agreement() {
+    fn states_map_to_modes() {
         let c = cfg(json!({"mode_map": {"self_consume": "Net Zero", "hold": "Grid", "discharge": "Grid"}}));
         assert_eq!(mode_of_state(&c, "Net Zero").as_deref(), Some("self_consume"));
         // Two modes on one state: the first in form order (hold before discharge).
         assert_eq!(mode_of_state(&c, "Grid").as_deref(), Some("hold"));
         assert_eq!(mode_of_state(&c, "Other"), None);
         assert_eq!(mode_of_state(&Cfg::new(), "Grid"), None);
-        assert_eq!(agrees(&c, Some("Grid"), "hold"), Some(true));
-        assert_eq!(agrees(&c, Some("Grid"), "charge"), Some(false));
-        assert_eq!(agrees(&c, Some("Unmapped"), "charge"), Some(false));
-        assert_eq!(agrees(&c, Some("unavailable"), "hold"), None);
-        assert_eq!(agrees(&c, Some("unknown"), "hold"), None);
-        assert_eq!(agrees(&c, None, "hold"), None);
     }
 
     #[test]

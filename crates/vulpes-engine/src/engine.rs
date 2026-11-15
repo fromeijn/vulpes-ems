@@ -1,5 +1,6 @@
+use crate::time::{local_date, local_midnight};
 use crate::{Error, PlanRequest, PlanResponse, PlanSummary, Result, SlotPlan, WeatherSlot};
-use chrono::{DateTime, Datelike, TimeZone};
+use chrono::{DateTime, Datelike};
 use chrono_tz::Tz;
 use std::collections::{HashMap, HashSet};
 use vulpes_load::{Country, ProfileForecaster, ProfileOptions};
@@ -100,7 +101,6 @@ pub(crate) fn average_models(series: Vec<WeatherSeries>) -> HashMap<i64, Weather
         .collect()
 }
 
-/// Mean of a 15-minute weather series over `[start, start + step)`.
 /// AC power of the planes in the slot starting at `t` (mean W), from the
 /// weather of its quarter hours; `None` without weather. Before curtailment.
 fn slot_pv(req: &PlanRequest, weather: &HashMap<i64, WeatherSlot>, t: i64, step: i64) -> Option<f64> {
@@ -135,12 +135,8 @@ pub(crate) struct PvDays {
 
 fn pv_days(req: &PlanRequest, weather: &HashMap<i64, WeatherSlot>, tz: Tz, start: i64, step: i64) -> PvDays {
     let dt_h = step as f64 / 3600.0;
-    let midnight = |d: chrono::NaiveDate| {
-        d.and_hms_opt(0, 0, 0)
-            .and_then(|m| tz.from_local_datetime(&m).earliest())
-            .map(|t| t.timestamp())
-    };
-    let today = DateTime::from_timestamp(start, 0).map(|t| t.with_timezone(&tz).date_naive());
+    let midnight = |d| local_midnight(tz, d);
+    let today = local_date(start, tz);
     // Energy of the slots in [from, to); None if a daylight slot has no weather.
     let energy = |from: i64, to: i64| -> Option<f64> {
         let first = from + (step - from.rem_euclid(step)) % step;
@@ -175,6 +171,8 @@ fn pv_days(req: &PlanRequest, weather: &HashMap<i64, WeatherSlot>, tz: Tz, start
     }
 }
 
+/// The quarter hours of a 15-minute weather series in `[start, start + step)`;
+/// missing ones are skipped, `None` when there are none.
 fn weather_for(weather: &HashMap<i64, WeatherSlot>, start: i64, step: i64) -> Option<Vec<WeatherSlot>> {
     let v: Vec<WeatherSlot> = (0..(step / 900).max(1))
         .filter_map(|k| weather.get(&(start + k * 900)).copied())
@@ -318,13 +316,11 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
         };
         ProfileForecaster::new(&req.wholesale_history, tz, Country::None, opt)
     });
+    // `validate` rejects `tariff.a == 0` with `export.a != 0`, so this always has a price.
     let export_from = |import: f64| {
-        if req.export.a == 0.0 {
-            // Fixed export price; `tariff.a` may be 0 here, so don't divide by it.
-            return req.export.b;
-        }
-        let wholesale = (import - req.tariff.b) / req.tariff.a;
-        req.export.a * wholesale + req.export.b
+        req.export
+            .from_import(import, &req.tariff)
+            .unwrap_or(req.export.b)
     };
     let mean_known = (!req.known_prices.is_empty())
         .then(|| req.known_prices.iter().map(|p| p.import).sum::<f64>() / req.known_prices.len() as f64);
@@ -429,6 +425,7 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
 mod tests {
     use super::*;
     use crate::{ExportTariff, KnownPrice, Location};
+    use chrono::TimeZone;
     use vulpes_core::{BatteryParams, Behaviour, GridLimits, ModeDef};
     use vulpes_price::LinearTariff;
     use vulpes_solar::PlaneParams;

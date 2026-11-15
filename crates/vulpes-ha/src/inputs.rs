@@ -6,6 +6,7 @@ use crate::settings::{
     CONF_BATTERY_CHARGE, CONF_BATTERY_DISCHARGE, CONF_GRID_EXPORT, CONF_GRID_IMPORT, CONF_SOLAR_ENERGY,
 };
 use crate::time::parse_ts;
+use crate::{Error, Result};
 use chrono_tz::Tz;
 use serde::Serialize;
 use serde_json::Value;
@@ -14,6 +15,30 @@ use std::collections::BTreeMap;
 /// Hourly recorder rows per statistic id: `(start, value)`, where `start` is
 /// Unix seconds (or an ISO string) and `value` the hour's `change` or `mean`.
 pub type EnergyRows = BTreeMap<String, Vec<(Value, Option<f64>)>>;
+
+/// Ordered `[name, value]` pairs under `key`, as the integration passes state
+/// attributes; `None` when the key is absent or not a list. Malformed pairs are skipped.
+pub fn attribute_pairs(req: &Value, key: &str) -> Option<Vec<(String, Value)>> {
+    let items = req.get(key)?.as_array()?;
+    Some(
+        items
+            .iter()
+            .filter_map(|p| Some((p.get(0)?.as_str()?.to_string(), p.get(1)?.clone())))
+            .collect(),
+    )
+}
+
+/// Hourly recorder rows per statistic id under `key`; empty when absent or null.
+pub fn energy_rows(req: &Value, key: &str) -> Result<EnergyRows> {
+    match req.get(key) {
+        None | Some(Value::Null) => Ok(EnergyRows::new()),
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+            Error::Message(format!(
+                "'{key}' must map statistic ids to [start, value] rows: {e}"
+            ))
+        }),
+    }
+}
 
 /// Some battery management systems report a little over 100 % when full (or
 /// just below 0 %): such readings are clamped instead of rejected.
@@ -209,6 +234,30 @@ pub fn total_power(energy: &BTreeMap<String, Vec<(i64, f64)>>) -> Vec<(i64, f64)
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn attribute_pairs_keep_order_and_skip_malformed() {
+        let r = json!({"a": [["today", [1]], ["unit", "ct"], [3, "x"], ["short"]]});
+        assert_eq!(
+            attribute_pairs(&r, "a"),
+            Some(vec![("today".into(), json!([1])), ("unit".into(), json!("ct"))])
+        );
+        assert_eq!(attribute_pairs(&r, "missing"), None);
+        assert_eq!(attribute_pairs(&json!({"a": null}), "a"), None);
+    }
+
+    #[test]
+    fn energy_rows_empty_or_parsed_or_an_error() {
+        assert!(energy_rows(&json!({}), "stats").unwrap().is_empty());
+        assert!(energy_rows(&json!({"stats": null}), "stats").unwrap().is_empty());
+        let rows = energy_rows(&json!({"stats": {"s": [[0, 1.5], [3600, null]]}}), "stats").unwrap();
+        assert_eq!(rows["s"], [(json!(0), Some(1.5)), (json!(3600), None)]);
+        let err = energy_rows(&json!({"stats": [1]}), "stats").unwrap_err();
+        assert!(
+            err.to_string().contains("'stats' must map statistic ids"),
+            "{err}"
+        );
+    }
 
     const T0: f64 = 1_794_096_000.0; // 2026-11-08 00:00 UTC
     const T: i64 = T0 as i64;

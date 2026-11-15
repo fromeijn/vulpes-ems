@@ -61,6 +61,7 @@ fn constants(_: &Value) -> Result<Value> {
         "default_inverter_w": solar_form::DEFAULT_INVERTER_W,
         "control_states": control::STATES,
         "stale_after_s": control::STALE_AFTER_S,
+        "script_timeout_s": control::SCRIPT_TIMEOUT_S,
         "load_history_days": request::LOAD_HISTORY_DAYS,
         "wholesale_history_days": request::WHOLESALE_HISTORY_DAYS,
         "calibration_history_days": request::CALIBRATION_HISTORY_DAYS,
@@ -70,14 +71,11 @@ fn constants(_: &Value) -> Result<Value> {
 
 fn check_sources(req: &Value) -> Result<Value> {
     let cfg = obj(req, "cfg")?;
-    let attributes = req.get("price_attributes").and_then(Value::as_array).map(|a| {
-        a.iter()
-            .filter_map(|p| Some((p.get(0)?.as_str()?.to_string(), p.get(1)?.clone())))
-            .collect::<Vec<_>>()
-    });
-    let stats: Option<inputs::EnergyRows> = match req.get("stats") {
+    let attributes = inputs::attribute_pairs(req, "price_attributes");
+    // Absent: the statistics haven't been fetched yet, so they aren't checked.
+    let stats = match req.get("stats") {
         None | Some(Value::Null) => None,
-        Some(v) => Some(serde_json::from_value(v.clone())?),
+        Some(_) => Some(inputs::energy_rows(req, "stats")?),
     };
     let check = settings::check_sources(
         cfg,
@@ -108,13 +106,6 @@ pub const OPS: &[(&str, Op)] = &[
     }),
     ("enabled_modes", |r| {
         Ok(json!(modes::enabled_modes(obj(r, "cfg")?)))
-    }),
-    ("agrees", |r| {
-        Ok(json!(modes::agrees(
-            obj(r, "cfg")?,
-            opt_str(r, "state"),
-            opt_str(r, "mode_now").unwrap_or("")
-        )))
     }),
     ("mode_map", |r| {
         Ok(json!(modes::mode_map(obj(r, "cfg")?, &obj_or_empty(r, "input"))))
@@ -151,6 +142,16 @@ pub const OPS: &[(&str, Op)] = &[
             &obj_or_empty(r, "cfg"),
             req_num(r, "now")?,
             fallback,
+        ))
+    }),
+    ("script_result", |r| {
+        let failures = r.get("failures").and_then(as_f64).unwrap_or(0.0).max(0.0) as u64;
+        Ok(control::script_result(
+            r.get("cmd").unwrap_or(&Value::Null),
+            opt_str(r, "error"),
+            truthy(r.get("timed_out")),
+            failures,
+            req_num(r, "now")?,
         ))
     }),
     ("control_state", |r| {
@@ -211,12 +212,11 @@ pub const OPS: &[(&str, Op)] = &[
     }),
     ("health", health::health),
     ("issue_ids", |_| Ok(json!(health::ISSUES))),
+    ("stats_start", |r| {
+        Ok(json!(request::stats_start(req_num(r, "now")?)))
+    }),
     ("known_prices", |r| {
-        let attributes = r.get("price_attributes").and_then(Value::as_array).map(|a| {
-            a.iter()
-                .filter_map(|p| Some((p.get(0)?.as_str()?.to_string(), p.get(1)?.clone())))
-                .collect::<Vec<_>>()
-        });
+        let attributes = inputs::attribute_pairs(r, "price_attributes");
         let tz = time::zone(opt_str(r, "timezone").unwrap_or("UTC"));
         let unit = opt_str(r, "price_unit");
         Ok(json!(
@@ -226,10 +226,7 @@ pub const OPS: &[(&str, Op)] = &[
         ))
     }),
     ("load_series", |r| {
-        let stats: inputs::EnergyRows = match r.get("stats") {
-            None | Some(Value::Null) => inputs::EnergyRows::new(),
-            Some(v) => serde_json::from_value(v.clone())?,
-        };
+        let stats = inputs::energy_rows(r, "stats")?;
         Ok(json!(inputs::load_series(
             &inputs::load_groups(obj(r, "cfg")?),
             &stats
@@ -288,6 +285,7 @@ mod tests {
         assert_eq!(out["config_version"], json!(3));
         assert_eq!(out["modes"][0], json!(["charge", true]));
         assert_eq!(out["control_states"][1], "following_plan");
+        assert_eq!(out["script_timeout_s"], json!(60.0));
         assert_eq!(out["directions"].as_array().unwrap().len(), 8);
     }
 
@@ -316,15 +314,24 @@ mod tests {
             json!(["charge", "hold", "self_consume", "idle"])
         );
         assert_eq!(
-            r(
-                "agrees",
-                json!({"cfg": {"mode_map": {"hold": "Grid"}}, "state": "Grid", "mode_now": "hold"})
-            ),
-            json!(true)
+            r("stats_start", json!({"now": 1_781_000_000})),
+            json!(1_781_000_000 - 800 - request::LOAD_HISTORY_DAYS * 86_400)
+        );
+        let after = r(
+            "script_result",
+            json!({"cmd": {"mode": "hold"}, "error": "boom", "failures": 2, "now": 0}),
         );
         assert_eq!(
-            r("agrees", json!({"cfg": {}, "state": null, "mode_now": "hold"})),
-            Value::Null
+            (&after["script_failures"], &after["last_error"]),
+            (&json!(3), &json!("boom"))
+        );
+        assert_eq!(
+            r("script_result", json!({"cmd": {}, "timed_out": true, "now": 0}))["script_failures"],
+            json!(1)
+        );
+        assert!(
+            call("agrees", "{}").is_err(),
+            "removed: agreement comes from the history file"
         );
         assert_eq!(
             r("control_state", json!({"active": true, "last": null})),

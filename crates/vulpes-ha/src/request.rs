@@ -1,9 +1,10 @@
 //! From Home Assistant data to an engine call and back: the plan every 15
 //! minutes, solar calibration, and when to refresh wholesale prices.
 
-use crate::cfg::{Cfg, as_f64, num, obj, req_num};
+use crate::cfg::{Cfg, as_f64, num, obj, req_num, ts_pairs};
 use crate::inputs::{
-    EnergyRows, hourly_series, load_groups, load_series, parse_price_attributes, soc_value, total_power,
+    attribute_pairs, energy_rows, hourly_series, load_groups, load_series, parse_price_attributes, soc_value,
+    total_power,
 };
 use crate::modes::{engine_modes, split_mode};
 use crate::settings::CONF_SOC_ENTITY;
@@ -25,36 +26,11 @@ pub const CALIBRATION_HISTORY_DAYS: i64 = 120;
 /// Wholesale prices are fetched again after this long.
 pub const WHOLESALE_REFRESH_S: f64 = 6.0 * 3600.0;
 
-fn ordered_pairs(req: &Value, key: &str) -> Option<Vec<(String, Value)>> {
-    let items = req.get(key)?.as_array()?;
-    Some(
-        items
-            .iter()
-            .filter_map(|p| Some((p.get(0)?.as_str()?.to_string(), p.get(1)?.clone())))
-            .collect(),
-    )
-}
-
-fn energy_rows(req: &Value, key: &str) -> Result<EnergyRows> {
-    match req.get(key) {
-        None | Some(Value::Null) => Ok(EnergyRows::new()),
-        Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
-            Error::Message(format!(
-                "'{key}' must map statistic ids to [start, value] rows: {e}"
-            ))
-        }),
-    }
-}
-
-fn pairs(req: &Value, key: &str) -> Vec<(i64, f64)> {
-    req.get(key)
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|p| Some((p.get(0).and_then(as_f64)? as i64, p.get(1).and_then(as_f64)?)))
-                .collect()
-        })
-        .unwrap_or_default()
+/// Start of the energy statistics the plan and the source check read:
+/// [`LOAD_HISTORY_DAYS`] before `now`, on the whole UTC hour.
+pub fn stats_start(now: f64) -> i64 {
+    let t = now as i64 - LOAD_HISTORY_DAYS * 86_400;
+    t - t.rem_euclid(3600)
 }
 
 /// Plan with the Home Assistant inputs. `req` holds `cfg` (the settings),
@@ -75,7 +51,7 @@ pub fn plan_ha(req: &Value) -> Result<Value> {
     let soc_entity = cfg.get(CONF_SOC_ENTITY).and_then(Value::as_str).unwrap_or("");
     let soc_pct = soc_value(req.get("soc_state").and_then(Value::as_str))
         .ok_or_else(|| Error::Message(format!("battery SOC from {soc_entity} is unavailable")))?;
-    let known = ordered_pairs(req, "price_attributes")
+    let known = attribute_pairs(req, "price_attributes")
         .map(|a| parse_price_attributes(&a, req.get("price_unit").and_then(Value::as_str), tz))
         .unwrap_or_default();
     let groups = load_groups(cfg);
@@ -83,7 +59,7 @@ pub fn plan_ha(req: &Value) -> Result<Value> {
         return Err(Error::Message("no energy statistics selected".into()));
     }
     let load = load_series(&groups, &energy_rows(req, "stats")?);
-    let wholesale = pairs(req, "wholesale");
+    let wholesale = ts_pairs(req, "wholesale");
     let mut request = engine_request(cfg, now, soc_pct, &load, &known, &wholesale, req)?;
     if let Some(w) = req.get("weather").filter(|w| !w.is_null()) {
         request["weather"] = w.clone();
@@ -265,6 +241,18 @@ mod tests {
     use super::*;
 
     const T0: f64 = 1_781_000_000.0; // mid-June 2026
+
+    #[test]
+    fn statistics_start_on_the_hour_load_history_days_back() {
+        // 1_781_000_000 = 2026-06-09 10:13:20 UTC.
+        let start = stats_start(T0);
+        assert_eq!(start.rem_euclid(3600), 0);
+        assert_eq!(start, 1_781_000_000 - 800 - LOAD_HISTORY_DAYS * 86_400);
+        assert_eq!(
+            stats_start(3600.0 * 1_000_000.0),
+            3_600_000_000 - LOAD_HISTORY_DAYS * 86_400
+        );
+    }
 
     fn cfg() -> Value {
         json!({

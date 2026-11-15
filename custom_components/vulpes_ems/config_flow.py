@@ -58,7 +58,7 @@ from .const import (
     DOMAIN,
     WHOLESALE_SOURCES,
 )
-from .coordinator import async_energy_changes, history_start
+from .coordinator import async_energy_changes, stats_start
 from .core import C, ha, stat_rows
 
 _SENSORS = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", multiple=True))
@@ -239,8 +239,7 @@ class _Steps:
         }
         result = ha("check_sources", **request)
         if result["fetch"]:
-            start = history_start(dt_util.utcnow(), C["load_history_days"])
-            stats = await async_energy_changes(self.hass, set(result["fetch"]), start)
+            stats = await async_energy_changes(self.hass, set(result["fetch"]), stats_start(dt_util.utcnow()))
             result = ha("check_sources", **request, stats=stat_rows(stats, result["fetch"], "change"))
         return result["errors"], result["placeholders"]
 

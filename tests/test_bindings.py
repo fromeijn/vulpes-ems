@@ -224,7 +224,6 @@ def test_every_ha_op_answers():
         "settings": {"data": HA_CFG, "options": {}},
         "migrate": {"cfg": HA_CFG, "version": 3},
         "enabled_modes": {"cfg": HA_CFG},
-        "agrees": {"cfg": HA_CFG, "state": "x", "mode_now": "hold"},
         "mode_map": {"cfg": HA_CFG, "input": {"charge": "Charging"}},
         "check_battery": {"cfg": HA_CFG},
         "check_tariff": {"cfg": HA_CFG},
@@ -235,6 +234,8 @@ def test_every_ha_op_answers():
         "command": {"cfg": HA_CFG, "plan": plan, "now": NOW, "failed": False},
         "safe_command": {"cfg": HA_CFG, "now": NOW, "fallback": False},
         "control_state": {"active": True, "last": {"fallback": False}, "error": None},
+        "script_result": {"cmd": {"mode": "hold"}, "error": None, "timed_out": False, "failures": 0, "now": NOW},
+        "stats_start": {"now": NOW},
         "plane_from_array": {"array": {"direction": "s", "tilt": 35, "kwp": 3}, "inverter_w": 2800, "existing": None},
         "form_defaults": {"planes": HA_CFG["planes"]},
         "fits_form": {"planes": HA_CFG["planes"]},
@@ -252,6 +253,7 @@ def test_every_ha_op_answers():
     for op, request in calls.items():
         ha(op, **request)
     assert ha("constants")["config_version"] == 3
+    assert ha("constants")["script_timeout_s"] == 60
     with pytest.raises(ValueError, match="unknown op"):
         vulpes_ems.ha("no_such_op", "{}")
 
@@ -367,9 +369,10 @@ def test_record_and_export_history(tmp_path):
         "wholesale": [[hour - 3600, 0.1]],
     }
     out = json.loads(vulpes_ems.record_ha(db, json.dumps(request)))
-    assert out["agreement_today"] == {"compared": 1, "agreed": 1}
+    assert out["agreement_today"] == {"compared": 1, "agreed": 1, "pct": 100.0}
     assert out["agrees_now"] is True
     assert out["newest_energy_ts"] == hour - 3600
+    assert out["energy_until"] == hour
     history = json.loads(vulpes_ems.export_history(db, json.dumps({"now": NOW})))
     assert history["plan_slots"][0]["mode"] == "hold" and history["plan_slots"][0]["followed"] is True
     assert history["samples"]["soc"] == [[start, 60.0]]
@@ -387,10 +390,22 @@ def test_review_history(tmp_path):
     out = json.loads(vulpes_ems.review_ha(db, json.dumps({"cfg": cfg, "now": NOW, "timezone": "Europe/Amsterdam"})))
     assert set(out["windows"]) == {"yesterday", "days_7", "days_30"}
     assert out["windows"]["days_7"]["saved_actual"] is None, "not enough days yet"
-    assert out["totals"] == {"since": None, "saved_actual": 0.0, "saved_plan": 0.0}
+    assert out["totals"] == {"since": None, "saved_actual": None, "saved_plan": None}
     assert {c["check"] for c in out["checks"]} >= {"load_forecast", "solar_forecast", "soc_tracking", "coverage"}
     with pytest.raises(ValueError, match="missing setting"):
         vulpes_ems.review_ha(db, json.dumps({"cfg": {}, "now": NOW}))
+
+
+def test_script_result_and_stats_start():
+    """What the coordinator keeps after a script run, and where the statistics start."""
+    out = ha("script_result", cmd={"mode": "hold"}, error="boom", timed_out=False, failures=2, now=NOW)
+    assert out["last_command"]["mode"] == "hold"
+    assert out["last_command"]["sent"].endswith("+00:00")
+    assert (out["last_error"], out["script_failures"]) == ("boom", 3)
+    ok = ha("script_result", cmd={"mode": "hold"}, error=None, timed_out=False, failures=3, now=NOW)
+    assert (ok["last_error"], ok["script_failures"]) == (None, 0)
+    start = ha("stats_start", now=NOW)
+    assert start % 3600 == 0 and NOW - start >= ha("constants")["load_history_days"] * 86400
 
 
 def test_health_op():
