@@ -54,6 +54,8 @@ Modes that are equally active can still tie: hold and self-consume do the same w
 
 **Reserve:** an optional minimum SOC per slot is enforced with a large penalty.
 
+**Run time:** the work is slots × SOC levels × modes. The SOC grid has a fixed 100 Wh step, so a 10 kWh battery between 10 and 100 % has 91 levels, and the 84-hour horizon has 336 slots. With 3 modes, a whole planning tick (forecasts and optimizer) takes about 10 ms of CPU on a desktop core. With 13 modes and a 40 kWh battery it takes about 70 ms, most of it in the optimizer. A Raspberry Pi 4-class board is roughly 8–12× slower, so planning stays under about a second there.
+
 ## Replay
 
 `vulpes-cli replay` steps through history hour by hour. At each hour, every strategy decides with only the information available then:

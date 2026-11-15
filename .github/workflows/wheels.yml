@@ -25,17 +25,33 @@ jobs:
         with:
           name: wheel-${{ matrix.target }}-${{ matrix.manylinux }}
           path: dist
+  # Each wheel on its own architecture: Alpine (musl) as Home Assistant OS and
+  # Container run it, Debian (glibc) for the manylinux wheels.
   smoke:
     needs: build
-    runs-on: ubuntu-latest
-    container: python:3.14-alpine
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+        manylinux: ["2_28", musllinux_1_2]
+        include:
+          - { target: x86_64, runner: ubuntu-latest }
+          - { target: aarch64, runner: ubuntu-24.04-arm }
+          - { manylinux: "2_28", image: "python:3.14-slim" }
+          - { manylinux: musllinux_1_2, image: "python:3.14-alpine" }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { name: wheel-x86_64-musllinux_1_2, path: dist }
-      - run: pip install dist/*.whl pytest && python -c "import vulpes_ems; print(vulpes_ems.__version__)"
+        with: { name: "wheel-${{ matrix.target }}-${{ matrix.manylinux }}", path: dist }
+      # docker run rather than `container:`: JavaScript actions such as checkout
+      # don't run inside an Alpine container on the arm64 runners.
       # Binding and integration-logic tests against the installed wheel, as Home Assistant uses it.
-      - run: python -m pytest -q tests
+      - run: >-
+          docker run --rm -v "$PWD:/w" -w /w ${{ matrix.image }} sh -c
+          'pip install dist/*.whl pytest
+          && python -c "import vulpes_ems; print(vulpes_ems.__version__)"
+          && python -m pytest -q -p no:cacheprovider tests'
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build, smoke]

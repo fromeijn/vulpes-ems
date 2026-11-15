@@ -42,6 +42,8 @@ Method (`vulpes_engine::calibrate`):
 - **Scores:** with enough data, the fit runs on even ISO weeks and the current and proposed values are scored on odd weeks with day-ahead weather. The proposal itself is then refitted on all weeks. The score covers all daylight hours, *including* curtailed ones, so it understates a fit that correctly predicts what the panels could produce.
 - **Sanity checks:** warnings when the strings don't add up to the total (wrong sensor or unit), and when a total-scale fit lands outside 0.5–2× (wrong sensor or kWp).
 
+**Run time:** the grid search per string is the heaviest computation in the integration. With two string sensors and 120 days of history it takes about 5 s of CPU on a desktop core, and roughly one to two minutes on a Raspberry Pi 4, Home Assistant Yellow or Green. A total-only fit takes well under a second. It runs in the background, so Home Assistant stays responsive; the **Calibrate solar** button only returns when the result is in.
+
 `vulpes-cli calibrate-system` runs the same calibration on series in the local store (for example imported from a copy of a Home Assistant database with `import-ha`).
 
 ## Calibration with microinverters (CLI)

@@ -13,7 +13,9 @@ fn quarter_hour_floor(now: i64) -> PyResult<i64> {
 }
 
 /// Plan from a JSON `PlanRequest`; returns a JSON `PlanResponse`.
-/// Runs without the GIL (it may fetch weather and takes ~0.1 s of CPU).
+/// Runs without the GIL (it may fetch weather). CPU time is tens of ms on a
+/// desktop core and up to about a second on a Raspberry Pi 4-class board,
+/// growing with battery size and the number of modes.
 #[pyfunction]
 fn plan(py: Python<'_>, request_json: String) -> PyResult<String> {
     py.allow_threads(|| vulpes_engine::plan_json(&request_json))
@@ -21,8 +23,9 @@ fn plan(py: Python<'_>, request_json: String) -> PyResult<String> {
 }
 
 /// Calibrate solar planes from a JSON `CalibrateRequest`; returns a JSON
-/// `CalibrateResponse`. Runs without the GIL (it fetches archived weather and
-/// takes a few seconds of CPU).
+/// `CalibrateResponse`. Runs without the GIL (it fetches archived weather).
+/// With string measurements the grid search takes seconds of CPU on a desktop
+/// core and one to two minutes on a Raspberry Pi 4-class board.
 #[pyfunction]
 fn calibrate_solar(py: Python<'_>, request_json: String) -> PyResult<String> {
     py.allow_threads(|| vulpes_engine::calibrate_json(&request_json))
