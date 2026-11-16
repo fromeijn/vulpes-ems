@@ -1,15 +1,17 @@
 //! Core domain types for vulpes-ems: the planning time grid, generic ESS mode
-//! behaviours and battery parameters.
+//! behaviours, battery parameters, forecast error metrics and the SQLite store.
 
 pub mod battery;
 pub mod grid;
+pub mod metrics;
 pub mod mode;
 pub mod store;
 
 pub use battery::{BatteryParams, GridLimits};
 pub use grid::TimeGrid;
+pub use metrics::ErrorStats;
 pub use mode::{Behaviour, ModeDef};
-pub use store::{ForecastPoint, SeriesKind, Store};
+pub use store::{ForecastPoint, PlanSlotRecord, SeriesKind, Store, keys};
 
 /// Errors shared across vulpes crates.
 #[derive(Debug, thiserror::Error)]

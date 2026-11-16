@@ -37,7 +37,57 @@ CREATE TABLE IF NOT EXISTS change_points (
     note  TEXT    NOT NULL DEFAULT '',
     PRIMARY KEY (model, ts)
 );
+CREATE TABLE IF NOT EXISTS plan_slots (
+    ts             INTEGER PRIMARY KEY,
+    mode           TEXT,
+    import_price   REAL,
+    export_price   REAL,
+    terminal_value REAL,
+    active         INTEGER NOT NULL DEFAULT 0,
+    followed       INTEGER NOT NULL DEFAULT 0,
+    user_mode      TEXT
+);
 ";
+
+/// Keys of series that the CLI tools and the integration's history share.
+pub mod keys {
+    /// House load excluding the battery (W, hourly mean).
+    pub const LOAD_HOUSE: &str = "load.house";
+    /// Total AC PV power (W, hourly mean).
+    pub const PV_TOTAL_POWER: &str = "pv.total.power";
+    /// Day-ahead wholesale price for the Netherlands (EUR/kWh, hourly mean).
+    pub const WHOLESALE_NL: &str = "price.wholesale.nl";
+    /// Energy from and to the grid, from PV, into and out of the battery (kWh per hour).
+    pub const GRID_IMPORT: &str = "grid.import";
+    pub const GRID_EXPORT: &str = "grid.export";
+    pub const PV_TOTAL: &str = "pv.total";
+    pub const BATTERY_CHARGE: &str = "battery.charge";
+    pub const BATTERY_DISCHARGE: &str = "battery.discharge";
+    /// Battery state of charge (%, mean per 15 minutes).
+    pub const SOC: &str = "soc";
+    /// Source of Vulpes's own forecasts in the `forecasts` table.
+    pub const VULPES_SOURCE: &str = "vulpes";
+}
+
+/// What happened in one 15-minute slot: the planned mode and prices as the
+/// plan had them, whether Vulpes was in control and followed the plan, and
+/// the state of the user's own mode entity (for agreement).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct PlanSlotRecord {
+    pub ts: i64,
+    /// Full engine mode name (`hold:no_export`), if a plan was available.
+    pub mode: Option<String>,
+    pub import_price: Option<f64>,
+    pub export_price: Option<f64>,
+    /// Value per kWh stored at the end of the plan (currency/kWh).
+    pub terminal_value: Option<f64>,
+    /// The Active switch was on (a control script ran).
+    pub active: bool,
+    /// The script ran the planned command (not the safe fallback) without error.
+    pub followed: bool,
+    /// The Vulpes mode the user's mode entity showed, if one is mapped.
+    pub user_mode: Option<String>,
+}
 
 /// How a series aggregates over a step: `Mean` for power/levels/prices,
 /// `Sum` for energy or other quantities accumulated within the step.
@@ -84,6 +134,8 @@ pub struct Store {
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> crate::Result<Self> {
         let conn = Connection::open(path)?;
+        // The integration and a copy-run CLI may touch the file at the same time.
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         Self::init(conn)
@@ -210,18 +262,203 @@ impl Store {
         to: i64,
         asof: i64,
     ) -> crate::Result<Vec<(i64, f64)>> {
+        // One pass over the primary key; see `forecasts_at_lead`.
         let mut stmt = self.conn.prepare_cached(
-            "SELECT f.valid_ts, f.value FROM forecasts f
-             WHERE f.source = ?1 AND f.var = ?2 AND f.valid_ts >= ?3 AND f.valid_ts < ?4
-               AND f.issued_ts = (SELECT MAX(g.issued_ts) FROM forecasts g
-                                  WHERE g.source = f.source AND g.var = f.var
-                                    AND g.valid_ts = f.valid_ts AND g.issued_ts <= ?5)
-             ORDER BY f.valid_ts",
+            "SELECT valid_ts, value, MAX(issued_ts) FROM forecasts
+             WHERE source = ?1 AND var = ?2 AND valid_ts >= ?3 AND valid_ts < ?4 AND issued_ts <= ?5
+             GROUP BY valid_ts ORDER BY valid_ts",
         )?;
         let rows = stmt.query_map(params![source, var, from, to, asof], |r| {
             Ok((r.get(0)?, r.get(1)?))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// For each `valid_ts` in `[from, to)`, the value from the most recent
+    /// forecast issued at least `lead_s` seconds before it: what was known
+    /// `lead_s` ahead. A `valid_ts` without such a forecast is left out.
+    pub fn forecasts_at_lead(
+        &self,
+        source: &str,
+        var: &str,
+        from: i64,
+        to: i64,
+        lead_s: i64,
+    ) -> crate::Result<Vec<(i64, f64)>> {
+        // One pass over the primary key: with a single MAX() aggregate, SQLite
+        // takes the bare columns (`value`) from the row that holds the maximum.
+        // A correlated subquery per row cost a lookup per stored issue, which
+        // grew with the square of the issues per hour.
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT valid_ts, value, MAX(issued_ts) FROM forecasts
+             WHERE source = ?1 AND var = ?2 AND valid_ts >= ?3 AND valid_ts < ?4
+               AND issued_ts <= valid_ts - ?5
+             GROUP BY valid_ts ORDER BY valid_ts",
+        )?;
+        let rows = stmt.query_map(params![source, var, from, to, lead_s], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The newest issue time of a forecast variable, if any.
+    pub fn latest_issue(&self, source: &str, var: &str) -> crate::Result<Option<i64>> {
+        Ok(self.conn.query_row(
+            "SELECT MAX(issued_ts) FROM forecasts WHERE source = ?1 AND var = ?2",
+            params![source, var],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Every stored forecast of a variable valid in `[from, to)`, by valid then issue time.
+    pub fn forecasts_range(
+        &self,
+        source: &str,
+        var: &str,
+        from: i64,
+        to: i64,
+    ) -> crate::Result<Vec<ForecastPoint>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT valid_ts, issued_ts, value FROM forecasts
+             WHERE source = ?1 AND var = ?2 AND valid_ts >= ?3 AND valid_ts < ?4
+             ORDER BY valid_ts, issued_ts",
+        )?;
+        let rows = stmt.query_map(params![source, var, from, to], |r| {
+            Ok(ForecastPoint {
+                valid_ts: r.get(0)?,
+                issued_ts: r.get(1)?,
+                value: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The newest sample time of a series at a step, if any.
+    pub fn last_sample_ts(&self, key: &str, step_s: i64) -> crate::Result<Option<i64>> {
+        let Some(id) = self.series_id(key)? else {
+            return Ok(None);
+        };
+        Ok(self.conn.query_row(
+            "SELECT MAX(ts) FROM samples WHERE series_id = ?1 AND step_s = ?2",
+            params![id, step_s],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Insert or replace the record of one slot.
+    pub fn put_plan_slot(&self, r: &PlanSlotRecord) -> crate::Result<()> {
+        self.conn
+            .prepare_cached(
+                "INSERT OR REPLACE INTO plan_slots
+                 (ts, mode, import_price, export_price, terminal_value, active, followed, user_mode)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?
+            .execute(params![
+                r.ts,
+                r.mode,
+                r.import_price.filter(|v| v.is_finite()),
+                r.export_price.filter(|v| v.is_finite()),
+                r.terminal_value.filter(|v| v.is_finite()),
+                r.active,
+                r.followed,
+                r.user_mode
+            ])?;
+        Ok(())
+    }
+
+    /// Slot records with `from <= ts < to`, ordered by time.
+    pub fn plan_slots(&self, from: i64, to: i64) -> crate::Result<Vec<PlanSlotRecord>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT ts, mode, import_price, export_price, terminal_value, active, followed, user_mode
+             FROM plan_slots WHERE ts >= ?1 AND ts < ?2 ORDER BY ts",
+        )?;
+        let rows = stmt.query_map(params![from, to], |r| {
+            Ok(PlanSlotRecord {
+                ts: r.get(0)?,
+                mode: r.get(1)?,
+                import_price: r.get(2)?,
+                export_price: r.get(3)?,
+                terminal_value: r.get(4)?,
+                active: r.get(5)?,
+                followed: r.get(6)?,
+                user_mode: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// A value from the key/value `meta` table.
+    pub fn meta(&self, key: &str) -> crate::Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// Set a value in the `meta` table. `schema_version` is managed by the store.
+    pub fn set_meta(&self, key: &str, value: &str) -> crate::Result<()> {
+        if key == "schema_version" {
+            return Err(crate::Error::Config(
+                "schema_version is managed by the store".into(),
+            ));
+        }
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Set several `meta` values in one transaction: all of them, or none.
+    pub fn set_meta_all(&mut self, pairs: &[(&str, &str)]) -> crate::Result<()> {
+        if pairs.iter().any(|(k, _)| *k == "schema_version") {
+            return Err(crate::Error::Config(
+                "schema_version is managed by the store".into(),
+            ));
+        }
+        let tx = self.conn.transaction()?;
+        for (key, value) in pairs {
+            tx.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+                params![key, value],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Delete forecasts valid before `before`. Returns rows deleted.
+    pub fn prune_forecasts(&self, source: &str, before: i64) -> crate::Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM forecasts WHERE source = ?1 AND valid_ts < ?2",
+            params![source, before],
+        )?)
+    }
+
+    /// Delete samples of one series before `before`. Returns rows deleted.
+    pub fn prune_samples(&self, key: &str, before: i64) -> crate::Result<usize> {
+        let Some(id) = self.series_id(key)? else {
+            return Ok(0);
+        };
+        Ok(self.conn.execute(
+            "DELETE FROM samples WHERE series_id = ?1 AND ts < ?2",
+            params![id, before],
+        )?)
+    }
+
+    /// Delete slot records before `before`. Returns rows deleted.
+    pub fn prune_plan_slots(&self, before: i64) -> crate::Result<usize> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM plan_slots WHERE ts < ?1", [before])?)
+    }
+
+    /// Write the write-ahead log back into the database file, so a copy of
+    /// the `.db` file alone (a backup) holds everything written so far.
+    pub fn checkpoint(&self) -> crate::Result<()> {
+        self.conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        Ok(())
     }
 
     pub fn add_change_point(&self, model: &str, ts: i64, note: &str) -> crate::Result<()> {
@@ -318,6 +555,53 @@ mod tests {
         assert!(s.forecasts_asof("om", "ghi", 0, 300, -1).unwrap().is_empty());
     }
 
+    /// Many issues per hour, stored out of order: both queries must return the
+    /// value of the newest qualifying issue, as a brute-force search does.
+    #[test]
+    fn forecast_queries_match_brute_force_with_many_issues() {
+        let h = 3600;
+        let mut points = Vec::new();
+        for hour in 0..30_i64 {
+            for k in 0..48_i64 {
+                // Scrambled issue order; values differ per issue.
+                let issue = (k * 29 + hour * 7) % 48;
+                points.push(ForecastPoint {
+                    valid_ts: 100 * h + hour * h,
+                    issued_ts: 100 * h + hour * h - issue * h,
+                    value: (hour * 1000 + issue) as f64,
+                });
+            }
+        }
+        let mut s = Store::open_in_memory().unwrap();
+        s.put_forecasts("vulpes", "pv_w", &points).unwrap();
+        s.put_forecasts("vulpes", "load_w", &points[..10]).unwrap();
+        let (from, to) = (100 * h + 3 * h, 100 * h + 25 * h);
+        let brute = |ok: &dyn Fn(&ForecastPoint) -> bool| -> Vec<(i64, f64)> {
+            let mut best: std::collections::BTreeMap<i64, (i64, f64)> = Default::default();
+            for p in points
+                .iter()
+                .filter(|p| p.valid_ts >= from && p.valid_ts < to && ok(p))
+            {
+                let e = best.entry(p.valid_ts).or_insert((i64::MIN, 0.0));
+                if p.issued_ts > e.0 {
+                    *e = (p.issued_ts, p.value);
+                }
+            }
+            best.into_iter().map(|(t, (_, v))| (t, v)).collect()
+        };
+        for lead in [0, 15 * 60, h, 23 * h + 45 * 60, 24 * h, 47 * h, 48 * h] {
+            let want = brute(&|p| p.issued_ts <= p.valid_ts - lead);
+            assert_eq!(
+                s.forecasts_at_lead("vulpes", "pv_w", from, to, lead).unwrap(),
+                want
+            );
+        }
+        for asof in [0, 80 * h, 100 * h + 10 * h, 200 * h] {
+            let want = brute(&|p| p.issued_ts <= asof);
+            assert_eq!(s.forecasts_asof("vulpes", "pv_w", from, to, asof).unwrap(), want);
+        }
+    }
+
     #[test]
     fn change_points() {
         let s = Store::open_in_memory().unwrap();
@@ -392,6 +676,236 @@ mod tests {
         assert_eq!(s.samples("x", 900, 0, 10_801).unwrap(), vec![(0, 9.0)]);
         let info = s.summary().unwrap();
         assert_eq!(info.len(), 2, "one row per series and step");
+    }
+
+    #[test]
+    fn forecasts_at_lead_picks_the_newest_issue_at_least_lead_before() {
+        let mut s = Store::open_in_memory().unwrap();
+        let p = |valid_ts, issued_ts, value| ForecastPoint {
+            valid_ts,
+            issued_ts,
+            value,
+        };
+        let h = 3600;
+        s.put_forecasts(
+            "vulpes",
+            "pv_w",
+            &[
+                // Hour 30: issued 30 h, 25 h and 1 h ahead.
+                p(30 * h, 0, 1.0),
+                p(30 * h, 5 * h, 2.0),
+                p(30 * h, 29 * h, 3.0),
+                // Hour 40: issued only 2 h ahead.
+                p(40 * h, 38 * h, 9.0),
+            ],
+        )
+        .unwrap();
+        // Exactly 24 h ahead or more: the 25 h issue.
+        assert_eq!(
+            s.forecasts_at_lead("vulpes", "pv_w", 0, 50 * h, 24 * h).unwrap(),
+            vec![(30 * h, 2.0)]
+        );
+        // 25 h ahead is still allowed (inclusive bound).
+        assert_eq!(
+            s.forecasts_at_lead("vulpes", "pv_w", 0, 50 * h, 25 * h).unwrap(),
+            vec![(30 * h, 2.0)]
+        );
+        // 1 h ahead: the newest issue of both hours.
+        assert_eq!(
+            s.forecasts_at_lead("vulpes", "pv_w", 0, 50 * h, h).unwrap(),
+            vec![(30 * h, 3.0), (40 * h, 9.0)]
+        );
+        // Half-open range, other variables and sources stay apart.
+        assert!(
+            s.forecasts_at_lead("vulpes", "pv_w", 0, 30 * h, h)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            s.forecasts_at_lead("vulpes", "load_w", 0, 50 * h, h)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            s.forecasts_at_lead("other", "pv_w", 0, 50 * h, h)
+                .unwrap()
+                .is_empty()
+        );
+        // Further ahead than any issue: nothing.
+        assert!(
+            s.forecasts_at_lead("vulpes", "pv_w", 0, 50 * h, 31 * h)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn latest_issue_range_and_last_sample() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert_eq!(s.latest_issue("vulpes", "pv_w").unwrap(), None);
+        let p = |valid_ts, issued_ts| ForecastPoint {
+            valid_ts,
+            issued_ts,
+            value: 1.0,
+        };
+        s.put_forecasts("vulpes", "pv_w", &[p(10, 1), p(10, 5), p(20, 3)])
+            .unwrap();
+        assert_eq!(s.latest_issue("vulpes", "pv_w").unwrap(), Some(5));
+        assert_eq!(s.latest_issue("vulpes", "load_w").unwrap(), None);
+        let r = s.forecasts_range("vulpes", "pv_w", 0, 20).unwrap();
+        assert_eq!(
+            r.iter().map(|x| (x.valid_ts, x.issued_ts)).collect::<Vec<_>>(),
+            [(10, 1), (10, 5)]
+        );
+        assert_eq!(s.last_sample_ts("x", 3600).unwrap(), None);
+        s.ensure_series("x", "W", SeriesKind::Mean).unwrap();
+        assert_eq!(s.last_sample_ts("x", 3600).unwrap(), None);
+        s.put_samples("x", 3600, &[(0, 1.0), (7200, 2.0)]).unwrap();
+        assert_eq!(s.last_sample_ts("x", 3600).unwrap(), Some(7200));
+        assert_eq!(s.last_sample_ts("x", 900).unwrap(), None);
+    }
+
+    #[test]
+    fn plan_slots_roundtrip_upsert_and_prune() {
+        let s = Store::open_in_memory().unwrap();
+        let full = PlanSlotRecord {
+            ts: 900,
+            mode: Some("hold:no_export".into()),
+            import_price: Some(0.25),
+            export_price: Some(0.05),
+            terminal_value: Some(0.2),
+            active: true,
+            followed: true,
+            user_mode: Some("hold".into()),
+        };
+        // A slot without a plan and with a non-finite price stores nulls.
+        let bare = PlanSlotRecord {
+            ts: 0,
+            import_price: Some(f64::NAN),
+            ..Default::default()
+        };
+        s.put_plan_slot(&full).unwrap();
+        s.put_plan_slot(&bare).unwrap();
+        let got = s.plan_slots(0, 1800).unwrap();
+        assert_eq!(
+            got,
+            vec![
+                PlanSlotRecord {
+                    import_price: None,
+                    ..bare
+                },
+                full.clone()
+            ]
+        );
+        // Replace by ts.
+        s.put_plan_slot(&PlanSlotRecord {
+            followed: false,
+            ..full.clone()
+        })
+        .unwrap();
+        assert!(!s.plan_slots(900, 901).unwrap()[0].followed);
+        assert_eq!(s.prune_plan_slots(900).unwrap(), 1);
+        assert_eq!(s.plan_slots(0, 1800).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn plan_slot_record_json_roundtrip() {
+        let r = PlanSlotRecord {
+            ts: 1,
+            mode: Some("charge".into()),
+            active: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<PlanSlotRecord>(&json).unwrap(), r);
+    }
+
+    #[test]
+    fn meta_values_and_protected_schema_version() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert_eq!(s.meta("review.since").unwrap(), None);
+        s.set_meta("review.since", "2026-11-14").unwrap();
+        s.set_meta("review.since", "2026-11-15").unwrap();
+        assert_eq!(s.meta("review.since").unwrap().as_deref(), Some("2026-11-15"));
+        assert!(s.set_meta("schema_version", "2").is_err());
+        assert_eq!(s.meta("schema_version").unwrap().as_deref(), Some("1"));
+        // Several at once: all of them, or none.
+        s.set_meta_all(&[("review.a", "1"), ("review.b", "2")]).unwrap();
+        assert_eq!(s.meta("review.a").unwrap().as_deref(), Some("1"));
+        assert_eq!(s.meta("review.b").unwrap().as_deref(), Some("2"));
+        assert!(
+            s.set_meta_all(&[("review.a", "9"), ("schema_version", "2")])
+                .is_err()
+        );
+        assert_eq!(s.meta("review.a").unwrap().as_deref(), Some("1"));
+        assert_eq!(s.meta("schema_version").unwrap().as_deref(), Some("1"));
+        s.set_meta_all(&[]).unwrap();
+    }
+
+    #[test]
+    fn pruning_keeps_newer_rows_and_other_series() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.ensure_series("a", "W", SeriesKind::Mean).unwrap();
+        s.ensure_series("b", "W", SeriesKind::Mean).unwrap();
+        s.put_samples("a", 3600, &[(0, 1.0), (3600, 2.0)]).unwrap();
+        s.put_samples("b", 3600, &[(0, 1.0)]).unwrap();
+        assert_eq!(s.prune_samples("a", 3600).unwrap(), 1);
+        assert_eq!(s.prune_samples("missing", 3600).unwrap(), 0);
+        assert_eq!(s.samples("a", 3600, 0, 10_000).unwrap(), vec![(3600, 2.0)]);
+        assert_eq!(s.samples("b", 3600, 0, 10_000).unwrap(), vec![(0, 1.0)]);
+        let p = |valid_ts| ForecastPoint {
+            valid_ts,
+            issued_ts: 0,
+            value: 1.0,
+        };
+        s.put_forecasts("vulpes", "x", &[p(0), p(7200)]).unwrap();
+        s.put_forecasts("open-meteo", "x", &[p(0)]).unwrap();
+        assert_eq!(s.prune_forecasts("vulpes", 3600).unwrap(), 1);
+        assert_eq!(
+            s.forecasts_asof("vulpes", "x", 0, 10_000, 0).unwrap(),
+            vec![(7200, 1.0)]
+        );
+        assert_eq!(
+            s.forecasts_asof("open-meteo", "x", 0, 10_000, 0).unwrap(),
+            vec![(0, 1.0)]
+        );
+    }
+
+    #[test]
+    fn a_file_from_before_plan_slots_gains_the_table_and_keeps_version_1() {
+        let path = temp_db("upgrade");
+        {
+            // A version-1 file as the 0.4.0 CLI wrote it: no plan_slots table.
+            let mut s = Store::open(&path).unwrap();
+            s.ensure_series("x", "W", SeriesKind::Mean).unwrap();
+            s.put_samples("x", 3600, &[(0, 1.0)]).unwrap();
+        }
+        Connection::open(&path)
+            .unwrap()
+            .execute("DROP TABLE plan_slots", [])
+            .unwrap();
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.samples("x", 3600, 0, 10).unwrap(), vec![(0, 1.0)]);
+        assert!(s.plan_slots(0, 10).unwrap().is_empty());
+        assert_eq!(s.meta("schema_version").unwrap().as_deref(), Some("1"));
+        drop(s);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn checkpoint_leaves_a_complete_db_file() {
+        let path = temp_db("checkpoint");
+        let mut s = Store::open(&path).unwrap();
+        s.ensure_series("x", "W", SeriesKind::Mean).unwrap();
+        s.put_samples("x", 3600, &[(0, 1.0)]).unwrap();
+        s.checkpoint().unwrap();
+        // A copy of the .db file alone, without the -wal file, has the data.
+        let copy = path.with_file_name("copy.db");
+        std::fs::copy(&path, &copy).unwrap();
+        let c = Store::open(&copy).unwrap();
+        assert_eq!(c.samples("x", 3600, 0, 10).unwrap(), vec![(0, 1.0)]);
+        drop((s, c));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

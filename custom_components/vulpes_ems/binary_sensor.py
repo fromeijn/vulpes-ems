@@ -9,7 +9,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import VulpesConfigEntry
 from .coordinator import VulpesCoordinator
-from .modes import CONF_MODE_ENTITY, CONF_PV_CURTAIL
+from .const import CONF_MODE_ENTITY, CONF_PV_CURTAIL
 from .sensor import device_info, remove_stale
 
 

@@ -12,6 +12,7 @@ mod entsoe;
 mod load;
 mod price;
 mod replay;
+mod ridge;
 mod series;
 mod solar;
 
@@ -472,7 +473,7 @@ fn main() -> Result<()> {
     }
 }
 
-const PRICE_KEY: &str = "price.wholesale.nl";
+const PRICE_KEY: &str = vulpes_core::keys::WHOLESALE_NL;
 
 fn parse_country(c: &str) -> Result<vulpes_load::Country> {
     Ok(match c {

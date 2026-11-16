@@ -29,10 +29,16 @@ def test_options_menu_lists_every_section():
     assert list(STRINGS["options"]["step"]["init"]["menu_options"]) == sections
 
 
+def _rust_error_keys() -> set[str]:
+    """The `ERROR_KEYS` the Rust checks can return (crates/vulpes-ha/src/settings.rs)."""
+    source = (Path(__file__).parents[1] / "crates" / "vulpes-ha" / "src" / "settings.rs").read_text()
+    block = re.search(r"pub const ERROR_KEYS: \[&str; \d+\] = \[(.*?)\];", source, re.S).group(1)
+    return set(re.findall(r'"(\w+)"', block))
+
+
 def test_every_error_and_abort_has_a_string():
-    errors = set(re.findall(r'errors\[[^\]]+\] = "(\w+)"', FLOW)) | {"no_modes"}
-    checks = (_dir / "setup_checks.py").read_text()
-    errors |= set(re.findall(r'\{"base": "(\w+)"\}', checks)) | {"charge_w_too_high", "discharge_w_too_high"}
+    errors = set(re.findall(r'errors\[[^\]]+\] = "(\w+)"', FLOW)) | _rust_error_keys()
+    assert {"no_modes", "soc_range", "charge_w_too_high", "invalid_planes"} <= errors
     aborts = set(re.findall(r'async_abort\(reason="(\w+)"\)', FLOW))
     for section in ("config", "options"):
         assert errors <= STRINGS[section]["error"].keys(), (section, errors - STRINGS[section]["error"].keys())
@@ -58,3 +64,14 @@ def test_other_translations_match_english_keys_and_placeholders():
         for key, text in english.items():
             assert set(re.findall(r"\{\w+\}", translated[key])) == set(re.findall(r"\{\w+\}", text)), (path.name, key)
             assert translated[key].strip(), (path.name, key)
+
+
+def test_every_repair_issue_has_a_title_and_description():
+    source = (Path(__file__).parents[1] / "crates" / "vulpes-ha" / "src" / "health.rs").read_text()
+    block = re.search(r"pub const ISSUES: \[&str; \d+\] = \[(.*?)\];", source, re.S).group(1)
+    issues = set(re.findall(r'"(\w+)"', block))
+    assert issues == {"soc_unavailable", "no_plan", "energy_stopped", "script_failing"}
+    for issue in issues:
+        assert STRINGS["issues"][issue]["title"] and STRINGS["issues"][issue]["description"], issue
+    for state in ("ok", "degraded", "problem"):
+        assert STRINGS["entity"]["sensor"]["status"]["state"][state]

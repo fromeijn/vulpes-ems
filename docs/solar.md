@@ -18,6 +18,10 @@ For a hybrid inverter with the battery on the DC side, the useful limit is the m
 
 The model runs on 15-minute weather. Open-Meteo radiation values are averages over the *preceding* 15 minutes, so they are shifted to the start of their interval. Hourly results are means of four sub-slots.
 
+**Daily figures.** The plan reports the PV energy of today (the whole local day, including the hours that have passed), the rest of today from the current slot, tomorrow and the day after, from the same model and weather. They are what the panels could produce, before curtailment or export limits. A quarter hour without weather counts as zero when the sun is down (the weather is requested from UTC midnight of yesterday, so it covers today's local morning in every time zone; weather passed in the request may start later); with the sun up, that day has no figure. Days follow the configured time zone, so they have 23 or 25 hours at the DST changes.
+
+**Hourly figures and the Energy dashboard.** The plan also reports the PV energy per hour (`pv_hourly`, Wh), from local midnight of today to the end of the plan, with the same model, weather and rules as the daily figures: before curtailment, and a dark quarter hour without weather counts as zero. An hour with a daylight quarter hour without weather is left out, so it shows as missing, not as zero. The integration offers these hours to Home Assistant's Energy dashboard as its solar forecast. The hours of today that have passed are computed from the latest weather, which keeps being updated: they show the current estimate, not the forecast as it was made (the history file keeps those, see `docs/monitoring.md`). Past days have no forecast line.
+
 The building blocks are tested against pvlib reference values (`crates/vulpes-solar/tests/pvlib_reference.rs`):
 - solar position: < 0.02° from NREL SPA;
 - Perez, extraterrestrial irradiance, IAM and Faiman: exact to rounding.
@@ -39,6 +43,8 @@ Method (`vulpes_engine::calibrate`):
 - **Kept as entered:** inverter limits and efficiencies (hourly means understate a limit), and any array with fewer than 40 clear hours.
 - **Scores:** with enough data, the fit runs on even ISO weeks and the current and proposed values are scored on odd weeks with day-ahead weather. The proposal itself is then refitted on all weeks. The score covers all daylight hours, *including* curtailed ones, so it understates a fit that correctly predicts what the panels could produce.
 - **Sanity checks:** warnings when the strings don't add up to the total (wrong sensor or unit), and when a total-scale fit lands outside 0.5–2× (wrong sensor or kWp).
+
+**Run time:** the grid search per string is the heaviest computation in the integration. With two string sensors and 120 days of history it takes about 5 s of CPU on a desktop core, and roughly one to two minutes on a Raspberry Pi 4, Home Assistant Yellow or Green. A total-only fit takes well under a second. It runs in the background, so Home Assistant stays responsive; the **Calibrate solar** button only returns when the result is in.
 
 `vulpes-cli calibrate-system` runs the same calibration on series in the local store (for example imported from a copy of a Home Assistant database with `import-ha`).
 

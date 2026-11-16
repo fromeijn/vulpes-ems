@@ -21,10 +21,9 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from . import VulpesConfigEntry
-from .const import DOMAIN
-from .control import STATES as CONTROL_STATES, state_of
+from .const import CONF_MODE_ENTITY, CONF_PLANES, DOMAIN
 from .coordinator import VulpesCoordinator
-from .modes import CONF_MODE_ENTITY, enabled_modes
+from .core import C, ha
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -64,6 +63,38 @@ SENSORS = (
         value=lambda c: c.data["summary"]["pv_kwh_24h"],
     ),
     VulpesSensorDescription(
+        key="pv_today",
+        translation_key="pv_today",
+        device_class=SensorDeviceClass.ENERGY,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        suggested_display_precision=1,
+        value=lambda c: c.data["summary"].get("pv_kwh_today"),
+    ),
+    VulpesSensorDescription(
+        key="pv_remaining_today",
+        translation_key="pv_remaining_today",
+        device_class=SensorDeviceClass.ENERGY,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        suggested_display_precision=1,
+        value=lambda c: c.data["summary"].get("pv_kwh_today_remaining"),
+    ),
+    VulpesSensorDescription(
+        key="pv_tomorrow",
+        translation_key="pv_tomorrow",
+        device_class=SensorDeviceClass.ENERGY,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        suggested_display_precision=1,
+        value=lambda c: c.data["summary"].get("pv_kwh_tomorrow"),
+    ),
+    VulpesSensorDescription(
+        key="pv_day_after",
+        translation_key="pv_day_after",
+        device_class=SensorDeviceClass.ENERGY,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        suggested_display_precision=1,
+        value=lambda c: c.data["summary"].get("pv_kwh_day_after"),
+    ),
+    VulpesSensorDescription(
         key="load_forecast_24h",
         translation_key="load_forecast_24h",
         device_class=SensorDeviceClass.ENERGY,
@@ -75,7 +106,6 @@ SENSORS = (
         key="plan_cost",
         translation_key="plan_cost",
         device_class=SensorDeviceClass.MONETARY,
-        native_unit_of_measurement="EUR",
         suggested_display_precision=2,
         value=lambda c: c.data["summary"]["cost"],
     ),
@@ -85,7 +115,128 @@ SENSORS = (
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=0,
-        value=lambda c: round(100.0 * c.agree / c.compared, 1) if c.compared else None,
+        value=lambda c: c.agreement_pct,
+    ),
+)
+
+
+def _r(c: VulpesCoordinator, *path: str) -> Any:
+    """A value from the review, or None while there is none."""
+    node: Any = c.review
+    for key in path:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+    return node
+
+
+def _window(c: VulpesCoordinator, field: str) -> dict[str, Any]:
+    w7 = _r(c, "windows", "days_7") or {}
+    return {
+        "yesterday": _r(c, "windows", "yesterday", field),
+        "last_30_days": _r(c, "windows", "days_30", field),
+        "days": w7.get("days"),
+        "cost_self_consumption": w7.get("cost_baseline"),
+        "cost_actual": w7.get("cost_actual"),
+        "cost_plan": w7.get("cost_plan"),
+        "active_share_pct": w7.get("active_share_pct"),
+    }
+
+
+def _forecast(c: VulpesCoordinator, kind: str) -> dict[str, Any]:
+    f = _r(c, "windows", "days_7", kind) or {}
+    return {
+        "bias_pct": f.get("bias_pct"),
+        "day_ahead": f.get("day_ahead"),
+        "latest": f.get("latest"),
+        "persistence": f.get("persistence"),
+        "skill": f.get("skill"),
+        "hours": f.get("hours"),
+        "mean_w": f.get("mean_w"),
+        "last_30_days_pct": _r(c, "windows", "days_30", kind, "error_pct"),
+    }
+
+
+@dataclass(frozen=True, kw_only=True)
+class ReviewSensorDescription(SensorEntityDescription):
+    value: Callable[[VulpesCoordinator], Any]
+    attrs: Callable[[VulpesCoordinator], dict[str, Any]] = lambda c: {}
+    needs: str | None = None  # "planes" or "script": only created with those
+
+
+REVIEW_SENSORS = (
+    ReviewSensorDescription(
+        key="saved_7d",
+        translation_key="saved_7d",
+        device_class=SensorDeviceClass.MONETARY,
+        suggested_display_precision=2,
+        value=lambda c: _r(c, "windows", "days_7", "saved_actual"),
+        attrs=lambda c: _window(c, "saved_actual"),
+    ),
+    ReviewSensorDescription(
+        key="plan_saved_7d",
+        translation_key="plan_saved_7d",
+        device_class=SensorDeviceClass.MONETARY,
+        suggested_display_precision=2,
+        value=lambda c: _r(c, "windows", "days_7", "saved_plan"),
+        attrs=lambda c: _window(c, "saved_plan"),
+    ),
+    ReviewSensorDescription(
+        key="total_saved",
+        translation_key="total_saved",
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=2,
+        value=lambda c: _r(c, "totals", "saved_actual"),
+        attrs=lambda c: {"since": _r(c, "totals", "since"), "plan_total": _r(c, "totals", "saved_plan")},
+    ),
+    ReviewSensorDescription(
+        key="solar_forecast_error",
+        translation_key="solar_forecast_error",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        value=lambda c: _r(c, "windows", "days_7", "solar", "error_pct"),
+        attrs=lambda c: _forecast(c, "solar"),
+        needs="planes",
+    ),
+    ReviewSensorDescription(
+        key="load_forecast_error",
+        translation_key="load_forecast_error",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        value=lambda c: _r(c, "windows", "days_7", "load", "error_pct"),
+        attrs=lambda c: _forecast(c, "load"),
+    ),
+    ReviewSensorDescription(
+        key="control_uptime",
+        translation_key="control_uptime",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        value=lambda c: _r(c, "windows", "days_7", "control", "uptime_pct"),
+        attrs=lambda c: {
+            k: _r(c, "windows", "days_7", "control", k) for k in ("slots_active", "slots_followed")
+        },
+        needs="script",
+    ),
+    ReviewSensorDescription(
+        key="soc_tracking_error",
+        translation_key="soc_tracking_error",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value=lambda c: _r(c, "windows", "days_7", "control", "soc_mae_pct"),
+        attrs=lambda c: {
+            "bias_pct": _r(c, "windows", "days_7", "control", "soc_bias_pct"),
+            "hours": _r(c, "windows", "days_7", "control", "soc_hours"),
+        },
+        needs="script",
     ),
 )
 
@@ -97,6 +248,13 @@ def remove_stale(hass: HomeAssistant, entry: VulpesConfigEntry, domain: str, key
         key = reg.unique_id.removeprefix(f"{entry.entry_id}_")
         if reg.domain == domain and key in keys:
             registry.async_remove(reg.entity_id)
+
+
+def currency(coordinator: VulpesCoordinator, description: SensorEntityDescription) -> str | None:
+    """Money in Home Assistant's currency, the one the tariffs are entered in."""
+    if description.device_class == SensorDeviceClass.MONETARY:
+        return coordinator.hass.config.currency
+    return description.native_unit_of_measurement
 
 
 def device_info(entry: VulpesConfigEntry) -> DeviceInfo:
@@ -114,6 +272,13 @@ async def async_setup_entry(
         VulpesSensor(coordinator, entry, d) for d in SENSORS if compare or d.key != "agreement_today"
     ]
     entities.append(SolarCalibrationSensor(coordinator, entry))
+    entities += [StatusSensor(coordinator, entry), LastPlanSensor(coordinator, entry), EnergyDataSensor(coordinator, entry)]
+    has = {"planes": bool(coordinator.cfg.get(CONF_PLANES)), "script": bool(coordinator.control_script)}
+    for d in REVIEW_SENSORS:
+        if d.needs is None or has[d.needs]:
+            entities.append(ReviewSensor(coordinator, entry, d))
+        else:
+            remove_stale(hass, entry, "sensor", {d.key})
     if coordinator.control_script:
         entities.append(ControlSensor(coordinator, entry))
     else:
@@ -134,8 +299,9 @@ class VulpesSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_device_info = device_info(entry)
+        self._attr_native_unit_of_measurement = currency(coordinator, description)
         if description.device_class == SensorDeviceClass.ENUM:
-            self._attr_options = enabled_modes(coordinator.cfg)
+            self._attr_options = ha("enabled_modes", cfg=coordinator.cfg)
 
     @property
     def native_value(self) -> Any:
@@ -183,7 +349,7 @@ class ControlSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
     _attr_has_entity_name = True
     _attr_translation_key = "control"
     _attr_device_class = SensorDeviceClass.ENUM
-    _attr_options = CONTROL_STATES
+    _attr_options = C["control_states"]
 
     def __init__(self, coordinator: VulpesCoordinator, entry: VulpesConfigEntry) -> None:
         super().__init__(coordinator)
@@ -196,7 +362,8 @@ class ControlSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
 
     @property
     def native_value(self) -> str:
-        return state_of(self.coordinator.active, self.coordinator.last_command, self.coordinator.last_error)
+        c = self.coordinator
+        return ha("control_state", active=c.active, last=c.last_command, error=c.last_error)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -205,6 +372,107 @@ class ControlSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
         if c.last_error:
             attrs["error"] = c.last_error
         return attrs
+
+
+class StatusSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
+    """Is Vulpes working: ok, degraded or problem, with every check in the attributes."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "status"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["ok", "degraded", "problem"]
+
+    def __init__(self, coordinator: VulpesCoordinator, entry: VulpesConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_status"
+        self._attr_device_info = device_info(entry)
+
+    @property
+    def available(self) -> bool:
+        return True  # most useful exactly when planning fails
+
+    @property
+    def native_value(self) -> str:
+        return self.coordinator.health["status"]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        h = self.coordinator.health
+        return {
+            "checks": h["checks"],
+            "problems": h["problems"],
+            "review_warnings": (self.coordinator.review or {}).get("warnings", []),
+        }
+
+
+class _TimestampSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _key = ""
+
+    def __init__(self, coordinator: VulpesCoordinator, entry: VulpesConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_translation_key = self._key
+        self._attr_unique_id = f"{entry.entry_id}_{self._key}"
+        self._attr_device_info = device_info(entry)
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def _ts(self) -> float | None:
+        raise NotImplementedError
+
+    @property
+    def native_value(self) -> Any:
+        ts = self._ts()
+        return dt_util.utc_from_timestamp(ts) if ts is not None else None
+
+
+class LastPlanSensor(_TimestampSensor):
+    """When the last plan was made."""
+
+    _key = "last_plan"
+
+    def _ts(self) -> float | None:
+        return self.coordinator.last_success_ts
+
+
+class EnergyDataSensor(_TimestampSensor):
+    """The end of the newest hour of energy statistics in the history file."""
+
+    _key = "newest_energy_data"
+
+    def _ts(self) -> float | None:
+        return self.coordinator.energy_until
+
+
+class ReviewSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
+    """A performance figure from the review of the history file."""
+
+    _attr_has_entity_name = True
+    entity_description: ReviewSensorDescription
+
+    def __init__(self, coordinator: VulpesCoordinator, entry: VulpesConfigEntry, description) -> None:
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_device_info = device_info(entry)
+        self._attr_native_unit_of_measurement = currency(coordinator, description)
+
+    @property
+    def available(self) -> bool:
+        # The review comes from the history file, not from the latest plan.
+        return self.coordinator.review is not None
+
+    @property
+    def native_value(self) -> Any:
+        return self.entity_description.value(self.coordinator)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self.entity_description.attrs(self.coordinator)
 
 
 class SolarCalibrationSensor(SensorEntity):

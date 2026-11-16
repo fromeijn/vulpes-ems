@@ -3,7 +3,7 @@
 use anyhow::{Result, bail};
 use chrono::{DateTime, Datelike};
 use std::collections::{BTreeMap, HashMap};
-use vulpes_core::Store;
+use vulpes_core::{ErrorStats, Store};
 use vulpes_price::tariff::{TariffSample, fit};
 
 fn series(store: &Store, key: &str) -> Result<HashMap<i64, f64>> {
@@ -84,10 +84,7 @@ fn index(points: &[HashMap<i64, f64>], h: i64, f: impl Fn(f64) -> f64) -> Option
 
 #[derive(Default)]
 struct PriceScore {
-    n: usize,
-    abs: f64,
-    sq: f64,
-    bias: f64,
+    err: ErrorStats,
     rho: f64,
     days: usize,
     cheap_hits: usize,
@@ -170,12 +167,12 @@ pub(crate) fn evaluate(
         "method", "MAE ct", "RMSE ct", "bias", "rank corr", "cheapest-4", "priciest-4"
     );
     for (name, s) in PRICE_METHODS.iter().zip(scores) {
-        let n = s.n.max(1) as f64;
+        let n = s.err.n.max(1) as f64;
         println!(
             "{name:34} {:9.2} {:9.2} {:+8.2} {:10.2} {:9.2} / 4 {:9.2} / 4",
-            100.0 * s.abs / n,
-            100.0 * (s.sq / n).sqrt(),
-            100.0 * s.bias / n,
+            100.0 * s.err.abs / n,
+            100.0 * (s.err.sq / n).sqrt(),
+            100.0 * s.err.sum / n,
             s.rho / d,
             s.cheap_hits as f64 / d,
             s.dear_hits as f64 / d
@@ -200,7 +197,7 @@ const PRICE_METHODS: [&str; 3] = [
 struct PriceEval {
     /// One score per entry of [`PRICE_METHODS`].
     scores: Vec<PriceScore>,
-    last_model: Option<vulpes_ml::ridge::Ridge>,
+    last_model: Option<crate::ridge::Ridge>,
 }
 
 /// Score the wholesale forecasting methods on each complete local day in
@@ -215,9 +212,9 @@ fn evaluate_days(
     to: chrono::NaiveDate,
     tz: chrono_tz::Tz,
 ) -> PriceEval {
+    use crate::ridge::{Ridge, recency_weight};
     use chrono::TimeZone;
     use vulpes_load::{Country, ProfileForecaster, ProfileOptions};
-    use vulpes_ml::{recency_weight, ridge::Ridge};
 
     let actual: HashMap<i64, f64> = all.iter().copied().collect();
     let wind_idx = |h: i64| index(wind, h, wind_power);
@@ -288,11 +285,7 @@ fn evaluate_days(
         if ok && (model.is_some() || (wind.is_empty() && solar.is_empty())) {
             for (m, s) in scores.iter_mut().enumerate() {
                 for (fv, av) in f[m].iter().zip(&a) {
-                    let e = fv - av;
-                    s.n += 1;
-                    s.abs += e.abs();
-                    s.sq += e * e;
-                    s.bias += e;
+                    s.err.add(*fv, *av);
                 }
                 s.rho += spearman(&f[m], &a);
                 s.cheap_hits += overlap(&f[m], &a, 4, true);
@@ -403,7 +396,7 @@ mod tests {
         let e = evaluate_days(&all, &[], &[], date("2026-01-20"), date("2026-01-29"), TZ);
         let copy = &e.scores[0];
         assert_eq!(copy.days, 10, "without reference points no warm-up is needed");
-        assert!(copy.abs < 1e-12);
+        assert!(copy.err.abs < 1e-12);
         assert!((copy.rho / copy.days as f64 - 1.0).abs() < 1e-12);
         assert_eq!((copy.cheap_hits, copy.dear_hits), (4 * 10, 4 * 10));
         assert!(e.last_model.is_none());
@@ -426,7 +419,7 @@ mod tests {
             date("2026-03-25"),
             TZ,
         );
-        let [_, profile, regression] = [0, 1, 2].map(|k| e.scores[k].abs / e.scores[k].n.max(1) as f64);
+        let [_, profile, regression] = [0, 1, 2].map(|k| e.scores[k].err.mae().unwrap_or(0.0));
         assert!(
             e.scores[0].days > 0 && e.scores[0].days < 55,
             "warm-up days are not scored"
@@ -453,7 +446,7 @@ mod tests {
             let e = evaluate_days(a, &[], &[], date("2026-01-25"), date("2026-02-10"), TZ);
             e.scores
                 .iter()
-                .map(|s| (s.abs, s.sq, s.bias, s.rho))
+                .map(|s| (s.err.abs, s.err.sq, s.err.sum, s.rho))
                 .collect::<Vec<_>>()
         };
         assert_eq!(run(&all), run(&changed));

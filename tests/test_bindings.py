@@ -10,7 +10,7 @@ import pytest
 
 vulpes_ems = pytest.importorskip("vulpes_ems")
 
-NOW = 1_781_000_000  # mid-June 2026, 08:13:20 UTC
+NOW = 1_781_000_000  # mid-June 2026, 10:13:20 UTC
 
 
 def _request(**overrides):
@@ -71,6 +71,11 @@ def test_plan_returns_a_response():
     assert resp["summary"]["mode_now"] in ("charge", "self_consume")
     assert all(s["price_known"] for s in resp["slots"])
     assert resp["version"] == vulpes_ems.__version__
+    # The hourly solar forecast for the Energy dashboard: [hour_start, Wh] pairs.
+    assert resp["pv_hourly"]
+    for start, wh in resp["pv_hourly"]:
+        assert isinstance(start, int) and start % 3600 == 0
+        assert wh >= 0
 
 
 def test_plan_blocks_export_when_it_costs_money():
@@ -178,3 +183,240 @@ def test_calibrate_solar_with_supplied_weather():
 def test_calibrate_solar_errors_raise_value_error(payload):
     with pytest.raises(ValueError):
         vulpes_ems.calibrate_solar(payload)
+
+
+# --- the Home Assistant adapter: vulpes_ems.ha, plan_ha, calibrate_ha -------------------
+
+
+def ha(op, **request):
+    return json.loads(vulpes_ems.ha(op, json.dumps(request)))
+
+
+HA_CFG = {
+    "soc_entity": "sensor.soc",
+    "price_entity": "sensor.price",
+    "grid_import": ["sensor.import"],
+    "grid_export": ["sensor.export"],
+    "capacity_kwh": 10.0,
+    "max_charge_w": 3000,
+    "max_discharge_w": 3000,
+    "charge_eff": 0.95,
+    "discharge_eff": 0.95,
+    "min_soc": 11,
+    "max_soc": 100,
+    "wear_cost": 0.02,
+    "max_import_w": 17250,
+    "max_export_w": 17250,
+    "tariff_a": 1.21,
+    "tariff_b": 0.13,
+    "export_a": 1.0,
+    "export_b": 0.0,
+    "charge_w": 3000,
+    "planes": [{"azimuth": 180, "tilt": 35, "pdc0": 3000, "ac_max": 2800, "inverter": 0, "power_entity": "sensor.pv"}],
+    "solar_energy": ["sensor.pv_energy"],
+}
+
+
+def test_every_ha_op_answers():
+    """One call per op, so a routing or JSON mistake in the bindings shows up here."""
+    plan = {"planned_at": NOW, "slots": [{"start": NOW - NOW % 900, "mode": "charge", "pv_off": False,
+                                          "no_export": False, "grid_w": 2999.6, "battery_w": -1200.4}]}
+    prices = [["today", [{"start": NOW, "price": 0.2}]]]
+    stats = {"sensor.import": [[NOW - NOW % 3600, 0.5]], "sensor.export": [[NOW - NOW % 3600, 0.0]]}
+    calls = {
+        "constants": {},
+        "error_keys": {},
+        "settings": {"data": HA_CFG, "options": {}},
+        "migrate": {"cfg": HA_CFG, "version": 3},
+        "enabled_modes": {"cfg": HA_CFG},
+        "mode_map": {"cfg": HA_CFG, "input": {"charge": "Charging"}},
+        "check_battery": {"cfg": HA_CFG},
+        "check_tariff": {"cfg": HA_CFG},
+        "check_modes": {"cfg": HA_CFG, "mode_options": None},
+        "check_sources": {"cfg": HA_CFG, "soc_state": "50", "price_attributes": prices, "stats": stats},
+        "dashboard_defaults": {"prefs": None},
+        "energy_ids": {"cfg": HA_CFG},
+        "command": {"cfg": HA_CFG, "plan": plan, "now": NOW, "failed": False},
+        "safe_command": {"cfg": HA_CFG, "now": NOW, "fallback": False},
+        "control_state": {"active": True, "last": {"fallback": False}, "error": None},
+        "script_result": {"cmd": {"mode": "hold"}, "error": None, "timed_out": False, "failures": 0, "now": NOW},
+        "stats_start": {"now": NOW},
+        "plane_from_array": {"array": {"direction": "s", "tilt": 35, "kwp": 3}, "inverter_w": 2800, "existing": None},
+        "form_defaults": {"planes": HA_CFG["planes"]},
+        "fits_form": {"planes": HA_CFG["planes"]},
+        "engine_planes": {"planes": HA_CFG["planes"]},
+        "parse_planes": {"text": json.dumps(HA_CFG["planes"])},
+        "apply_proposal": {"planes": HA_CFG["planes"], "result": {"planes": HA_CFG["planes"]}},
+        "summarize": {"planes": HA_CFG["planes"], "result": {"planes": HA_CFG["planes"]}},
+        "calibration_view": {"cfg": HA_CFG, "stored": {}, "running": False, "error": False},
+        "calibration_message": {"cfg": HA_CFG, "result": {"planes": HA_CFG["planes"]}},
+        "calibration_inputs": {"cfg": HA_CFG},
+        "wholesale_fetch": {"cfg": {"wholesale_source": "energyzero"}, "now": NOW, "fetched_at": None},
+        "known_prices": {"price_attributes": prices, "price_unit": "EUR/kWh", "timezone": "UTC"},
+        "load_series": {"cfg": HA_CFG, "stats": stats},
+    }
+    for op, request in calls.items():
+        ha(op, **request)
+    assert ha("constants")["config_version"] == 3
+    assert ha("constants")["script_timeout_s"] == 60
+    with pytest.raises(ValueError, match="unknown op"):
+        vulpes_ems.ha("no_such_op", "{}")
+
+
+def test_script_variables_are_an_api():
+    """The exact variables and types the control script gets (docs/control.md)."""
+    start = NOW - NOW % 900
+    plan = {"planned_at": NOW, "slots": [{"start": start, "mode": "charge", "pv_off": False, "no_export": False,
+                                          "grid_w": 2999.6, "battery_w": -1200.4}]}
+    cmd = ha("command", cfg=HA_CFG, plan=plan, now=NOW, failed=False)
+    assert cmd == {
+        "mode": "charge",
+        "pv_off": False,
+        "no_export": False,
+        "power_control": "grid_setpoint",
+        "power_w": 3000,
+        "soc_min": 11.0,
+        "soc_max": 100.0,
+        "planned_grid_w": 3000,
+        "planned_battery_w": -1200,
+        "fallback": False,
+        "until": "2026-06-09T10:15:00+00:00",
+    }
+    assert isinstance(cmd["power_w"], int) and isinstance(cmd["soc_min"], float)
+    safe = ha("command", cfg=HA_CFG, plan=plan, now=NOW, failed=True)
+    assert (safe["mode"], safe["fallback"], safe["planned_grid_w"]) == ("self_consume", True, None)
+
+
+def test_plan_ha_offline():
+    start = NOW - NOW % 900
+    weather = [
+        {"start": start + k * 900, "ghi": 500, "dni": 600, "dhi": 150, "temp_air": 15, "wind_speed": 2}
+        for k in range(96 * 4)
+    ]
+    hour = NOW - NOW % 3600
+    stats = {
+        "sensor.import": [[hour - h * 3600, 0.4] for h in range(1, 24 * 7)],
+        "sensor.export": [[hour - h * 3600, 0.0] for h in range(1, 24 * 7)],
+    }
+    request = {
+        "cfg": {**HA_CFG, "pv_curtail": True, "solar_energy": []},
+        "now": NOW + 0.5,
+        "lat": 52.0,
+        "lon": 5.0,
+        "timezone": "Europe/Amsterdam",
+        "country": "NL",
+        "soc_state": "55",
+        "price_attributes": [["today", [{"start": hour + h * 3600, "price": 0.25} for h in range(24)]]],
+        "price_unit": "EUR/kWh",
+        "stats": stats,
+        "wholesale": [],
+        "weather": weather,
+    }
+    plan = json.loads(vulpes_ems.plan_ha(json.dumps(request)))
+    assert plan["planned_at"] == NOW
+    assert plan["inputs"] == {"load_hours": 24 * 7 - 1, "known_price_slots": 24, "wholesale_hours": 0}
+    assert all(":" not in s["mode"] and isinstance(s["pv_off"], bool) for s in plan["slots"])
+    for key in ("pv_kwh_today", "pv_kwh_today_remaining", "pv_kwh_tomorrow", "pv_kwh_day_after"):
+        assert key in plan["summary"], key
+    with pytest.raises(ValueError, match="battery SOC from sensor.soc is unavailable"):
+        vulpes_ems.plan_ha(json.dumps({**request, "soc_state": "unavailable"}))
+    with pytest.raises(ValueError, match="planning failed"):
+        vulpes_ems.plan_ha(json.dumps({**request, "stats": {}}))
+
+
+def test_calibrate_ha_offline():
+    start = NOW - NOW % 86_400
+    weather = [
+        {"start": start + k * 900, "ghi": 300, "dni": 200, "dhi": 150, "temp_air": 15, "wind_speed": 2}
+        for k in range(2 * 96)
+    ]
+    request = {
+        "cfg": HA_CFG,
+        "lat": 52.0,
+        "lon": 5.0,
+        "strings": {"sensor.pv": []},
+        "total": {"sensor.pv_energy": [[start + h * 3600, 0.5] for h in range(48)]},
+        "weather": weather,
+        "weather_day_ahead": weather,
+    }
+    out = json.loads(vulpes_ems.calibrate_ha(json.dumps(request)))
+    assert out["based_on"] == [{k: v for k, v in HA_CFG["planes"][0].items() if k != "power_entity"}]
+    assert out["result"]["warnings"][0].startswith("no hourly statistics for sensor.pv")
+    with pytest.raises(ValueError, match="no solar arrays configured"):
+        vulpes_ems.calibrate_ha(json.dumps({**request, "cfg": {}}))
+
+
+def test_record_and_export_history(tmp_path):
+    db = str(tmp_path / "entry" / "vulpes.db")
+    start = NOW - NOW % 900
+    plan = {
+        "planned_at": NOW,
+        "summary": {"terminal_value_per_kwh": 0.2, "mode_now": "hold"},
+        "slots": [
+            {"start": start + 900 * k, "mode": "hold", "pv_off": False, "no_export": False, "pv_w": 100.0,
+             "load_w": 300.0, "import_price": 0.2, "export_price": 0.05, "price_known": True}
+            for k in range(8)
+        ],
+    }
+    hour = NOW - NOW % 3600
+    request = {
+        "cfg": {**HA_CFG, "mode_entity": "input_select.m", "mode_map": {"hold": "Grid"}},
+        "now": NOW + 0.5,
+        "timezone": "Europe/Amsterdam",
+        "plan": plan,
+        "soc_state": "60",
+        "mode_state": "Grid",
+        "active": True,
+        "last_command": {"fallback": False},
+        "last_error": None,
+        "stats": {"sensor.import": [[hour - 3600, 0.5]], "sensor.export": [[hour - 3600, 0.0]],
+                  "sensor.pv_energy": [[hour - 3600, 1.0]]},
+        "wholesale": [[hour - 3600, 0.1]],
+    }
+    out = json.loads(vulpes_ems.record_ha(db, json.dumps(request)))
+    assert out["agreement_today"] == {"compared": 1, "agreed": 1, "pct": 100.0}
+    assert out["agrees_now"] is True
+    assert out["newest_energy_ts"] == hour - 3600
+    assert out["energy_until"] == hour
+    history = json.loads(vulpes_ems.export_history(db, json.dumps({"now": NOW})))
+    assert history["plan_slots"][0]["mode"] == "hold" and history["plan_slots"][0]["followed"] is True
+    assert history["samples"]["soc"] == [[start, 60.0]]
+    assert history["forecasts"]["pv_w"]
+    redacted = ha("redact_settings", cfg=request["cfg"])
+    assert "sensor." not in json.dumps(redacted)
+    with pytest.raises(ValueError, match="history"):
+        vulpes_ems.record_ha("", json.dumps(request))
+
+
+def test_review_history(tmp_path):
+    db = str(tmp_path / "vulpes.db")
+    cfg = {**HA_CFG, "wholesale_source": "none"}
+    vulpes_ems.record_ha(db, json.dumps({"cfg": cfg, "now": NOW, "timezone": "Europe/Amsterdam"}))
+    out = json.loads(vulpes_ems.review_ha(db, json.dumps({"cfg": cfg, "now": NOW, "timezone": "Europe/Amsterdam"})))
+    assert set(out["windows"]) == {"yesterday", "days_7", "days_30"}
+    assert out["windows"]["days_7"]["saved_actual"] is None, "not enough days yet"
+    assert out["totals"] == {"since": None, "saved_actual": None, "saved_plan": None}
+    assert {c["check"] for c in out["checks"]} >= {"load_forecast", "solar_forecast", "soc_tracking", "coverage"}
+    with pytest.raises(ValueError, match="missing setting"):
+        vulpes_ems.review_ha(db, json.dumps({"cfg": {}, "now": NOW}))
+
+
+def test_script_result_and_stats_start():
+    """What the coordinator keeps after a script run, and where the statistics start."""
+    out = ha("script_result", cmd={"mode": "hold"}, error="boom", timed_out=False, failures=2, now=NOW)
+    assert out["last_command"]["mode"] == "hold"
+    assert out["last_command"]["sent"].endswith("+00:00")
+    assert (out["last_error"], out["script_failures"]) == ("boom", 3)
+    ok = ha("script_result", cmd={"mode": "hold"}, error=None, timed_out=False, failures=3, now=NOW)
+    assert (ok["last_error"], ok["script_failures"]) == (None, 0)
+    start = ha("stats_start", now=NOW)
+    assert start % 3600 == 0 and NOW - start >= ha("constants")["load_history_days"] * 86400
+
+
+def test_health_op():
+    out = ha("health", cfg={"wholesale_source": "none"}, now=NOW, timezone="UTC", refresh_ok=True,
+             last_success=NOW, soc_state="50", newest_energy_ts=NOW - 7200,
+             price_attributes=[["today", [{"start": NOW - 3600, "price": 0.2}, {"start": NOW, "price": 0.2}]]])
+    assert out["status"] == "ok", out
+    assert out["problems"] == []
+    assert ha("issue_ids") == ["soc_unavailable", "no_plan", "energy_stopped", "script_failing"]

@@ -7,6 +7,9 @@
 
 mod calibrate;
 mod engine;
+pub mod history;
+pub mod review;
+pub mod time;
 mod types;
 
 pub use calibrate::calibrate;

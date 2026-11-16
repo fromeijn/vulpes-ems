@@ -18,16 +18,17 @@ vulpes-ems does two things:
 | Price | Published day-ahead prices where available. Later hours use a similar-day profile of recent wholesale prices, converted with your tariff (`a × wholesale + b`). |
 | Optimizer | Dynamic programming over slot × SOC × mode. The objective is import cost − export revenue + battery wear − terminal SOC value. A probabilistic night-reserve constraint guards against running empty. |
 | Modes | Vulpes's own modes: charge from grid, hold (no discharge), self-consume, idle, discharge to grid, each optionally with solar switched off. You tick the ones your system supports and set their power. An existing mode entity (such as an `input_select`) can be mapped to them to compare the plan with what the house does. |
-| Safety | Starts in shadow mode, with agreement and cost comparison against your current automation. To hand over control you pick a control script and turn the *Active* switch on; Vulpes then runs the script every 15 minutes. Without a usable plan it sends a safe mode (self-consume) instead. See [docs/control.md](docs/control.md). |
+| Safety | Starts in shadow mode, with agreement against your current automation and a "Plan would save" sensor that shows what handing over control is worth. To hand over control you pick a control script and turn the *Active* switch on; Vulpes then runs the script every 15 minutes. Without a usable plan it sends a safe mode (self-consume) instead. See [docs/control.md](docs/control.md). |
+| Monitoring | A Status sensor (ok, degraded, problem) with the reason for each check, repair issues for problems that last, and performance sensors from Vulpes's own history file: savings against self-consumption, forecast errors, and whether the battery followed the plan. See [docs/monitoring.md](docs/monitoring.md). |
 
 ## Layout
 
-- `crates/vulpes-core`: time grid, mode/battery types, storage
+- `crates/vulpes-core`: time grid, mode/battery types, error metrics, storage
 - `crates/vulpes-{solar,load,price}`: forecasters
-- `crates/vulpes-ml`: weighted ridge regression and recency weights (used by the evaluation tools only)
 - `crates/vulpes-opt`: DP optimizer
 - `crates/vulpes-sources`: Open-Meteo, ENTSO-E clients
 - `crates/vulpes-py`: PyO3 bindings (PyPI package `vulpes-ems`)
+- `crates/vulpes-ha`: Home Assistant adapter (settings, checks, control commands, history and health)
 - `crates/vulpes-cli`: backtest/replay tools
 - `custom_components/vulpes_ems`: Home Assistant integration
 

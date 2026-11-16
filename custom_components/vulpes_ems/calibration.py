@@ -4,7 +4,7 @@ Rust, and keeps the result as a proposal the user can apply in the options flow.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 import logging
 from typing import Any
@@ -21,19 +21,8 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .const import CALIBRATION_DELAY_S, CALIBRATION_HISTORY_DAYS, CONF_PLANES, CONF_SOLAR_ENERGY, DOMAIN
-from .modes import settings
-from .solar_setup import (
-    CONF_POWER_ENTITY,
-    CONF_SOLAR_SETUP,
-    calibration_request,
-    calibration_status,
-    engine_planes,
-    has_changes,
-    hourly_series,
-    improvement_pct,
-    total_power,
-)
+from .const import CALIBRATION_DELAY_S, DOMAIN
+from .core import C, dumps, ha, stat_rows
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -55,37 +44,29 @@ class SolarCalibration:
 
     @property
     def cfg(self) -> dict[str, Any]:
-        return settings(self.entry.data, self.entry.options)
+        return ha("settings", data=dict(self.entry.data), options=dict(self.entry.options))
 
-    def _current(self) -> list[dict[str, Any]]:
-        return engine_planes(self.cfg.get(CONF_PLANES, []))
+    def _view(self) -> dict[str, Any]:
+        return ha("calibration_view", cfg=self.cfg, stored=self._stored, running=self.running, error=bool(self.error))
 
     @property
     def applied(self) -> bool:
         """Whether the current planes are the applied result of the last calibration."""
-        return bool(self._stored.get("result")) and self._stored.get("applied") == self._current()
+        return self._view()["applied"]
 
     @property
     def result(self) -> dict[str, Any] | None:
         """The last result, if it belongs to the planes as they are now (or was applied to them)."""
-        result = self._stored.get("result")
-        if result and (self._stored.get("based_on") == self._current() or self.applied):
-            return result
-        return None
+        return self._view()["result"]
 
     @property
     def proposal(self) -> dict[str, Any] | None:
         """The result, if it was computed for the current planes and would change them."""
-        result = self._stored.get("result")
-        if result and self._stored.get("based_on") == self._current() and has_changes(
-            result, self.cfg.get(CONF_PLANES, [])
-        ):
-            return result
-        return None
+        return self._view()["proposal"]
 
     async def async_mark_applied(self, planes: list[dict[str, Any]]) -> None:
         """Remember that `planes` are the applied proposal (called by the options flow)."""
-        self._stored["applied"] = engine_planes(planes)
+        self._stored["applied"] = ha("engine_planes", planes=planes)
         await self._store.async_save(self._stored)
         self.async_dismiss()
 
@@ -95,23 +76,11 @@ class SolarCalibration:
 
     @property
     def status(self) -> str:
-        return calibration_status(
-            running=self.running,
-            error=bool(self.error),
-            applied=self.applied,
-            proposal=self.proposal is not None,
-            result=self.result is not None,
-            stored=bool(self._stored.get("result")),
-        )
+        return self._view()["status"]
 
     def improvement(self) -> float | None:
         """Forecast improvement of the last result in %; 0 when it changed nothing."""
-        result = self.result
-        if not result:
-            return None
-        if not has_changes(result, self._stored.get("based_on", [])):
-            return 0.0
-        return improvement_pct(result)
+        return self._view()["improvement"]
 
     @callback
     def async_add_listener(self, update: Callable[[], None]) -> Callable[[], None]:
@@ -125,9 +94,7 @@ class SolarCalibration:
 
     async def async_load(self) -> None:
         self._stored = await self._store.async_load() or {}
-        # Run once by itself for setups made with the array form; advanced
-        # (JSON) setups calibrate only when asked.
-        if self.cfg.get(CONF_SOLAR_SETUP) == "form" and not self._stored.get("auto_ran"):
+        if self._view()["auto_run"]:
             self._cancel_auto = async_call_later(self.hass, CALIBRATION_DELAY_S, self._auto_run)
 
     async def _auto_run(self, _now: Any) -> None:
@@ -148,58 +115,49 @@ class SolarCalibration:
     async def async_remove(self) -> None:
         await self._store.async_remove()
 
-    async def _strings(self, planes: list[dict[str, Any]], start) -> dict[str, list[tuple[int, float]]]:
-        ids = {p[CONF_POWER_ENTITY] for p in planes if p.get(CONF_POWER_ENTITY)}
+    async def _statistics(self, ids: list[str], start: datetime, units: dict, field: str) -> dict[str, list]:
         if not ids:
             return {}
         stats = await get_instance(self.hass).async_add_executor_job(
-            statistics_during_period, self.hass, start, None, ids, "hour", {"power": "W"}, {"mean"}
+            statistics_during_period, self.hass, start, None, set(ids), "hour", units, {field}
         )
-        return {i: hourly_series(stats.get(i, []), "mean") for i in ids}
-
-    async def _total(self, start) -> list[tuple[int, float]]:
-        ids = set(self.cfg.get(CONF_SOLAR_ENERGY, []))
-        if not ids:
-            return []
-        stats = await get_instance(self.hass).async_add_executor_job(
-            statistics_during_period, self.hass, start, None, ids, "hour", {"energy": "kWh"}, {"change"}
-        )
-        return total_power({i: hourly_series(stats.get(i, []), "change") for i in ids})
+        return stat_rows(stats, ids, field)
 
     async def async_run(self) -> dict[str, Any]:
         """Calibrate now; returns the result. Raises HomeAssistantError on failure."""
         if self.running:
             raise HomeAssistantError("solar calibration is already running")
-        planes = self.cfg.get(CONF_PLANES, [])
-        if not planes:
-            raise HomeAssistantError("no solar arrays configured")
+        cfg = self.cfg
+        inputs = ha("calibration_inputs", cfg=cfg)
+        if "error" in inputs:
+            raise HomeAssistantError(inputs["error"])
         self.running, self.error = True, None
         self._notify_listeners()
         try:
-            start = (dt_util.utcnow() - timedelta(days=CALIBRATION_HISTORY_DAYS)).replace(
+            start = (dt_util.utcnow() - timedelta(days=C["calibration_history_days"])).replace(
                 minute=0, second=0, microsecond=0
             )
-            strings = await self._strings(planes, start)
-            total = await self._total(start)
-            missing = [i for i, s in strings.items() if not s]
-            request = calibration_request(
-                self.hass.config.latitude, self.hass.config.longitude, planes, strings, total
-            )
+            request = {
+                "cfg": cfg,
+                "lat": self.hass.config.latitude,
+                "lon": self.hass.config.longitude,
+                "strings": await self._statistics(inputs["power_ids"], start, {"power": "W"}, "mean"),
+                "total": await self._statistics(inputs["energy_ids"], start, {"energy": "kWh"}, "change"),
+            }
             try:
-                raw = await self.hass.async_add_executor_job(vulpes_ems.calibrate_solar, json.dumps(request))
+                raw = await self.hass.async_add_executor_job(vulpes_ems.calibrate_ha, dumps(request))
             except ValueError as err:
-                raise HomeAssistantError(f"solar calibration failed: {err}") from err
-            result = json.loads(raw)
-            result["warnings"] = [
-                f"no hourly statistics for {i}; it needs state_class measurement and some history" for i in missing
-            ] + result.get("warnings", [])
-            self._stored.update(
-                result=result,
-                based_on=engine_planes(planes),
-                last_run=dt_util.utcnow().isoformat(),
-            )
+                raise HomeAssistantError(str(err)) from err
+            out = json.loads(raw)
+            result = out["result"]
+            self._stored.update(result=result, based_on=out["based_on"], last_run=dt_util.utcnow().isoformat())
             await self._store.async_save(self._stored)
-            self._notify(result)
+            persistent_notification.async_create(
+                self.hass,
+                ha("calibration_message", cfg=cfg, result=result),
+                title="Vulpes EMS: solar calibration",
+                notification_id=NOTIFICATION_ID,
+            )
             return result
         except HomeAssistantError as err:
             self.error = str(err)
@@ -207,23 +165,6 @@ class SolarCalibration:
         finally:
             self.running = False
             self._notify_listeners()
-
-    def _notify(self, result: dict[str, Any]) -> None:
-        if not has_changes(result, self.cfg.get(CONF_PLANES, [])):
-            message = "Solar calibration found nothing to change."
-            if result.get("warnings"):
-                message += "\n\n" + "\n".join(f"- {w}" for w in result["warnings"])
-        else:
-            pct = improvement_pct(result)
-            better = f" It lowers the hourly forecast error by {pct:.0f}%." if pct is not None else ""
-            message = (
-                f"Vulpes EMS has a calibrated solar setup ready.{better}\n\n"
-                "Review and apply it under Settings → Devices & services → Vulpes EMS → Configure → "
-                "Solar arrays → Apply calibration."
-            )
-        persistent_notification.async_create(
-            self.hass, message, title="Vulpes EMS: solar calibration", notification_id=NOTIFICATION_ID
-        )
 
     @callback
     def async_dismiss(self) -> None:

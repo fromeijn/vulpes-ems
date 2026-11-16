@@ -42,8 +42,9 @@ pub struct Request<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub enum Range {
-    /// Live forecast for the coming days (max 16).
-    Forecast { days: u8 },
+    /// Live forecast for the coming days (max 16), from UTC midnight of today, or of
+    /// `past_days` earlier: a local day east of UTC starts before UTC midnight.
+    Forecast { days: u8, past_days: u8 },
     /// Archived forecasts for an inclusive date range, `YYYY-MM-DD`, stitched
     /// from the freshest run for each hour (short lead time).
     Historical {
@@ -58,17 +59,19 @@ pub enum Range {
     },
 }
 
-pub fn fetch(req: &Request<'_>) -> Result<Vec<WeatherSeries>> {
-    let loc = req.location.rounded();
+/// The endpoint, its range parameters and the suffix of the variable names for `range`.
+fn range_query(range: Range) -> (&'static str, Vec<(&'static str, String)>, String) {
     let dates = |start: chrono::NaiveDate, end: chrono::NaiveDate| {
         vec![("start_date", start.to_string()), ("end_date", end.to_string())]
     };
-    let (url, range_params, suffix) = match req.range {
-        Range::Forecast { days } => (
-            FORECAST_URL,
-            vec![("forecast_days", days.to_string())],
-            String::new(),
-        ),
+    match range {
+        Range::Forecast { days, past_days } => {
+            let mut params = vec![("forecast_days", days.to_string())];
+            if past_days > 0 {
+                params.push(("past_days", past_days.to_string()));
+            }
+            (FORECAST_URL, params, String::new())
+        }
         Range::Historical { start, end } => (HISTORICAL_FORECAST_URL, dates(start, end), String::new()),
         Range::PreviousRuns {
             start,
@@ -79,7 +82,12 @@ pub fn fetch(req: &Request<'_>) -> Result<Vec<WeatherSeries>> {
             dates(start, end),
             format!("_previous_day{lead_days}"),
         ),
-    };
+    }
+}
+
+pub fn fetch(req: &Request<'_>) -> Result<Vec<WeatherSeries>> {
+    let loc = req.location.rounded();
+    let (url, range_params, suffix) = range_query(req.range);
     let requested: Vec<String> = req.vars.iter().map(|v| format!("{v}{suffix}")).collect();
     let mut r = crate::agent()
         .get(url)
@@ -178,6 +186,45 @@ mod tests {
         assert_eq!(s[0].points, vec![(100, 10.0), (1900, 30.0)]); // shifted, null skipped
         assert_eq!(s[1].points, vec![(1000, 5.0), (1900, 6.0), (2800, 7.0)]); // not shifted
         assert_eq!(s[2].model, "m2");
+    }
+
+    #[test]
+    fn range_queries() {
+        let (url, params, suffix) = range_query(Range::Forecast {
+            days: 4,
+            past_days: 1,
+        });
+        assert_eq!(url, FORECAST_URL);
+        assert_eq!(
+            params,
+            vec![("forecast_days", "4".to_string()), ("past_days", "1".to_string())]
+        );
+        assert_eq!(suffix, "");
+        let (_, params, _) = range_query(Range::Forecast {
+            days: 4,
+            past_days: 0,
+        });
+        assert_eq!(params, vec![("forecast_days", "4".to_string())]);
+        let day = |d| chrono::NaiveDate::from_ymd_opt(2026, 6, d).unwrap();
+        let (url, params, suffix) = range_query(Range::PreviousRuns {
+            start: day(1),
+            end: day(3),
+            lead_days: 1,
+        });
+        assert_eq!(url, PREVIOUS_RUNS_URL);
+        assert_eq!(
+            params,
+            vec![
+                ("start_date", "2026-06-01".to_string()),
+                ("end_date", "2026-06-03".to_string())
+            ]
+        );
+        assert_eq!(suffix, "_previous_day1");
+        let (url, _, suffix) = range_query(Range::Historical {
+            start: day(1),
+            end: day(3),
+        });
+        assert_eq!((url, suffix.as_str()), (HISTORICAL_FORECAST_URL, ""));
     }
 
     #[test]
