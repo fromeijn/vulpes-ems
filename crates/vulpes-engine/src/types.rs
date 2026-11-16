@@ -152,6 +152,11 @@ pub struct PlanResponse {
     pub version: String,
     pub summary: PlanSummary,
     pub slots: Vec<SlotPlan>,
+    /// Solar forecast per hour `(hour_start, Wh)`, before curtailment: from
+    /// local midnight of today, including the hours that have passed, to the
+    /// end of the plan. An hour with daylight but no weather is left out.
+    #[serde(default)]
+    pub pv_hourly: Vec<(i64, f64)>,
     pub warnings: Vec<String>,
 }
 

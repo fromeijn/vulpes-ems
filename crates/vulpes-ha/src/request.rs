@@ -311,6 +311,14 @@ mod tests {
             assert!(!mode.contains(':'), "{mode}");
             assert!(s["pv_off"].is_boolean() && s["no_export"].is_boolean());
         }
+        // The hourly solar forecast passes through for the Energy dashboard.
+        let hours = plan["pv_hourly"].as_array().unwrap();
+        assert!(!hours.is_empty());
+        assert!(
+            hours
+                .iter()
+                .all(|h| h[0].as_i64().unwrap() % 3600 == 0 && h[1].is_f64())
+        );
         assert!(plan["summary"]["pv_off_now"].is_boolean());
         assert!(!plan["summary"]["mode_now"].as_str().unwrap().contains(':'));
     }

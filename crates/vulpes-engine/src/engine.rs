@@ -1,4 +1,4 @@
-use crate::time::{local_date, local_midnight};
+use crate::time::{day_start, local_date, local_midnight};
 use crate::{Error, PlanRequest, PlanResponse, PlanSummary, Result, SlotPlan, WeatherSlot};
 use chrono::{DateTime, Datelike};
 use chrono_tz::Tz;
@@ -121,6 +121,44 @@ fn slot_pv(req: &PlanRequest, weather: &HashMap<i64, WeatherSlot>, t: i64, step:
     Some(total / ws.len() as f64)
 }
 
+/// As [`slot_pv`], but a slot without weather counts as 0 when the sun is
+/// down (the forecast may start at UTC midnight, after local midnight). With
+/// the sun up it stays `None`.
+fn slot_pv_or_dark(req: &PlanRequest, weather: &HashMap<i64, WeatherSlot>, t: i64, step: i64) -> Option<f64> {
+    slot_pv(req, weather, t, step).or_else(|| {
+        let sun = sun_position((t + step / 2) as f64, req.location.lat, req.location.lon);
+        (sun.elevation() <= 0.0).then_some(0.0)
+    })
+}
+
+/// PV energy per hour `(hour_start, Wh)`, before curtailment: the hours from
+/// local midnight of the day of `start` that end at or before `end`,
+/// including the ones that have passed. Each hour is the sum of its quarter
+/// hours, whatever the plan's step. An hour with a daylight quarter hour
+/// without weather is left out.
+fn pv_hourly(
+    req: &PlanRequest,
+    weather: &HashMap<i64, WeatherSlot>,
+    tz: Tz,
+    start: i64,
+    end: i64,
+) -> Vec<(i64, f64)> {
+    let Some(mut hour) = day_start(start, tz) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    while hour + 3600 <= end {
+        let wh: Option<f64> = (0..4)
+            .map(|k| slot_pv_or_dark(req, weather, hour + k * 900, 900).map(|w| w * 0.25))
+            .sum();
+        if let Some(wh) = wh {
+            out.push((hour, wh));
+        }
+        hour += 3600;
+    }
+    out
+}
+
 /// PV energy per local day (kWh): today, the rest of today from the current
 /// slot, tomorrow and the day after. A slot without weather counts as 0 when
 /// the sun is down (the forecast may start at UTC midnight, after local
@@ -143,17 +181,7 @@ fn pv_days(req: &PlanRequest, weather: &HashMap<i64, WeatherSlot>, tz: Tz, start
         let mut wh = 0.0;
         let mut t = first;
         while t < to {
-            let w = match slot_pv(req, weather, t, step) {
-                Some(w) => w,
-                None if sun_position((t + step / 2) as f64, req.location.lat, req.location.lon)
-                    .elevation()
-                    <= 0.0 =>
-                {
-                    0.0
-                }
-                None => return None,
-            };
-            wh += w * dt_h;
+            wh += slot_pv_or_dark(req, weather, t, step)? * dt_h;
             t += step;
         }
         Some(wh / 1000.0)
@@ -417,6 +445,7 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
             terminal_value_per_kwh: terminal,
         },
         slots,
+        pv_hourly: pv_hourly(req, &weather, tz, start, start + n as i64 * step),
         warnings,
     })
 }
@@ -750,6 +779,109 @@ mod tests {
             (none.today, none.today_remaining, none.tomorrow, none.day_after),
             (None, None, None, None)
         );
+    }
+
+    /// A request at `now` with clear-sky weather over `[from, to)`.
+    fn request_with_weather(now: i64, from: i64, to: i64) -> PlanRequest {
+        let mut r = request(now);
+        r.weather = Some(clear_sky(from, to).into_values().collect());
+        r
+    }
+
+    #[test]
+    fn pv_hourly_covers_today_from_local_midnight_to_the_end_of_the_plan() {
+        // 13:07: the current hour is under way and still one complete entry.
+        let now = local(2026, 6, 10, 13, 7);
+        let (from, to) = (local(2026, 6, 9, 0, 0), local(2026, 6, 14, 0, 0));
+        let r = request_with_weather(now, from, to);
+        let w = clear_sky(from, to);
+        let resp = plan(&r).unwrap();
+        let h = &resp.pv_hourly;
+        let midnight = local(2026, 6, 10, 0, 0);
+        assert_eq!(h[0].0, midnight);
+        assert!(h.windows(2).all(|p| p[1].0 - p[0].0 == 3600), "contiguous hours");
+        assert!(h.iter().all(|&(_, wh)| wh.is_finite() && wh >= 0.0));
+        // The plan ends at 13:00 the next day, and so do the hours.
+        let last_slot_end = resp.slots.last().unwrap().start + 900;
+        assert_eq!(last_slot_end, local(2026, 6, 11, 13, 0));
+        assert_eq!(h.last().unwrap().0 + 3600, last_slot_end);
+        // Today's hours add up to the day figure.
+        let today: f64 = h.iter().take(24).map(|x| x.1).sum();
+        assert!((today - resp.summary.pv_kwh_today.unwrap() * 1000.0).abs() < 1e-6);
+        // Each hour is the sum of its quarter hours: past, current and planned.
+        for &(t, wh) in h {
+            assert!((wh - by_hand(&r, &w, t, t + 3600) * 1000.0).abs() < 1e-9);
+        }
+        // A planned hour is the mean power of its four slots.
+        let at = |t: i64| h.iter().find(|x| x.0 == t).unwrap().1;
+        let slots = &resp.slots[4..8];
+        assert_eq!(slots[0].start, local(2026, 6, 10, 14, 0));
+        let mean = slots.iter().map(|s| s.pv_w).sum::<f64>() / 4.0;
+        assert!((at(slots[0].start) - mean).abs() < 1e-9 && mean > 100.0);
+        assert_eq!(at(midnight), 0.0, "dark");
+    }
+
+    #[test]
+    fn pv_hourly_on_dst_days_has_23_and_25_hours() {
+        for (y, m, d, hours) in [(2026, 3, 29, 23), (2026, 10, 25, 25)] {
+            let (a, b) = (local(y, m, d, 0, 0), local(y, m, d + 1, 0, 0));
+            let now = a + 600;
+            let req = request(now);
+            let w = clear_sky(a - 86_400, b + 86_400);
+            let h = pv_hourly(&req, &w, AMS, now - now.rem_euclid(900), b);
+            assert_eq!(h.len(), hours, "{y}-{m}-{d}");
+            assert_eq!((h[0].0, h.last().unwrap().0 + 3600), (a, b));
+            let sum: f64 = h.iter().map(|x| x.1).sum();
+            assert!((sum - by_hand(&req, &w, a, b) * 1000.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn pv_hourly_follows_local_hours_in_a_half_hour_time_zone() {
+        let tz = chrono_tz::Asia::Kolkata;
+        let midnight = tz.with_ymd_and_hms(2026, 6, 10, 0, 0, 0).unwrap().timestamp();
+        let now = midnight + 13 * 3600 + 420;
+        let req = request(now);
+        let w = clear_sky(midnight - 86_400, midnight + 3 * 86_400);
+        let h = pv_hourly(&req, &w, tz, now - now.rem_euclid(900), midnight + 86_400);
+        assert_eq!(h.len(), 24);
+        assert_eq!(h[0].0, midnight);
+        assert!(h.iter().all(|x| x.0.rem_euclid(3600) == 1800), "UTC half hours");
+    }
+
+    #[test]
+    fn pv_hourly_leaves_out_daylight_hours_without_weather() {
+        let now = local(2026, 6, 10, 13, 7);
+        let req = request(now);
+        let start = now - now.rem_euclid(900);
+        let (midnight, end) = (local(2026, 6, 10, 0, 0), local(2026, 6, 11, 0, 0));
+        // Weather from UTC midnight (02:00 local): the dark hours before it count as 0.
+        let mut w = clear_sky(midnight + 2 * 3600, end);
+        // One quarter hour at noon is missing: that hour has no value.
+        w.remove(&local(2026, 6, 10, 12, 15));
+        let h = pv_hourly(&req, &w, AMS, start, end);
+        assert_eq!(h.len(), 23);
+        assert_eq!(h[..2], [(midnight, 0.0), (midnight + 3600, 0.0)]);
+        assert!(h.iter().all(|x| x.0 != local(2026, 6, 10, 12, 0)));
+        assert!(h.iter().any(|x| x.0 == local(2026, 6, 10, 11, 0) && x.1 > 100.0));
+        // No weather at all: only the dark hours are known, as 0.
+        let none = pv_hourly(&req, &HashMap::new(), AMS, start, end);
+        assert!(!none.is_empty() && none.len() < 12);
+        assert!(none.iter().all(|x| x.1 == 0.0));
+        // Nothing before the end of the first hour, and no panic on an odd range.
+        assert!(pv_hourly(&req, &w, AMS, start, midnight + 3599).is_empty());
+        assert!(pv_hourly(&req, &w, AMS, start, midnight - 86_400).is_empty());
+    }
+
+    #[test]
+    fn pv_hourly_with_an_hourly_step_still_sums_quarter_hours() {
+        let now = local(2026, 6, 10, 13, 7);
+        let (from, to) = (local(2026, 6, 9, 0, 0), local(2026, 6, 14, 0, 0));
+        let mut r = request_with_weather(now, from, to);
+        let quarter = plan(&r).unwrap().pv_hourly;
+        r.step_s = 3600;
+        let hourly = plan(&r).unwrap().pv_hourly;
+        assert_eq!(hourly, quarter);
     }
 
     #[test]
@@ -1289,7 +1421,17 @@ mod tests {
             k.sort();
             k
         };
-        assert_eq!(keys(&v), ["slots", "summary", "version", "warnings"]);
+        assert_eq!(keys(&v), ["pv_hourly", "slots", "summary", "version", "warnings"]);
+        // Hours as `[hour_start, Wh]` pairs; the round trip keeps them, and a
+        // response from before the field parses with none.
+        let first = &v["pv_hourly"][0];
+        assert!(first[0].is_i64() && first[1].is_f64(), "{first}");
+        let back: PlanResponse = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(back, resp);
+        let mut old = v.clone();
+        old.as_object_mut().unwrap().remove("pv_hourly");
+        let old: PlanResponse = serde_json::from_value(old).unwrap();
+        assert!(old.pv_hourly.is_empty());
         assert_eq!(
             keys(&v["summary"]),
             [

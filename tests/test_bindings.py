@@ -71,6 +71,11 @@ def test_plan_returns_a_response():
     assert resp["summary"]["mode_now"] in ("charge", "self_consume")
     assert all(s["price_known"] for s in resp["slots"])
     assert resp["version"] == vulpes_ems.__version__
+    # The hourly solar forecast for the Energy dashboard: [hour_start, Wh] pairs.
+    assert resp["pv_hourly"]
+    for start, wh in resp["pv_hourly"]:
+        assert isinstance(start, int) and start % 3600 == 0
+        assert wh >= 0
 
 
 def test_plan_blocks_export_when_it_costs_money():

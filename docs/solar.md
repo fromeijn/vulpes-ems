@@ -20,6 +20,8 @@ The model runs on 15-minute weather. Open-Meteo radiation values are averages ov
 
 **Daily figures.** The plan reports the PV energy of today (the whole local day, including the hours that have passed), the rest of today from the current slot, tomorrow and the day after, from the same model and weather. They are what the panels could produce, before curtailment or export limits. A quarter hour without weather counts as zero when the sun is down (the weather is requested from UTC midnight of yesterday, so it covers today's local morning in every time zone; weather passed in the request may start later); with the sun up, that day has no figure. Days follow the configured time zone, so they have 23 or 25 hours at the DST changes.
 
+**Hourly figures and the Energy dashboard.** The plan also reports the PV energy per hour (`pv_hourly`, Wh), from local midnight of today to the end of the plan, with the same model, weather and rules as the daily figures: before curtailment, and a dark quarter hour without weather counts as zero. An hour with a daylight quarter hour without weather is left out, so it shows as missing, not as zero. The integration offers these hours to Home Assistant's Energy dashboard as its solar forecast. The hours of today that have passed are computed from the latest weather, which keeps being updated: they show the current estimate, not the forecast as it was made (the history file keeps those, see `docs/monitoring.md`). Past days have no forecast line.
+
 The building blocks are tested against pvlib reference values (`crates/vulpes-solar/tests/pvlib_reference.rs`):
 - solar position: < 0.02° from NREL SPA;
 - Perez, extraterrestrial irradiance, IAM and Faiman: exact to rounding.
