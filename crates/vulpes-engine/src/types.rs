@@ -111,9 +111,54 @@ pub struct PlanRequest {
     /// Hourly wholesale history `(hour_start, EUR/kWh)` for forecasting unpublished prices.
     #[serde(default)]
     pub wholesale_history: Vec<(i64, f64)>,
+    /// Wind and solar at the price reference points, for correcting the
+    /// wholesale forecast (`price_drivers::fetch`). Without it, or when the
+    /// correction did worse than the plain profile lately, the profile is used.
+    #[serde(default)]
+    pub price_drivers: Option<PriceDrivers>,
     /// Optional weather override (tests, offline use); otherwise fetched from Open-Meteo.
     #[serde(default)]
     pub weather: Option<Vec<WeatherSlot>>,
+}
+
+/// Hourly `(hour_start, wind index, solar index)` rows at the price reference points.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PriceDrivers {
+    /// Day-ahead forecasts of past hours: what the correction learns from.
+    #[serde(default)]
+    pub past: Vec<vulpes_price::wholesale::DriverRow>,
+    /// The latest forecast of the hours to come.
+    #[serde(default)]
+    pub ahead: Vec<vulpes_price::wholesale::DriverRow>,
+}
+
+/// How the unpublished wholesale prices were forecast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PriceMethod {
+    /// Every price in the plan was published.
+    Published,
+    /// The similar-day profile.
+    Profile,
+    /// The profile corrected by the wind/solar regression.
+    Regression,
+    /// No wholesale history: the mean of the published prices.
+    MeanKnown,
+}
+
+/// The wholesale forecast behind the plan's unpublished prices.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PriceForecast {
+    pub method: PriceMethod,
+    /// Slots whose price was forecast.
+    pub slots: usize,
+    /// The recent check of regression against profile (mean absolute error
+    /// per hour, currency/kWh before the tariff); `null` without drivers or
+    /// with too little history.
+    pub check_days: Option<usize>,
+    pub profile_mae: Option<f64>,
+    pub regression_mae: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -157,6 +202,9 @@ pub struct PlanResponse {
     /// end of the plan. An hour with daylight but no weather is left out.
     #[serde(default)]
     pub pv_hourly: Vec<(i64, f64)>,
+    /// How unpublished prices were forecast; `null` from older engines.
+    #[serde(default)]
+    pub price_forecast: Option<PriceForecast>,
     pub warnings: Vec<String>,
 }
 

@@ -14,9 +14,9 @@ A home energy manager for Home Assistant. A Rust core does the forecasting (sola
 | `crates/vulpes-sources` | Open-Meteo, EnergyZero and ENTSO-E clients |
 | `crates/vulpes-solar` | Solar position, Perez transposition, PV model, calibration |
 | `crates/vulpes-load` | Similar-day load profile, NL calendar, temperature correction |
-| `crates/vulpes-price` | Tariff fit |
+| `crates/vulpes-price` | Tariff fit; wholesale forecast (profile + wind/solar regression, shared by the engine and `eval-price`) |
 | `crates/vulpes-opt` | Slot physics (`step`) and DP optimizer |
-| `crates/vulpes-engine` | JSON request → forecasts → plan, solar calibration, and the history file (`history.rs`: record a tick, export) |
+| `crates/vulpes-engine` | JSON request → forecasts → plan, solar calibration, price reference-point weather (`price_drivers.rs`), and the history file (`history.rs`: record a tick, export) |
 | `crates/vulpes-ha` | Home Assistant adapter: settings and migrations, flow checks, input parsing, plan/calibration requests, control script variables, solar form (`vulpes_ems.ha`, `plan_ha`, `calibrate_ha`) |
 | `crates/vulpes-py` | PyO3 bindings, built with maturin (`vulpes_ems._core`) |
 | `crates/vulpes-cli` | Backfill, calibration, evaluation and replay tools |

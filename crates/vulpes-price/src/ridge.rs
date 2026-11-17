@@ -1,21 +1,21 @@
 //! Weighted ridge regression: minimise Σ wᵢ (yᵢ − β·xᵢ)² + λ‖β‖², solved via
 //! the normal equations with Gaussian elimination (feature counts are small).
 //! Add a constant-1 feature for an intercept (it is penalised like the rest).
-//! Used by the wholesale price regression in `eval-price`.
+//! Used by the wholesale price regression (`wholesale`).
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Ridge {
-    pub(crate) coef: Vec<f64>,
+pub struct Ridge {
+    pub coef: Vec<f64>,
 }
 
 impl Ridge {
-    pub(crate) fn predict(&self, x: &[f64]) -> f64 {
+    pub fn predict(&self, x: &[f64]) -> f64 {
         self.coef.iter().zip(x).map(|(b, v)| b * v).sum()
     }
 
     /// `rows` are `(features, target, weight)`. Returns `None` if there are no
     /// rows or the system is singular.
-    pub(crate) fn fit(rows: &[(Vec<f64>, f64, f64)], lambda: f64) -> Option<Self> {
+    pub fn fit(rows: &[(Vec<f64>, f64, f64)], lambda: f64) -> Option<Self> {
         let k = rows.first()?.0.len();
         let mut a = vec![vec![0.0; k + 1]; k]; // augmented [XᵀWX + λI | XᵀWy]
         for (x, y, w) in rows {
@@ -53,7 +53,7 @@ impl Ridge {
 }
 
 /// Weight for a sample `age_days` old with the given half-life.
-pub(crate) fn recency_weight(age_days: f64, half_life_days: f64) -> f64 {
+pub fn recency_weight(age_days: f64, half_life_days: f64) -> f64 {
     0.5f64.powf(age_days.max(0.0) / half_life_days)
 }
 

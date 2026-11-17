@@ -70,6 +70,7 @@ The Status sensor is the worst state of these checks (`not_enough_data` counts a
 | `prices` | no prices for tomorrow after 15:00 local time | no price for now |
 | `energy_data` | the newest complete hour of energy statistics ended more than 3 hours ago | more than 24 hours ago |
 | `wholesale` (EnergyZero only) | not fetched for 24 hours | – |
+| `price_drivers` (EnergyZero only) | the wind and solar forecast at the price reference points not fetched for 24 hours: the cached forecast is used as far as it reaches, and unpublished prices beyond it fall back to the plain profile (see `docs/price.md`) | – |
 | `forecast_inputs` | the engine had to guess (weather ending early, missing load profile, missing price forecast; the price fallback is expected without a wholesale source) | – |
 | `control` (with a script) | – | the script failed, or the safe mode was sent |
 | `history` | recording or the review failed | – |

@@ -12,7 +12,6 @@ mod entsoe;
 mod load;
 mod price;
 mod replay;
-mod ridge;
 mod series;
 mod solar;
 
@@ -206,7 +205,7 @@ enum Cmd {
         #[arg(long, default_value_t = 0.0)]
         min_energy: f64,
     },
-    /// Evaluate day-ahead wholesale price forecasts (issued 10:00 UTC the day before).
+    /// Evaluate wholesale price forecasts (issued 10:00 UTC, `--lead-days` before the day).
     EvalPrice {
         #[arg(long)]
         from: NaiveDate,
@@ -222,6 +221,11 @@ enum Cmd {
         solar: Vec<String>,
         #[arg(long, default_value = PRICE_KEY)]
         wholesale: String,
+        /// Forecast this many days ahead (1..=7). Above 1, the sources must be
+        /// day-ahead ones (`open-meteo-day1:…`); the matching `open-meteo-day<N>:…`
+        /// forecasts are used for the day being forecast.
+        #[arg(long, default_value_t = 1)]
+        lead_days: u8,
     },
     /// Replay history hour by hour, comparing control strategies on actual data.
     Replay {
@@ -255,6 +259,15 @@ enum Cmd {
         /// Scenario: override export pricing with `<a>,<b>` (export = a·wholesale + b).
         #[arg(long, allow_hyphen_values = true)]
         export: Option<String>,
+        /// Day-ahead weather sources (`open-meteo-day1:…`) with `wind_speed_100m` at
+        /// the price reference points. With `--price-solar`, the optimizer is also
+        /// replayed with the wind/solar price regression; needs the same sources
+        /// for each lead day of the horizon (`backfill-weather --lead-days <N>`).
+        #[arg(long, value_delimiter = ',')]
+        price_wind: Vec<String>,
+        /// Day-ahead weather sources with `shortwave_radiation` at the solar reference points.
+        #[arg(long, value_delimiter = ',')]
+        price_solar: Vec<String>,
     },
     /// Backfill ENTSO-E day-ahead prices and wind/solar/load forecasts for a zone.
     /// Token: ENTSOE_TOKEN or local/entsoe.token.
@@ -430,12 +443,17 @@ fn main() -> Result<()> {
             wind,
             solar,
             wholesale,
+            lead_days,
         } => price::evaluate(
             &store,
             from,
             to,
             tz,
-            &price::PricePoints { wind, solar },
+            &price::PricePoints {
+                wind,
+                solar,
+                lead_days,
+            },
             &wholesale,
         ),
         Cmd::Replay {
@@ -451,6 +469,8 @@ fn main() -> Result<()> {
             tail_model,
             wholesale,
             export,
+            price_wind,
+            price_solar,
         } => replay::run(
             &store,
             &replay::ReplayArgs {
@@ -466,6 +486,8 @@ fn main() -> Result<()> {
                 tail_model: &tail_model,
                 wholesale: &wholesale,
                 export_override: export.as_deref().map(parse_export).transpose()?,
+                price_wind: &price_wind,
+                price_solar: &price_solar,
             },
         ),
         Cmd::BackfillEntsoe { zone, from, to } => entsoe::backfill(&mut store, &zone, from, to),

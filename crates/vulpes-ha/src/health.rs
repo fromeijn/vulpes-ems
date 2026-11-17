@@ -61,11 +61,37 @@ fn counts(warning: &str, cfg: &Cfg) -> bool {
     !(no_wholesale && warning.starts_with("no price forecast for"))
 }
 
+/// Wind and solar at the price reference points: fetched lately, and whether
+/// the plan's prices used them.
+fn price_drivers_check(age: Option<f64>, plan: Option<&Value>) -> Value {
+    match age {
+        Some(age) if age > WHOLESALE_OLD_S => check(
+            "price_drivers",
+            DEGRADED,
+            format!("wind and solar forecast last fetched {} ago", minutes(age)),
+        ),
+        None => check("price_drivers", DEGRADED, "not fetched yet"),
+        Some(_) => {
+            let pf = plan.and_then(|p| p.get("price_forecast"));
+            let method = pf.and_then(|p| p.get("method")).and_then(Value::as_str);
+            let checked = pf.is_some_and(|p| p.get("check_days").is_some_and(|d| !d.is_null()));
+            let detail = match method {
+                Some("profile") if checked => {
+                    "the price profile did better than the wind/solar correction lately, so it is used"
+                }
+                _ => "",
+            };
+            check("price_drivers", OK, detail)
+        }
+    }
+}
+
 /// Health from a snapshot of facts. `snap` holds `cfg`, `now`, `timezone`,
 /// `started_at`, `refresh_ok`, `last_success` and `refresh_error` of the
 /// planner, the `plan`, `soc_state` with `soc_last_changed` and
 /// `soc_last_reported`, `price_attributes` with `price_unit`,
-/// `wholesale_fetched_at`, `newest_energy_ts`, `active`, `control_script`,
+/// `wholesale_fetched_at`, `price_drivers_fetched_at` (the last forecast at
+/// the price reference points), `newest_energy_ts`, `active`, `control_script`,
 /// `last_command`, `last_error`, `script_failures`, `history_error`,
 /// `review_error` and the review's `review_checks`.
 pub fn health(snap: &Value) -> Result<Value> {
@@ -193,6 +219,10 @@ pub fn health(snap: &Value) -> Result<Value> {
             ),
             None => check("wholesale", DEGRADED, "not fetched yet"),
         });
+        checks.push(price_drivers_check(
+            num("price_drivers_fetched_at").map(|t| now - t),
+            plan,
+        ));
     }
 
     // What the engine had to guess.
@@ -295,7 +325,8 @@ mod tests {
             "plan": plan(52.0, vec![]),
             "soc_state": "50", "soc_last_changed": NOW - 600.0, "soc_last_reported": NOW - 60.0,
             "price_attributes": prices(NOW - 13.0 * 3600.0, 36), "price_unit": "EUR/kWh",
-            "wholesale_fetched_at": NOW - 3600.0, "newest_energy_ts": NOW - 2.0 * 3600.0,
+            "wholesale_fetched_at": NOW - 3600.0, "price_drivers_fetched_at": NOW - 3600.0,
+            "newest_energy_ts": NOW - 2.0 * 3600.0,
             "active": true, "control_script": "script.x", "last_command": {"fallback": false},
             "last_error": null, "script_failures": 0, "history_error": null, "review_error": null,
             "review_checks": [{"check": "load_forecast", "state": "not_enough_data", "detail": ""}]
@@ -445,8 +476,45 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .all(|c| c["check"] != "wholesale")
+                .all(|c| c["check"] != "wholesale" && c["check"] != "price_drivers")
         );
+    }
+
+    #[test]
+    fn price_drivers() {
+        assert_eq!(state_of(&with(json!({})), "price_drivers"), "ok");
+        let old = with(json!({"price_drivers_fetched_at": NOW - WHOLESALE_OLD_S - 1.0}));
+        assert_eq!(state_of(&old, "price_drivers"), "degraded");
+        assert_eq!(
+            old["issues"],
+            json!([]),
+            "no repair issue: prices still come from the profile"
+        );
+        assert_eq!(
+            state_of(&with(json!({"price_drivers_fetched_at": null})), "price_drivers"),
+            "degraded"
+        );
+        let detail = |pf: Value| {
+            let mut p = plan(52.0, vec![]);
+            p["price_forecast"] = pf;
+            let h = with(json!({"plan": p}));
+            let c = h["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["check"] == "price_drivers")
+                .cloned();
+            let c = c.unwrap();
+            (
+                c["state"].as_str().unwrap().to_string(),
+                c["detail"].as_str().unwrap().to_string(),
+            )
+        };
+        let (state, d) = detail(json!({"method": "profile", "check_days": 14}));
+        assert_eq!(state, "ok");
+        assert!(d.contains("did better"), "{d}");
+        assert_eq!(detail(json!({"method": "regression", "check_days": 14})).1, "");
+        assert_eq!(detail(json!({"method": "profile", "check_days": null})).1, "");
     }
 
     #[test]

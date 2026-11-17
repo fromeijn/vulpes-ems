@@ -12,6 +12,7 @@ use vulpes_core::{BatteryParams, GridLimits, ModeDef, Store};
 use vulpes_load::{Country, ProfileForecaster, ProfileOptions};
 use vulpes_opt::{Problem, SlotInput, optimize, step};
 use vulpes_price::LinearTariff;
+use vulpes_price::wholesale::{self, Drivers, WholesaleForecaster};
 
 /// Export pricing: `a · wholesale + b`. Unknown keys are an error, so a site
 /// file with the former `net_metering` switch doesn't replay another scenario
@@ -83,6 +84,10 @@ pub(crate) struct ReplayArgs<'a> {
     pub tail_model: &'a str,
     pub wholesale: &'a str,
     pub export_override: Option<(f64, f64)>,
+    /// Day-ahead weather sources at the price reference points; when given,
+    /// the optimizer is also replayed with the wind/solar price regression.
+    pub price_wind: &'a [String],
+    pub price_solar: &'a [String],
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -126,6 +131,9 @@ enum Strategy {
     Oracle(Oracle),
     /// The optimizer on the actual values of the whole horizon.
     Perfect,
+    /// The optimizer with unpublished prices from the wind/solar regression,
+    /// as the engine does, instead of the plain profile.
+    PriceRegression,
 }
 
 /// Every strategy, in the order of the report.
@@ -149,6 +157,7 @@ impl Strategy {
             Strategy::Oracle(Oracle::Pv) => "optimizer + actual PV",
             Strategy::Oracle(Oracle::Price) => "optimizer + actual prices",
             Strategy::Perfect => "perfect foresight",
+            Strategy::PriceRegression => "optimizer, price regression",
         }
     }
 
@@ -160,7 +169,7 @@ impl Strategy {
             Strategy::Oracle(Oracle::Pv) => Some("PV"),
             Strategy::Oracle(Oracle::Price) => Some("prices"),
             Strategy::Perfect => Some("all three"),
-            Strategy::SelfConsume | Strategy::Rules | Strategy::Optimizer => None,
+            Strategy::SelfConsume | Strategy::Rules | Strategy::Optimizer | Strategy::PriceRegression => None,
         }
     }
 }
@@ -195,6 +204,17 @@ struct ReplayData {
     /// PV forecast (W) by lead: entry `n - 1` holds the forecast issued `n`
     /// days before each hour.
     pv_fc: Vec<HashMap<i64, f64>>,
+    /// Price drivers by lead, like `pv_fc`; entry 0 (a day ahead) also serves
+    /// as the drivers' history. Empty without price reference points.
+    price_drivers: Vec<Drivers>,
+}
+
+/// Wind and solar indices for hour `h` as forecast at `t`.
+fn driver_forecast(drivers: &[Drivers], t: i64, h: i64) -> (Option<f64>, Option<f64>) {
+    match drivers.get(lead_days(t, h) - 1) {
+        Some(d) => (d.wind.get(&h).copied(), d.solar.get(&h).copied()),
+        None => (None, None),
+    }
 }
 
 /// The freshest forecast lead (days, at least 1) that was already issued at
@@ -401,7 +421,16 @@ fn simulate(
             .mode
     };
 
-    let mut day_cache: Option<(NaiveDate, ProfileForecaster, ProfileForecaster)> = None;
+    let regression = strategies.contains(&Strategy::PriceRegression);
+    if regression && data.price_drivers.is_empty() {
+        bail!("the price regression needs price drivers");
+    }
+    let mut day_cache: Option<(
+        NaiveDate,
+        ProfileForecaster,
+        ProfileForecaster,
+        Option<WholesaleForecaster>,
+    )> = None;
     let (mut hours, mut short_hours) = (0usize, 0usize);
     // Per local day with a replayed hour: the day, its replayed hours and the cost per strategy.
     let mut days: Vec<(NaiveDate, usize, Vec<f64>)> = Vec::new();
@@ -418,11 +447,6 @@ fn simulate(
             let before = |h: &[(i64, f64)]| -> Vec<(i64, f64)> {
                 h.iter().copied().filter(|&(x, _)| x < cut).collect()
             };
-            let price_opt = ProfileOptions {
-                lookback_days: 28,
-                half_life_days: 7.0,
-                ..Default::default()
-            };
             day_cache = Some((
                 today,
                 ProfileForecaster::new(
@@ -431,15 +455,33 @@ fn simulate(
                     Country::Netherlands,
                     ProfileOptions::default(),
                 ),
-                ProfileForecaster::new(&before(&price_hist), tz, Country::None, price_opt),
+                wholesale::profile(&before(&price_hist), tz),
+                regression.then(|| {
+                    // The window of wholesale history the engine gets live.
+                    let from = cut - wholesale::HISTORY_DAYS * 86_400;
+                    let recent: Vec<(i64, f64)> = price_hist
+                        .iter()
+                        .copied()
+                        .filter(|&(x, _)| from <= x && x < cut)
+                        .collect();
+                    WholesaleForecaster::new(
+                        &recent,
+                        data.price_drivers[0].clone(),
+                        Drivers::default(),
+                        tz,
+                        cut,
+                    )
+                }),
             ));
         }
-        let (_, load_fc, price_fc) = day_cache.as_ref().expect("cache set");
+        let (_, load_fc, price_fc, wholesale_fc) = day_cache.as_ref().expect("cache set");
         // Forecast inputs as known at t, and the actual values for the perfect-foresight bound.
         let mut fc = Vec::new();
+        let mut fc_reg = Vec::new();
         let mut perfect = Vec::new();
         for h in (0..horizon_h as i64).map(|k| t + k * 3600) {
-            let w = if published_at(tz, h) <= t {
+            let published = published_at(tz, h) <= t;
+            let w = if published {
                 price.get(&h).copied()
             } else {
                 price_fc.forecast(h)
@@ -447,13 +489,27 @@ fn simulate(
             let (Some(w), Some(l), Some(p)) = (w, load_fc.forecast(h), pv_forecast(&data.pv_fc, t, h)) else {
                 break;
             };
-            fc.push(SlotInput {
+            let slot = SlotInput {
                 load_w: l,
                 pv_w: p,
                 import_price: site.import_price(w),
                 export_price: site.export_price(w),
                 min_soc_wh: None,
-            });
+            };
+            fc.push(slot);
+            if let Some(r) = wholesale_fc {
+                // Same profile as `price_fc`, so a forecast exists for the same hours.
+                let (wind, solar) = driver_forecast(&data.price_drivers, t, h);
+                let w = match published {
+                    true => w,
+                    false => r.forecast_with(h, wind, solar).map_or(w, |x| x.0),
+                };
+                fc_reg.push(SlotInput {
+                    import_price: site.import_price(w),
+                    export_price: site.export_price(w),
+                    ..slot
+                });
+            }
             if !foresight {
                 continue;
             }
@@ -493,6 +549,7 @@ fn simulate(
                     plan_mode(&slots, soc)
                 }
                 Strategy::Perfect if complete => plan_mode(&perfect, soc),
+                Strategy::PriceRegression => plan_mode(&fc_reg, soc),
                 Strategy::Optimizer | Strategy::Oracle(_) | Strategy::Perfect => plan_mode(&fc, soc),
             })
             .collect();
@@ -580,13 +637,19 @@ pub(crate) fn run(store: &Store, args: &ReplayArgs<'_>) -> Result<()> {
             )
         })?);
     }
+    let price_drivers = load_price_drivers(store, args.price_wind, args.price_solar, longest)?;
     let data = ReplayData {
         load: all(crate::load::LOAD_KEY)?,
         pv: all(vulpes_core::keys::PV_TOTAL_POWER)?,
         price: all(args.wholesale)?,
         pv_fc,
+        price_drivers,
     };
-    let report = simulate(&site, &data, tz, start, end, args.horizon_h, &ALL)?;
+    let mut strategies = ALL.to_vec();
+    if !data.price_drivers.is_empty() {
+        strategies.push(Strategy::PriceRegression);
+    }
+    let report = simulate(&site, &data, tz, start, end, args.horizon_h, &strategies)?;
     let Report {
         hours,
         tallies,
@@ -654,6 +717,15 @@ pub(crate) fn run(store: &Store, args: &ReplayArgs<'_>) -> Result<()> {
             println!("  {name:10} {est:8.2}  ({lo:.2} to {hi:.2})");
         }
     }
+    if report.strategies.contains(&Strategy::PriceRegression) {
+        let saving = report.daily_saving(Strategy::Optimizer, Strategy::PriceRegression)?;
+        if let Some((est, lo, hi)) = yearly_saving(&saving, 7, 2000) {
+            println!(
+                "\nThe wind/solar price regression saves per year against the price profile: \
+                 {est:.2} ({lo:.2} to {hi:.2})"
+            );
+        }
+    }
     if !args.compare_horizons.is_empty() {
         println!(
             "\nOptimizer by horizon: cost, and saving per year against {} h (90 % interval):",
@@ -672,6 +744,40 @@ pub(crate) fn run(store: &Store, args: &ReplayArgs<'_>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Price drivers per lead, 1 to the horizon's days, from day-ahead sources at
+/// the reference points (`open-meteo-day1:…`). Empty without sources.
+fn load_price_drivers(
+    store: &Store,
+    wind: &[String],
+    solar: &[String],
+    horizon_h: usize,
+) -> Result<Vec<Drivers>> {
+    if wind.is_empty() && solar.is_empty() {
+        return Ok(Vec::new());
+    }
+    let load = |sources: &[String], var: &str, lead: u8| -> Result<Vec<HashMap<i64, f64>>> {
+        sources
+            .iter()
+            .map(|s| {
+                let source = crate::price::lead_source(s, lead)?;
+                let m = crate::series::hourly_forecast(store, &source, var)?;
+                if m.is_empty() {
+                    bail!("no {var} forecasts in '{source}': run backfill-weather --lead-days {lead}");
+                }
+                Ok(m)
+            })
+            .collect()
+    };
+    (1..=horizon_h.div_ceil(24).max(1) as u8)
+        .map(|lead| {
+            Ok(Drivers::from_points(
+                &load(wind, "wind_speed_100m", lead)?,
+                &load(solar, "shortwave_radiation", lead)?,
+            ))
+        })
+        .collect()
 }
 
 /// What the optimizer saves per year in `other` against `base`, two replays
@@ -768,7 +874,7 @@ mod tests {
     fn data(days: u32) -> ReplayData {
         let (start, end) = (
             midnight(TZ, day(1)).unwrap(),
-            midnight(TZ, day(1 + days)).unwrap(),
+            midnight(TZ, day(1) + chrono::Duration::days(i64::from(days))).unwrap(),
         );
         let hours: Vec<i64> = (start..end).step_by(3600).collect();
         let price = |h: i64| {
@@ -784,6 +890,7 @@ mod tests {
             pv: hours.iter().map(|&h| (h, 0.0)).collect(),
             price: hours.iter().map(|&h| (h, price(h))).collect(),
             pv_fc: vec![hours.iter().map(|&h| (h, 0.0)).collect(); 4],
+            price_drivers: Vec::new(),
         }
     }
 
@@ -1252,6 +1359,7 @@ mod tests {
             pv: HashMap::new(),
             price: HashMap::new(),
             pv_fc: Vec::new(),
+            price_drivers: Vec::new(),
         };
         let err = simulate(&site, &empty, TZ, start, start + 86_400, 36, &ALL)
             .err()
@@ -1289,5 +1397,109 @@ mod tests {
         assert!(invalid(|s| s.battery.capacity_wh = 0.0).contains("battery"));
         assert!(invalid(|s| s.export.a = f64::NAN).contains("export"));
         assert!(invalid(|s| s.export.b = f64::INFINITY).contains("export"));
+    }
+
+    /// Local midnight `n` days after 1 Oct (beyond October too).
+    fn from_oct1(n: i64) -> i64 {
+        midnight(TZ, day(1) + chrono::Duration::days(n - 1)).unwrap()
+    }
+
+    /// Wind index per local day: windy, medium and calm days.
+    fn wind_of(h: i64) -> f64 {
+        let day = TZ.timestamp_opt(h, 0).unwrap().date_naive();
+        [0.5, 1.0, 0.0, 0.5, 0.0, 1.0, 0.5, 0.0][(chrono::Datelike::ordinal(&day) % 8) as usize]
+    }
+
+    /// `days` days from 1 Oct with a small load (150 W), so a full battery
+    /// lasts days, and one price per day: 0.40 on calm days, down to 0.10 on
+    /// windy ones. The wind index is known for every lead.
+    fn windy_data(days: u32) -> ReplayData {
+        let mut d = data(days);
+        for (h, p) in d.price.iter_mut() {
+            *p = 0.40 - 0.30 * wind_of(*h);
+        }
+        d.load.values_mut().for_each(|l| *l = 150.0);
+        let rows: Vec<_> = d
+            .price
+            .keys()
+            .map(|&h| (h, Some(wind_of(h)), Some(0.0)))
+            .collect();
+        d.price_drivers = vec![Drivers::from_rows(&rows); 4];
+        d
+    }
+
+    #[test]
+    fn price_regression_needs_drivers() {
+        let d = data(40);
+        let start = from_oct1(35);
+        let err = simulate(
+            &site(false),
+            &d,
+            TZ,
+            start,
+            start + 86_400,
+            84,
+            &[Strategy::PriceRegression],
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("price drivers"), "{err}");
+    }
+
+    #[test]
+    fn price_regression_without_signal_matches_the_optimizer() {
+        // Constant drivers explain nothing: the regression adds nothing.
+        let mut d = data(45);
+        let rows: Vec<_> = d.price.keys().map(|&h| (h, Some(0.5), Some(0.0))).collect();
+        d.price_drivers = vec![Drivers::from_rows(&rows); 4];
+        let start = from_oct1(40);
+        let r = simulate(
+            &site(false),
+            &d,
+            TZ,
+            start,
+            start + 3 * 86_400,
+            84,
+            &[OPT, Strategy::PriceRegression],
+        )
+        .unwrap();
+        assert_eq!(tally(&r, OPT), tally(&r, Strategy::PriceRegression));
+    }
+
+    #[test]
+    fn price_regression_sees_cheap_windy_days_coming() {
+        let d = windy_data(80);
+        // Export earns nothing: the battery only serves the house, so the
+        // question is on which days to buy, days ahead.
+        let mut site = site(false);
+        site.export = Export { a: 0.0, b: 0.0 };
+        let (start, end) = (from_oct1(50), from_oct1(80));
+        let strategies = [OPT, Strategy::PriceRegression, PRICE_ORACLE];
+        let r = simulate(&site, &d, TZ, start, end, 84, &strategies).unwrap();
+        let cost = |s| tally(&r, s).cost;
+        let (opt, reg) = (cost(OPT), cost(Strategy::PriceRegression));
+        assert!(reg < opt - 1.0, "regression {reg} vs profile {opt}");
+        // The wind explains the prices fully, so the regression is as good as knowing them.
+        assert!(
+            (reg - cost(PRICE_ORACLE)).abs() < 0.05,
+            "{reg} vs {}",
+            cost(PRICE_ORACLE)
+        );
+    }
+
+    #[test]
+    fn driver_forecast_uses_the_lead_issued_by_then() {
+        let h = 10 * 86_400;
+        let lead = |w: f64| Drivers::from_rows(&[(h, Some(w), Some(0.1))]);
+        let drivers = vec![lead(0.1), lead(0.2), lead(0.3)];
+        assert_eq!(driver_forecast(&drivers, h - 3600, h), (Some(0.1), Some(0.1)));
+        assert_eq!(driver_forecast(&drivers, h - 86_400 - 1, h).0, Some(0.2));
+        assert_eq!(driver_forecast(&drivers, h - 3 * 86_400, h).0, Some(0.3));
+        assert_eq!(
+            driver_forecast(&drivers, h - 4 * 86_400, h),
+            (None, None),
+            "lead not loaded"
+        );
+        assert_eq!(driver_forecast(&[], h - 3600, h), (None, None));
     }
 }

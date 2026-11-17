@@ -51,8 +51,11 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(hass, _LOGGER, config_entry=entry, name=DOMAIN, update_interval=None)
         self._unsub: Callable[[], None] | None = None
-        self._wholesale: list[tuple[int, float]] = []
+        self._wholesale: list[list[float]] = []
         self._wholesale_fetched: float | None = None
+        # Wind and solar at the price reference points: day-ahead history and forecast.
+        self._drivers: dict[str, list | None] = {"past": None, "ahead": None}
+        self._drivers_fetched: dict[str, float | None] = {"past": None, "ahead": None}
         self._stats: dict[str, list] = {}
         # Agreement with the user's mode entity today, counted from the history file.
         self.agree = 0
@@ -139,6 +142,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "price_attributes": list(price.attributes.items()) if price else None,
             "price_unit": price.attributes.get("unit_of_measurement") if price else None,
             "wholesale_fetched_at": self._wholesale_fetched,
+            "price_drivers_fetched_at": self._drivers_fetched["ahead"],
             "newest_energy_ts": self.newest_energy_ts,
             "active": self.active,
             "control_script": self.control_script,
@@ -308,18 +312,53 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.script_failures = result["script_failures"]
         self.async_update_listeners()
 
-    async def _wholesale_history(self, cfg: dict[str, Any], now: datetime) -> list[tuple[int, float]]:
-        fetch = ha("wholesale_fetch", cfg=cfg, now=now.timestamp(), fetched_at=self._wholesale_fetched)
+    async def _wholesale_history(self, cfg: dict[str, Any], now: datetime) -> list[list[float]]:
+        cached = self._wholesale
+        fetch = ha(
+            "wholesale_fetch",
+            cfg=cfg,
+            now=now.timestamp(),
+            fetched_at=self._wholesale_fetched,
+            cached_from=cached[0][0] if cached else None,
+            cached_until=cached[-1][0] if cached else None,
+        )
         if not fetch["fetch"]:
             return self._wholesale
+
+        def fetch_and_merge() -> list[list[float]]:
+            fetched = vulpes_ems.energyzero_hourly(fetch["start"], fetch["end"])
+            return ha("wholesale_merge", cached=cached, fetched=fetched, now=now.timestamp())
+
         try:
-            self._wholesale = await self.hass.async_add_executor_job(
-                vulpes_ems.energyzero_hourly, fetch["start"], fetch["end"]
-            )
+            self._wholesale = await self.hass.async_add_executor_job(fetch_and_merge)
             self._wholesale_fetched = now.timestamp()
         except ValueError as err:
             _LOGGER.warning("Wholesale price history unavailable, keeping cached data: %s", err)
         return self._wholesale
+
+    async def _price_drivers(self, cfg: dict[str, Any], now: datetime) -> dict[str, list | None]:
+        fetch = ha(
+            "price_drivers_fetch",
+            cfg=cfg,
+            now=now.timestamp(),
+            past_fetched_at=self._drivers_fetched["past"],
+            ahead_fetched_at=self._drivers_fetched["ahead"],
+        )
+        if not fetch["fetch"]:
+            return self._drivers
+        try:
+            raw = await self.hass.async_add_executor_job(vulpes_ems.price_drivers, dumps(fetch["request"]))
+        except ValueError as err:
+            _LOGGER.warning("Wind and solar for the price forecast unavailable, keeping cached data: %s", err)
+            return self._drivers
+        resp = json.loads(raw)
+        for err in resp.get("errors", []):
+            _LOGGER.warning("Wind and solar for the price forecast unavailable, keeping cached data: %s", err)
+        for part in ("past", "ahead"):
+            if resp.get(part) is not None:
+                self._drivers[part] = resp[part]
+                self._drivers_fetched[part] = now.timestamp()
+        return self._drivers
 
     async def _async_update_data(self) -> dict[str, Any]:
         cfg = self.cfg
@@ -345,6 +384,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "price_unit": price.attributes.get("unit_of_measurement") if price else None,
             "stats": self._stats,
             "wholesale": await self._wholesale_history(cfg, now),
+            "price_drivers": await self._price_drivers(cfg, now),
         }
         try:
             raw = await self.hass.async_add_executor_job(vulpes_ems.plan_ha, dumps(request))
