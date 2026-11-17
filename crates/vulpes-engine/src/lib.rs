@@ -8,6 +8,7 @@
 mod calibrate;
 mod engine;
 pub mod history;
+pub mod price_drivers;
 pub mod review;
 pub mod time;
 mod types;

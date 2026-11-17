@@ -94,6 +94,16 @@ fn energyzero_hourly(py: Python<'_>, start: String, end: String) -> PyResult<Vec
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Wind and solar at the price reference points from a JSON `DriversRequest`
+/// (as `vulpes_ems.ha("price_drivers_fetch", …)` returns it); returns a JSON
+/// `DriversResponse`. Runs without the GIL (it fetches weather, one request
+/// per reference point and part).
+#[pyfunction]
+fn price_drivers(py: Python<'_>, request_json: String) -> PyResult<String> {
+    py.allow_threads(|| vulpes_engine::price_drivers::fetch_json(&request_json))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -101,6 +111,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(plan, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate_solar, m)?)?;
     m.add_function(wrap_pyfunction!(energyzero_hourly, m)?)?;
+    m.add_function(wrap_pyfunction!(price_drivers, m)?)?;
     m.add_function(wrap_pyfunction!(ha, m)?)?;
     m.add_function(wrap_pyfunction!(plan_ha, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate_ha, m)?)?;

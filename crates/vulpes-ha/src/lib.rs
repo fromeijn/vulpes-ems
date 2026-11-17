@@ -207,6 +207,8 @@ pub const OPS: &[(&str, Op)] = &[
         Ok(solar_form::calibration_inputs(obj(r, "cfg")?))
     }),
     ("wholesale_fetch", request::wholesale_fetch),
+    ("wholesale_merge", request::wholesale_merge),
+    ("price_drivers_fetch", request::price_drivers_fetch),
     ("redact_settings", |r| {
         Ok(history::redact_settings(obj(r, "cfg")?))
     }),

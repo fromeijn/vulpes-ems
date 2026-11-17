@@ -4,7 +4,9 @@ use anyhow::{Result, bail};
 use chrono::{DateTime, Datelike};
 use std::collections::{BTreeMap, HashMap};
 use vulpes_core::{ErrorStats, Store};
+use vulpes_price::ridge::Ridge;
 use vulpes_price::tariff::{TariffSample, fit};
+use vulpes_price::wholesale::{self, Drivers, Row, day_hours, day_rows, features, local_midnight};
 
 fn series(store: &Store, key: &str) -> Result<HashMap<i64, f64>> {
     Ok(store.samples(key, 3600, 0, i64::MAX / 2)?.into_iter().collect())
@@ -68,20 +70,6 @@ fn samples_by_year(
     by_year
 }
 
-/// Normalised wind turbine power curve: cubic from 3 m/s cut-in to 12 m/s rated.
-fn wind_power(v: f64) -> f64 {
-    ((v.powi(3) - 27.0) / (1728.0 - 27.0)).clamp(0.0, 1.0)
-}
-
-/// Mean of a per-point transform over all points, if every point has data.
-fn index(points: &[HashMap<i64, f64>], h: i64, f: impl Fn(f64) -> f64) -> Option<f64> {
-    if points.is_empty() {
-        return None;
-    }
-    let vals: Option<Vec<f64>> = points.iter().map(|p| p.get(&h).map(|&v| f(v))).collect();
-    vals.map(|v| v.iter().sum::<f64>() / v.len() as f64)
-}
-
 #[derive(Default)]
 struct PriceScore {
     err: ErrorStats,
@@ -129,10 +117,24 @@ fn overlap(f: &[f64], a: &[f64], k: usize, lowest: bool) -> usize {
 pub(crate) struct PricePoints {
     pub wind: Vec<String>,
     pub solar: Vec<String>,
+    /// Forecast lead in days: 1 is the day-ahead forecast before the auction.
+    pub lead_days: u8,
 }
 
-/// Evaluate day-ahead wholesale forecasts issued 10:00 UTC the day before
-/// (before the auction): prices up to the end of the issue day are known.
+/// The source of the same forecast `lead_days` ahead: `open-meteo-day1:…` becomes
+/// `open-meteo-day<N>:…`.
+pub(crate) fn lead_source(source: &str, lead_days: u8) -> Result<String> {
+    if lead_days == 1 {
+        return Ok(source.to_string());
+    }
+    match source.split_once("-day1:") {
+        Some((head, tail)) => Ok(format!("{head}-day{lead_days}:{tail}")),
+        None => bail!("--lead-days needs day-ahead sources (open-meteo-day1:…), got '{source}'"),
+    }
+}
+
+/// Evaluate wholesale forecasts issued 10:00 UTC `lead_days` before the day
+/// (before that day's auction): prices up to the end of the issue day are known.
 pub(crate) fn evaluate(
     store: &Store,
     from: chrono::NaiveDate,
@@ -141,25 +143,42 @@ pub(crate) fn evaluate(
     points: &PricePoints,
     wholesale: &str,
 ) -> Result<()> {
+    let lead = points.lead_days;
+    if !(1..=7).contains(&lead) {
+        bail!("--lead-days must be between 1 and 7");
+    }
     let all: Vec<(i64, f64)> = store.samples(wholesale, 3600, 0, i64::MAX / 2)?;
     if all.is_empty() {
         bail!("no wholesale series '{wholesale}'");
     }
-    let wind: Vec<HashMap<i64, f64>> = points
-        .wind
-        .iter()
-        .map(|s| crate::series::hourly_forecast(store, s, "wind_speed_100m"))
-        .collect::<Result<_>>()?;
-    let solar: Vec<HashMap<i64, f64>> = points
-        .solar
-        .iter()
-        .map(|s| crate::series::hourly_forecast(store, s, "shortwave_radiation"))
-        .collect::<Result<_>>()?;
-    let e = evaluate_days(&all, &wind, &solar, from, to, tz);
+    let load = |sources: &[String], var: &str, lead: u8| -> Result<Vec<HashMap<i64, f64>>> {
+        sources
+            .iter()
+            .map(|s| crate::series::hourly_forecast(store, &lead_source(s, lead)?, var))
+            .collect()
+    };
+    let (wind, solar) = ("wind_speed_100m", "shortwave_radiation");
+    let past = Drivers::from_points(&load(&points.wind, wind, 1)?, &load(&points.solar, solar, 1)?);
+    // A day ahead, the forecast of the day is the day-ahead history itself.
+    let later = (lead > 1)
+        .then(|| -> Result<Drivers> {
+            Ok(Drivers::from_points(
+                &load(&points.wind, wind, lead)?,
+                &load(&points.solar, solar, lead)?,
+            ))
+        })
+        .transpose()?;
+    let ahead = later.as_ref().unwrap_or(&past);
+    let with_points = !(points.wind.is_empty() && points.solar.is_empty());
+    let e = evaluate_days(&all, &past, ahead, lead, with_points, from, to, tz);
     let scores = &e.scores;
     let d = scores[0].days.max(1) as f64;
+    let issued = match lead {
+        1 => "the day before".to_string(),
+        n => format!("{n} days before"),
+    };
     println!(
-        "{} days evaluated (after a 14-day regression warm-up); forecasts issued 10:00 UTC the day before",
+        "{} days evaluated (after a 14-day regression warm-up); forecasts issued 10:00 UTC {issued}",
         scores[0].days
     );
     println!(
@@ -189,7 +208,7 @@ pub(crate) fn evaluate(
 }
 
 const PRICE_METHODS: [&str; 3] = [
-    "copy previous day",
+    "copy last known day",
     "profile (28 d, half-life 7 d)",
     "profile + wind/solar regression",
 ];
@@ -197,92 +216,91 @@ const PRICE_METHODS: [&str; 3] = [
 struct PriceEval {
     /// One score per entry of [`PRICE_METHODS`].
     scores: Vec<PriceScore>,
-    last_model: Option<crate::ridge::Ridge>,
+    last_model: Option<Ridge>,
 }
 
 /// Score the wholesale forecasting methods on each complete local day in
-/// `[from, to]`. `all` is the hourly price history; `wind` and `solar` are
-/// hourly weather at the reference points. A day is scored once the
-/// regression has 14 days of past residuals.
+/// `[from, to]`, forecast `lead` days ahead. `all` is the hourly price history.
+/// `past` holds the drivers as forecast a day ahead (training and the
+/// profile's reference days); `ahead` the drivers as forecast `lead` days
+/// ahead (the day being forecast). With reference points (`with_points`), a
+/// day is scored once the regression has 14 days of past residuals.
+#[allow(clippy::too_many_arguments)]
 fn evaluate_days(
     all: &[(i64, f64)],
-    wind: &[HashMap<i64, f64>],
-    solar: &[HashMap<i64, f64>],
+    past: &Drivers,
+    ahead: &Drivers,
+    lead: u8,
+    with_points: bool,
     from: chrono::NaiveDate,
     to: chrono::NaiveDate,
     tz: chrono_tz::Tz,
 ) -> PriceEval {
-    use crate::ridge::{Ridge, recency_weight};
-    use chrono::TimeZone;
-    use vulpes_load::{Country, ProfileForecaster, ProfileOptions};
-
     let actual: HashMap<i64, f64> = all.iter().copied().collect();
-    let wind_idx = |h: i64| index(wind, h, wind_power);
-    let solar_idx = |h: i64| index(solar, h, |g| g / 1000.0);
-    let opt = ProfileOptions {
-        lookback_days: 28,
-        half_life_days: 7.0,
-        ..Default::default()
-    };
+    let lead = i64::from(lead.max(1));
     let mut scores: Vec<PriceScore> = PRICE_METHODS.iter().map(|_| PriceScore::default()).collect();
-    // Past rows for the regression: (day start, features, residual).
-    let mut past: Vec<(i64, Vec<f64>, f64)> = Vec::new();
-    let midnight = |d: chrono::NaiveDate| {
-        tz.from_local_datetime(&d.and_hms_opt(0, 0, 0).unwrap())
-            .earliest()
-            .map(|t| t.timestamp())
-    };
+    // Past rows for the regression, from days whose prices are all known.
+    let mut past_rows: Vec<Row> = Vec::new();
     let mut day = from;
     let mut last_model: Option<Ridge> = None;
     while day <= to {
-        let (Some(start), Some(end)) = (midnight(day), midnight(day + chrono::Duration::days(1))) else {
+        let next = day + chrono::Duration::days(1);
+        let (Some(start), Some(end), Some(known_until)) = (
+            local_midnight(day, tz),
+            local_midnight(next, tz),
+            local_midnight(day - chrono::Duration::days(lead - 1), tz),
+        ) else {
             break;
         };
-        let hours: Vec<i64> = (0..).map(|k| start + k * 3600).take_while(|&t| t < end).collect();
-        let next = day + chrono::Duration::days(1);
+        let hours = day_hours(start, end);
         if !hours.iter().all(|t| actual.contains_key(t)) {
             day = next;
             continue;
         }
-        // Known at issue time: all prices before the target day.
-        let history: Vec<(i64, f64)> = all.iter().copied().filter(|&(t, _)| t < start).collect();
-        let profile = ProfileForecaster::new(&history, tz, Country::None, opt);
-        let rows: Vec<(Vec<f64>, f64, f64)> = past
+        // Known at issue time: all prices before the day after the issue day.
+        let known = |cut: i64| -> Vec<(i64, f64)> { all.iter().copied().filter(|&(t, _)| t < cut).collect() };
+        let profile = wholesale::profile(&known(known_until), tz);
+        let usable: Vec<Row> = past_rows
             .iter()
-            .map(|(d, x, r)| (x.clone(), *r, recency_weight((start - d) as f64 / 86_400.0, 30.0)))
+            .filter(|r| r.day < known_until)
+            .cloned()
             .collect();
-        let model = (rows.len() >= 24 * 14).then(|| Ridge::fit(&rows, 1e-3)).flatten();
+        let model = wholesale::fit(&usable, start);
         let mut f: Vec<Vec<f64>> = vec![Vec::new(); PRICE_METHODS.len()];
         let mut a = Vec::new();
         let mut ok = true;
         for &t in &hours {
-            let prev = actual.get(&(t - 86_400)).copied();
-            let (Some((p, w_ref)), Some((_, s_ref))) = (
-                profile.forecast_with(t, &wind_idx),
-                profile.forecast_with(t, &solar_idx),
-            ) else {
+            let Some((p, x)) = features(&profile, past, ahead, t) else {
                 ok = false;
                 break;
-            };
-            let x = match (wind_idx(t), solar_idx(t), w_ref, s_ref) {
-                (Some(w), Some(s), Some(wr), Some(sr)) => Some(vec![w - wr, s - sr]),
-                _ => None,
             };
             let corrected = match (&model, &x) {
                 (Some(m), Some(x)) => p + m.predict(x),
                 _ => p,
             };
-            if let Some(x) = x {
-                past.push((start, x, actual[&t] - p));
-            }
-            f[0].push(prev.unwrap_or(p));
+            let last_known = actual.get(&(t - lead * 86_400)).copied();
+            f[0].push(last_known.unwrap_or(p));
             f[1].push(p);
             f[2].push(corrected);
             a.push(actual[&t]);
         }
+        // Training rows are day-ahead residuals, as live: the profile knows
+        // every day before this one.
+        let rows = if lead == 1 {
+            day_rows(&profile, past, &actual, start, &hours)
+        } else {
+            day_rows(
+                &wholesale::profile(&known(start), tz),
+                past,
+                &actual,
+                start,
+                &hours,
+            )
+        };
+        past_rows.extend(rows);
         // With reference points, wait for the regression's warm-up so all
         // methods are scored on the same days; without, it never trains.
-        if ok && (model.is_some() || (wind.is_empty() && solar.is_empty())) {
+        if ok && (model.is_some() || !with_points) {
             for (m, s) in scores.iter_mut().enumerate() {
                 for (fv, av) in f[m].iter().zip(&a) {
                     s.err.add(*fv, *av);
@@ -302,25 +320,7 @@ fn evaluate_days(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn wind_power_curve() {
-        assert_eq!(wind_power(0.0), 0.0);
-        assert_eq!(wind_power(3.0), 0.0, "cut-in");
-        assert_eq!(wind_power(12.0), 1.0, "rated");
-        assert_eq!(wind_power(25.0), 1.0, "capped");
-        assert_eq!(wind_power(-4.0), 0.0);
-        assert!(wind_power(6.0) < wind_power(9.0));
-    }
-
-    #[test]
-    fn index_needs_every_point() {
-        let a: HashMap<i64, f64> = [(0, 2.0), (3600, 4.0)].into();
-        let b: HashMap<i64, f64> = [(0, 6.0)].into();
-        assert_eq!(index(&[a.clone(), b.clone()], 0, |v| v / 2.0), Some(2.0));
-        assert_eq!(index(&[a, b], 3600, |v| v), None);
-        assert_eq!(index(&[], 0, |v| v), None, "no points is no index, not NaN");
-    }
+    use vulpes_price::wholesale::wind_power;
 
     #[test]
     fn spearman_rank_correlation() {
@@ -393,7 +393,17 @@ mod tests {
     #[test]
     fn a_repeating_day_is_copied_perfectly() {
         let all = series(40, |t| 0.10 + 0.01 * local_hour(t));
-        let e = evaluate_days(&all, &[], &[], date("2026-01-20"), date("2026-01-29"), TZ);
+        let none = Drivers::default();
+        let e = evaluate_days(
+            &all,
+            &none,
+            &none,
+            1,
+            false,
+            date("2026-01-20"),
+            date("2026-01-29"),
+            TZ,
+        );
         let copy = &e.scores[0];
         assert_eq!(copy.days, 10, "without reference points no warm-up is needed");
         assert!(copy.err.abs < 1e-12);
@@ -411,10 +421,13 @@ mod tests {
         });
         let wind: HashMap<i64, f64> = all.iter().map(|&(t, _)| (t, wind_speed(t))).collect();
         let solar: HashMap<i64, f64> = all.iter().map(|&(t, _)| (t, 0.0)).collect();
+        let drivers = Drivers::from_points(&[wind], &[solar]);
         let e = evaluate_days(
             &all,
-            &[wind],
-            &[solar],
+            &drivers,
+            &drivers,
+            1,
+            true,
             date("2026-01-30"),
             date("2026-03-25"),
             TZ,
@@ -436,14 +449,24 @@ mod tests {
     fn data_after_the_period_is_never_used() {
         let all = series(60, |t| 0.15 + 0.02 * ((t / 3600 * 7) % 13) as f64);
         let mut changed = all.clone();
-        let end = local_midnight(date("2026-02-11"));
+        let end = midnight(date("2026-02-11"));
         for (t, v) in &mut changed {
             if *t >= end {
                 *v = 9.99;
             }
         }
+        let none = Drivers::default();
         let run = |a: &[(i64, f64)]| {
-            let e = evaluate_days(a, &[], &[], date("2026-01-25"), date("2026-02-10"), TZ);
+            let e = evaluate_days(
+                a,
+                &none,
+                &none,
+                1,
+                false,
+                date("2026-01-25"),
+                date("2026-02-10"),
+                TZ,
+            );
             e.scores
                 .iter()
                 .map(|s| (s.err.abs, s.err.sq, s.err.sum, s.rho))
@@ -452,10 +475,78 @@ mod tests {
         assert_eq!(run(&all), run(&changed));
     }
 
-    fn local_midnight(d: chrono::NaiveDate) -> i64 {
-        use chrono::TimeZone;
-        TZ.from_local_datetime(&d.and_hms_opt(0, 0, 0).unwrap())
-            .unwrap()
-            .timestamp()
+    fn midnight(d: chrono::NaiveDate) -> i64 {
+        local_midnight(d, TZ).unwrap()
+    }
+
+    #[test]
+    fn longer_leads_only_use_prices_known_at_issue_time() {
+        // Forecasting 2026-02-10 three days ahead (issued 2026-02-07 10:00 UTC),
+        // the prices of 2026-02-08 and 2026-02-09 are not known yet.
+        let all = series(60, |t| 0.15 + 0.02 * ((t / 3600 * 7) % 13) as f64);
+        let mut changed = all.clone();
+        let (from, to) = (midnight(date("2026-02-08")), midnight(date("2026-02-10")));
+        for (t, v) in &mut changed {
+            if (from..to).contains(t) {
+                *v = 9.99;
+            }
+        }
+        let none = Drivers::default();
+        let run = |a: &[(i64, f64)], lead: u8| {
+            let e = evaluate_days(
+                a,
+                &none,
+                &none,
+                lead,
+                false,
+                date("2026-02-10"),
+                date("2026-02-10"),
+                TZ,
+            );
+            let s = &e.scores[1];
+            (s.days, s.err.abs, s.err.sq)
+        };
+        assert_eq!(run(&all, 3), run(&changed, 3));
+        assert_ne!(run(&all, 1), run(&changed, 1), "a day ahead, they are known");
+        assert_eq!(run(&all, 3).0, 1);
+    }
+
+    #[test]
+    fn regression_at_a_longer_lead_uses_the_lead_forecast() {
+        // Wind at lead 2 is the actual wind; the day-ahead "forecast" used for
+        // training is the same, so the regression still learns the effect.
+        let wind_speed = |t: i64| 3.0 + ((t / 86_400 * 5) % 10) as f64;
+        let all = series(90, |t| {
+            0.20 + 0.005 * local_hour(t) - 0.10 * wind_power(wind_speed(t))
+        });
+        let wind: HashMap<i64, f64> = all.iter().map(|&(t, _)| (t, wind_speed(t))).collect();
+        let solar: HashMap<i64, f64> = all.iter().map(|&(t, _)| (t, 0.0)).collect();
+        let past = Drivers::from_points(&[wind], std::slice::from_ref(&solar));
+        // A calm lead-2 forecast everywhere: the correction comes from it, not from `past`.
+        let calm: HashMap<i64, f64> = all.iter().map(|&(t, _)| (t, 0.0)).collect();
+        let ahead = Drivers::from_points(&[calm], &[solar]);
+        let (a, b) = (date("2026-02-15"), date("2026-03-25"));
+        let good = evaluate_days(&all, &past, &past, 2, true, a, b, TZ);
+        let bad = evaluate_days(&all, &past, &ahead, 2, true, a, b, TZ);
+        let mae = |e: &PriceEval| e.scores[2].err.mae().unwrap();
+        assert!(mae(&good) < 0.5 * mae(&bad), "{} vs {}", mae(&good), mae(&bad));
+        assert_eq!(good.scores[2].days, bad.scores[2].days);
+    }
+
+    #[test]
+    fn lead_sources() {
+        assert_eq!(
+            lead_source("open-meteo-day1:ecmwf_ifs025@de-north", 1).unwrap(),
+            "open-meteo-day1:ecmwf_ifs025@de-north"
+        );
+        assert_eq!(
+            lead_source("open-meteo-day1:ecmwf_ifs025@de-north", 3).unwrap(),
+            "open-meteo-day3:ecmwf_ifs025@de-north"
+        );
+        assert!(lead_source("open-meteo-archive:icon_d2", 2).is_err());
+        assert_eq!(
+            lead_source("open-meteo-archive:icon_d2", 1).unwrap(),
+            "open-meteo-archive:icon_d2"
+        );
     }
 }

@@ -35,6 +35,7 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: VulpesC
             "planned_at": plan.get("planned_at"),
             "summary": plan.get("summary"),
             "inputs": plan.get("inputs"),
+            "price_forecast": plan.get("price_forecast"),
             "warnings": plan.get("warnings"),
         },
         "control": {"active": c.active, "last_command": c.last_command, "last_error": c.last_error},

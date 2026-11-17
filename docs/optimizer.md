@@ -61,7 +61,7 @@ Modes that are equally active can still tie: hold and self-consume do the same w
 `vulpes-cli replay` steps through history hour by hour. At each hour, every strategy decides with only the information available then:
 - **PV:** for each hour ahead, the freshest forecast that had been issued by then. Up to a day ahead that is the mean of the two short-range weather models; further ahead it is the longer-range model given with `--tail-model`, because the short-range models have no archived runs that far back. Live, the short-range models still cover part of the second day, so the replay is slightly pessimistic there;
 - **load:** profile forecast from data up to that day;
-- **prices:** published prices where they would have been out, the profile forecast otherwise.
+- **prices:** published prices where they would have been out, the profile forecast otherwise. With `--price-wind` and `--price-solar`, a second optimizer row uses the wind/solar correction, as the engine does, with the reference-point forecast issued by then (see [price.md](price.md#wholesale-forecast)).
 
 The decision is then executed against actual load and PV, and settled at actual prices.
 

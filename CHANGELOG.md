@@ -4,6 +4,19 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 
 ## Unreleased
 
+### Changed
+
+- **Prices that are not published yet now follow the wind and solar forecast.** Until now, each future day got the same price curve: the average of recent days. Now Vulpes also looks at the weather forecast at four public reference points: wind over the North Sea and northern Germany, and sun over the Netherlands and central Germany. A windy or sunny day is forecast cheaper than a calm, dull one. This matters most for the second to fourth day of the 84-hour plan. Vulpes checks the correction every planning run against the last 14 days, and uses the plain average when the correction did worse. Only with EnergyZero as the wholesale price source. Nothing to do; the integration and the wheel must be updated together.
+- **Wholesale price history:** Vulpes now keeps 90 days instead of 35. It fetches all of them once after Home Assistant starts; the refresh every 6 hours then only fetches the newest days, one request to EnergyZero instead of two.
+
+### Added
+
+- **Health:** a new check, `price_drivers`, on the Status sensor: degraded when the wind and solar forecast has not been fetched for 24 hours (the cached forecast is used as far as it reaches; hours beyond it fall back to the plain average). The weather at the reference points is fetched from Open-Meteo: the history once a day and the forecast every 6 hours.
+- **Diagnostics:** the plan's `price_forecast` (method used and the recent check).
+- **Engine request:** new optional `price_drivers` (`past` and `ahead` rows of `[hour, wind index, solar index]`); `vulpes_ems.price_drivers` fetches them. **Engine response:** new `price_forecast` with the method used (`published`, `profile`, `regression` or `mean_known`), the number of forecast slots and the recent check.
+- **CLI:** `eval-price --lead-days N` scores forecasts issued N days ahead. Use day-ahead sources (`open-meteo-day1:…`); the matching `open-meteo-day<N>:…` forecasts must be in the store (`backfill-weather --lead-days N`). The first row is now called "copy last known day".
+- **CLI:** `replay --price-wind … --price-solar …` also replays the optimizer with the wind/solar price correction, and prints what it saves per year against the plain average. It needs the reference points' weather for each lead day of the horizon.
+
 ## 0.5.0 - 2026-11-15
 
 The integration now judges itself: a Status sensor, repair issues and performance sensors, from a history file Vulpes keeps (see `docs/monitoring.md`). The performance figures appear once three complete days are recorded. All of the integration's logic moved into the Rust core; the integration and the `vulpes-ems` wheel must be updated together, as always. CLI stores from earlier versions keep working (a new table is added the first time a newer CLI opens them, and older CLIs ignore it).

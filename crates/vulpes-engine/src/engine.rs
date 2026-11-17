@@ -1,10 +1,13 @@
 use crate::time::{day_start, local_date, local_midnight};
-use crate::{Error, PlanRequest, PlanResponse, PlanSummary, Result, SlotPlan, WeatherSlot};
+use crate::{
+    Error, PlanRequest, PlanResponse, PlanSummary, PriceForecast, PriceMethod, Result, SlotPlan, WeatherSlot,
+};
 use chrono::{DateTime, Datelike};
 use chrono_tz::Tz;
 use std::collections::{HashMap, HashSet};
 use vulpes_load::{Country, ProfileForecaster, ProfileOptions};
 use vulpes_opt::{Problem, SlotInput, optimize};
+use vulpes_price::wholesale::{Drivers, Method, WholesaleForecaster};
 use vulpes_solar::model::{Weather, system_ac_power, validate_planes};
 use vulpes_solar::sun_position;
 use vulpes_sources::open_meteo::WeatherSeries;
@@ -335,15 +338,26 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
     let mean_load = load_history.iter().map(|x| x.1).sum::<f64>() / load_history.len() as f64;
     let mut load_fallback = 0;
 
-    // Prices: published where known, else forecast wholesale through the tariff.
+    // Prices: published where known, else forecast wholesale through the tariff:
+    // the similar-day profile, corrected for wind and solar when that has done better lately.
     let price_fc = (!req.wholesale_history.is_empty()).then(|| {
-        let opt = ProfileOptions {
-            lookback_days: 28,
-            half_life_days: 7.0,
-            ..Default::default()
+        let (past, ahead) = match &req.price_drivers {
+            Some(d) => (Drivers::from_rows(&d.past), Drivers::from_rows(&d.ahead)),
+            None => (Drivers::default(), Drivers::default()),
         };
-        ProfileForecaster::new(&req.wholesale_history, tz, Country::None, opt)
+        WholesaleForecaster::new(&req.wholesale_history, past, ahead, tz, req.now)
     });
+    let (mut forecast_slots, mut corrected_slots) = (0usize, 0usize);
+    // One wholesale forecast per hour, shared by the hour's slots.
+    let mut last_hour: Option<(i64, Option<(f64, bool)>)> = None;
+    let mut hour_fc = |hour: i64| match last_hour {
+        Some((h, v)) if h == hour => v,
+        _ => {
+            let v = price_fc.as_ref().and_then(|f| f.forecast(hour));
+            last_hour = Some((hour, v));
+            v
+        }
+    };
     // `validate` rejects `tariff.a == 0` with `export.a != 0`, so this always has a price.
     let export_from = |import: f64| {
         req.export
@@ -364,10 +378,16 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
             mean_load
         });
         let known = req.known_prices.iter().find(|p| p.start <= t && t < p.end);
+        if known.is_none() {
+            forecast_slots += 1;
+        }
         let import = match known {
             Some(p) => p.import,
-            None => match price_fc.as_ref().and_then(|f| f.forecast(hour)) {
-                Some(w) => req.tariff.price(w),
+            None => match hour_fc(hour) {
+                Some((w, corrected)) => {
+                    corrected_slots += usize::from(corrected);
+                    req.tariff.price(w)
+                }
                 None => {
                     price_fallback += 1;
                     mean_known
@@ -394,6 +414,14 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
             "no price forecast for {price_fallback} slots; used the mean known price"
         ));
     }
+    let price_forecast = price_forecast(
+        price_fc.as_ref(),
+        req.price_drivers.is_some(),
+        forecast_slots,
+        corrected_slots,
+        price_fallback,
+        &mut warnings,
+    );
 
     let terminal = {
         let mut v: Vec<f64> = inputs.iter().map(|s| s.import_price).collect();
@@ -446,8 +474,49 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
         },
         slots,
         pv_hourly: pv_hourly(req, &weather, tz, start, start + n as i64 * step),
+        price_forecast: Some(price_forecast),
         warnings,
     })
+}
+
+/// What the plan's unpublished prices came from, with a warning when the
+/// wind/solar drivers were given but did not reach every forecast slot.
+fn price_forecast(
+    fc: Option<&WholesaleForecaster>,
+    with_drivers: bool,
+    slots: usize,
+    corrected: usize,
+    fallback: usize,
+    warnings: &mut Vec<String>,
+) -> PriceForecast {
+    let check = fc.and_then(WholesaleForecaster::check);
+    let method = if slots == 0 {
+        PriceMethod::Published
+    } else if fallback == slots {
+        PriceMethod::MeanKnown
+    } else if fc.map(WholesaleForecaster::method) == Some(Method::Regression) {
+        PriceMethod::Regression
+    } else {
+        PriceMethod::Profile
+    };
+    if method == PriceMethod::Regression && corrected < slots - fallback {
+        warnings.push(format!(
+            "no wind/solar forecast for {} price slots; used the price profile there",
+            slots - fallback - corrected
+        ));
+    }
+    if with_drivers && check.is_none() && slots > 0 && fc.is_some() {
+        warnings.push(
+            "too little wind/solar history for the price correction yet; used the price profile".into(),
+        );
+    }
+    PriceForecast {
+        method,
+        slots,
+        check_days: check.map(|c| c.days),
+        profile_mae: check.map(|c| c.profile_mae),
+        regression_mae: check.map(|c| c.regression_mae),
+    }
 }
 
 #[cfg(test)]
@@ -534,6 +603,7 @@ mod tests {
             tariff: LinearTariff { a: 1.21, b: 0.13 },
             export: ExportTariff { a: 1.21, b: 0.0 },
             wholesale_history: vec![],
+            price_drivers: None,
             weather: Some(weather),
         }
     }
@@ -605,7 +675,8 @@ mod tests {
     }
 
     /// serde_json writes NaN and infinity as null: no nulls in a plan, except
-    /// the day figures that are null by design when the weather doesn't cover a day.
+    /// the day figures that are null by design when the weather doesn't cover a
+    /// day, and the price check without enough history.
     fn assert_no_nan(out: &str) {
         let mut v: serde_json::Value = serde_json::from_str(out).unwrap();
         for k in [
@@ -615,6 +686,12 @@ mod tests {
             "pv_kwh_day_after",
         ] {
             v["summary"].as_object_mut().unwrap().remove(k);
+        }
+        // The price check is null by design with too little history.
+        if let Some(pf) = v["price_forecast"].as_object_mut() {
+            for k in ["check_days", "profile_mae", "regression_mae"] {
+                pf.remove(k);
+            }
         }
         assert!(!v.to_string().contains("null"), "{out}");
     }
@@ -1269,6 +1346,131 @@ mod tests {
         assert!(resp.warnings.is_empty(), "{:?}", resp.warnings);
     }
 
+    /// 90 days of wholesale prices that drop with the wind, the wind index
+    /// per day, and a request with the first 6 hours published.
+    fn windy_request() -> PlanRequest {
+        let mut r = request(1_781_000_000);
+        r.known_prices.truncate(6);
+        let start = r.now - r.now.rem_euclid(3600) - 90 * 86_400;
+        let wind = |t: i64| ((t / 86_400 * 7) % 5) as f64 / 4.0;
+        let hours: Vec<i64> = (0..(24 * 94)).map(|h| start + h * 3600).collect();
+        r.wholesale_history = hours
+            .iter()
+            .copied()
+            .filter(|&t| t < r.now)
+            .map(|t| (t, 0.20 - 0.15 * wind(t)))
+            .collect();
+        let rows: Vec<_> = hours.iter().map(|&t| (t, Some(wind(t)), Some(0.0))).collect();
+        r.price_drivers = Some(crate::PriceDrivers {
+            past: rows.iter().copied().filter(|x| x.0 < r.now).collect(),
+            ahead: rows.iter().copied().filter(|x| x.0 >= r.now).collect(),
+        });
+        r
+    }
+
+    #[test]
+    fn wind_corrects_unpublished_prices() {
+        let r = windy_request();
+        let resp = plan(&r).unwrap();
+        let pf = resp.price_forecast.clone().unwrap();
+        assert_eq!(pf.method, PriceMethod::Regression, "{pf:?}");
+        assert_eq!(pf.slots, resp.slots.iter().filter(|s| !s.price_known).count());
+        assert!(pf.regression_mae.unwrap() < pf.profile_mae.unwrap(), "{pf:?}");
+        assert_eq!(pf.check_days, Some(vulpes_price::wholesale::CHECK_DAYS as usize));
+        // Unpublished slots follow the wind forecast: close to 0.20 − 0.15 × wind.
+        let ahead = &r.price_drivers.as_ref().unwrap().ahead;
+        for s in resp.slots.iter().filter(|s| !s.price_known) {
+            let hour = s.start - s.start.rem_euclid(3600);
+            let w = ahead.iter().find(|x| x.0 == hour).unwrap().1.unwrap();
+            let expected = 1.21 * (0.20 - 0.15 * w) + 0.13;
+            assert!((s.import_price - expected).abs() < 0.01, "{s:?} vs {expected}");
+        }
+        assert!(resp.warnings.is_empty(), "{:?}", resp.warnings);
+    }
+
+    #[test]
+    fn without_drivers_the_profile_prices_unpublished_slots() {
+        let mut r = windy_request();
+        r.price_drivers = None;
+        let resp = plan(&r).unwrap();
+        let pf = resp.price_forecast.unwrap();
+        assert_eq!(pf.method, PriceMethod::Profile);
+        assert_eq!((pf.check_days, pf.profile_mae), (None, None));
+        assert!(resp.warnings.is_empty(), "{:?}", resp.warnings);
+        // Same plan as an empty driver set.
+        let mut empty = windy_request();
+        empty.price_drivers = Some(crate::PriceDrivers::default());
+        let e = plan(&empty).unwrap();
+        let prices = |slots: &[SlotPlan]| slots.iter().map(|s| s.import_price).collect::<Vec<_>>();
+        assert_eq!(prices(&e.slots), prices(&resp.slots));
+    }
+
+    #[test]
+    fn missing_ahead_drivers_fall_back_per_slot_with_a_warning() {
+        let mut r = windy_request();
+        let d = r.price_drivers.as_mut().unwrap();
+        let cut = r.now + 12 * 3600;
+        d.ahead.retain(|x| x.0 < cut);
+        // Past rows beyond `now` are not there either, so later hours have no wind.
+        let resp = plan(&r).unwrap();
+        assert_eq!(resp.price_forecast.unwrap().method, PriceMethod::Regression);
+        assert!(
+            resp.warnings
+                .iter()
+                .any(|w| w.contains("no wind/solar forecast for")),
+            "{:?}",
+            resp.warnings
+        );
+    }
+
+    #[test]
+    fn short_driver_history_warns_and_uses_the_profile() {
+        let mut r = windy_request();
+        let keep = r.now - 10 * 86_400;
+        r.price_drivers.as_mut().unwrap().past.retain(|x| x.0 >= keep);
+        let resp = plan(&r).unwrap();
+        assert_eq!(resp.price_forecast.unwrap().method, PriceMethod::Profile);
+        assert!(
+            resp.warnings
+                .iter()
+                .any(|w| w.contains("too little wind/solar history")),
+            "{:?}",
+            resp.warnings
+        );
+    }
+
+    #[test]
+    fn all_prices_published_needs_no_forecast() {
+        let resp = plan(&request(1_781_000_000)).unwrap();
+        let pf = resp.price_forecast.unwrap();
+        assert_eq!((pf.method, pf.slots), (PriceMethod::Published, 0));
+    }
+
+    #[test]
+    fn price_drivers_json_round_trip() {
+        let r = windy_request();
+        let json = serde_json::to_string(&r).unwrap();
+        let back: PlanRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.price_drivers, r.price_drivers);
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v["price_drivers"] = serde_json::json!({"past": [[0, 0.5, null]], "ahed": []});
+        let err = crate::plan_json(&v.to_string()).unwrap_err().to_string();
+        assert!(err.contains("ahed"), "{err}");
+        v["price_drivers"] = serde_json::json!({"past": [[0, 0.5, null]]});
+        let back: PlanRequest = serde_json::from_str(&v.to_string()).unwrap();
+        assert_eq!(back.price_drivers.unwrap().past, vec![(0, Some(0.5), None)]);
+        // The response says how prices were forecast.
+        let resp: serde_json::Value = serde_json::from_str(&crate::plan_json(&json).unwrap()).unwrap();
+        assert_eq!(resp["price_forecast"]["method"], "regression");
+        let mut old = resp.clone();
+        old.as_object_mut().unwrap().remove("price_forecast");
+        let parsed: PlanResponse = serde_json::from_value(old).unwrap();
+        assert_eq!(
+            parsed.price_forecast, None,
+            "responses of older engines still parse"
+        );
+    }
+
     #[test]
     fn without_wholesale_history_unknown_prices_use_the_mean_known_price() {
         let mut r = request(1_781_000_000);
@@ -1421,7 +1623,17 @@ mod tests {
             k.sort();
             k
         };
-        assert_eq!(keys(&v), ["pv_hourly", "slots", "summary", "version", "warnings"]);
+        assert_eq!(
+            keys(&v),
+            [
+                "price_forecast",
+                "pv_hourly",
+                "slots",
+                "summary",
+                "version",
+                "warnings"
+            ]
+        );
         // Hours as `[hour_start, Wh]` pairs; the round trip keeps them, and a
         // response from before the field parses with none.
         let first = &v["pv_hourly"][0];

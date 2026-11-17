@@ -141,6 +141,26 @@ def test_plan_errors_raise_value_error(payload):
         vulpes_ems.plan(payload)
 
 
+def test_price_drivers_without_a_request_fetches_nothing():
+    # Nothing asked: no network, both parts null.
+    assert json.loads(vulpes_ems.price_drivers("{}")) == {"past": None, "ahead": None}
+    with pytest.raises(ValueError, match="ahead_days"):
+        vulpes_ems.price_drivers(json.dumps({"ahead_days": 0}))
+    with pytest.raises(ValueError, match="after end"):
+        vulpes_ems.price_drivers(json.dumps({"past": {"start": "2026-11-03", "end": "2026-11-01"}}))
+    with pytest.raises(ValueError):
+        vulpes_ems.price_drivers("not json")
+    # What the fetch op asks for is a valid request.
+    fetch = ha(
+        "price_drivers_fetch",
+        cfg={"wholesale_source": "energyzero"},
+        now=NOW,
+        past_fetched_at=NOW,
+        ahead_fetched_at=NOW,
+    )
+    assert fetch == {"fetch": False}
+
+
 def test_energyzero_rejects_bad_dates_before_any_request():
     with pytest.raises(ValueError, match="bad date"):
         vulpes_ems.energyzero_hourly("2026-13-01", "2026-01-02")
@@ -252,6 +272,13 @@ def test_every_ha_op_answers():
         "calibration_message": {"cfg": HA_CFG, "result": {"planes": HA_CFG["planes"]}},
         "calibration_inputs": {"cfg": HA_CFG},
         "wholesale_fetch": {"cfg": {"wholesale_source": "energyzero"}, "now": NOW, "fetched_at": None},
+        "wholesale_merge": {"now": NOW, "cached": [[NOW - 3600, 0.1]], "fetched": [[NOW, 0.2]]},
+        "price_drivers_fetch": {
+            "cfg": {"wholesale_source": "energyzero"},
+            "now": NOW,
+            "past_fetched_at": None,
+            "ahead_fetched_at": None,
+        },
         "known_prices": {"price_attributes": prices, "price_unit": "EUR/kWh", "timezone": "UTC"},
         "load_series": {"cfg": HA_CFG, "stats": stats},
     }
@@ -310,11 +337,19 @@ def test_plan_ha_offline():
         "price_unit": "EUR/kWh",
         "stats": stats,
         "wholesale": [],
+        "price_drivers": {"past": None, "ahead": None},
         "weather": weather,
     }
     plan = json.loads(vulpes_ems.plan_ha(json.dumps(request)))
     assert plan["planned_at"] == NOW
-    assert plan["inputs"] == {"load_hours": 24 * 7 - 1, "known_price_slots": 24, "wholesale_hours": 0}
+    assert plan["inputs"] == {
+        "load_hours": 24 * 7 - 1,
+        "known_price_slots": 24,
+        "wholesale_hours": 0,
+        "price_driver_hours": 0,
+    }
+    # No wholesale history: the hours after the published ones take the mean known price.
+    assert plan["price_forecast"]["method"] == "mean_known"
     assert all(":" not in s["mode"] and isinstance(s["pv_off"], bool) for s in plan["slots"])
     for key in ("pv_kwh_today", "pv_kwh_today_remaining", "pv_kwh_tomorrow", "pv_kwh_day_after"):
         assert key in plan["summary"], key
