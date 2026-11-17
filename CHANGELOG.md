@@ -4,6 +4,10 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 
 ## Unreleased
 
+## 0.6.0 - 2026-11-17
+
+Prices that are not published yet now follow the wind and solar forecast instead of repeating the recent average, with EnergyZero as the wholesale source. The integration and the `vulpes-ems` wheel must be updated together, as always; the first refresh after the update fetches 90 days of wholesale prices and of weather at four public reference points.
+
 ### Changed
 
 - **Prices that are not published yet now follow the wind and solar forecast.** Until now, each future day got the same price curve: the average of recent days. Now Vulpes also looks at the weather forecast at four public reference points: wind over the North Sea and northern Germany, and sun over the Netherlands and central Germany. A windy or sunny day is forecast cheaper than a calm, dull one. This matters most for the second to fourth day of the 84-hour plan. Vulpes checks the correction every planning run against the last 14 days, and uses the plain average when the correction did worse. Only with EnergyZero as the wholesale price source. Nothing to do; the integration and the wheel must be updated together.

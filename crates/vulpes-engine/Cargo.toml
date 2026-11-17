@@ -14,8 +14,8 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 thiserror.workspace = true
 vulpes-core.workspace = true
-vulpes-load = { version = "0.5.0", path = "../vulpes-load" }
+vulpes-load = { version = "0.6.0", path = "../vulpes-load" }
 vulpes-opt.workspace = true
-vulpes-price = { version = "0.5.0", path = "../vulpes-price" }
-vulpes-solar = { version = "0.5.0", path = "../vulpes-solar" }
-vulpes-sources = { version = "0.5.0", path = "../vulpes-sources" }
+vulpes-price = { version = "0.6.0", path = "../vulpes-price" }
+vulpes-solar = { version = "0.6.0", path = "../vulpes-solar" }
+vulpes-sources = { version = "0.6.0", path = "../vulpes-sources" }

@@ -15,4 +15,4 @@ serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 thiserror.workspace = true
 vulpes-core.workspace = true
 vulpes-engine.workspace = true
-vulpes-price = { version = "0.5.0", path = "../vulpes-price" }
+vulpes-price = { version = "0.6.0", path = "../vulpes-price" }
