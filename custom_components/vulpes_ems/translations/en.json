@@ -407,9 +407,6 @@
       "load_forecast_24h": {
         "name": "Load forecast next 24h"
       },
-      "plan_cost": {
-        "name": "Plan cost"
-      },
       "agreement_today": {
         "name": "Agreement with current mode today"
       },

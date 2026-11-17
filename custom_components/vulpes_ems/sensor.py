@@ -103,13 +103,6 @@ SENSORS = (
         value=lambda c: c.data["summary"]["load_kwh_24h"],
     ),
     VulpesSensorDescription(
-        key="plan_cost",
-        translation_key="plan_cost",
-        device_class=SensorDeviceClass.MONETARY,
-        suggested_display_precision=2,
-        value=lambda c: c.data["summary"]["cost"],
-    ),
-    VulpesSensorDescription(
         key="agreement_today",
         translation_key="agreement_today",
         native_unit_of_measurement=PERCENTAGE,
@@ -266,6 +259,8 @@ async def async_setup_entry(
 ) -> None:
     coordinator = entry.runtime_data
     compare = bool(coordinator.cfg.get(CONF_MODE_ENTITY))
+    # The Plan cost sensor was removed in 0.7.0: take it out of existing installs.
+    remove_stale(hass, entry, "sensor", {"plan_cost"})
     if not compare:
         remove_stale(hass, entry, "sensor", {"agreement_today"})
     entities: list[SensorEntity] = [

@@ -4,6 +4,10 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 
 ## Unreleased
 
+### Removed
+
+- **Plan cost sensor:** the sensor is gone, and its entity is removed when the integration is updated. It showed the expected cost over the next 84 hours, a figure that could not be compared with a bill or a day and that shifted every time the plan moved on. The Saved last 7 days and Total saved sensors show what the plan is worth. Change dashboards and automations that use the Plan cost sensor. The figure is still in the engine response (`summary.cost`) and in the diagnostics.
+
 ## 0.6.0 - 2026-11-17
 
 Prices that are not published yet now follow the wind and solar forecast instead of repeating the recent average, with EnergyZero as the wholesale source. The integration and the `vulpes-ems` wheel must be updated together, as always; the first refresh after the update fetches 90 days of wholesale prices and of weather at four public reference points.

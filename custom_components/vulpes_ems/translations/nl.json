@@ -407,9 +407,6 @@
       "load_forecast_24h": {
         "name": "Verbruiksprognose komende 24 uur"
       },
-      "plan_cost": {
-        "name": "Kosten van het plan"
-      },
       "agreement_today": {
         "name": "Overeenkomst met huidige modus vandaag"
       },
