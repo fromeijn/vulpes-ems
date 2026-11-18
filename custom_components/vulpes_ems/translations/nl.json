@@ -479,5 +479,16 @@
       "title": "Vulpes EMS: aansturingsscript faalt steeds",
       "description": "Het aansturingsscript is drie keer achter elkaar mislukt. De sensor Batterijaansturing toont de fout. Vulpes blijft het elke 15 minuten proberen."
     }
+  },
+  "services": {
+    "update_plan": {
+      "name": "Plan bijwerken",
+      "description": "Plant nu, zonder op het volgende kwartier te wachten: leest de actuele prijzen en laadtoestand en werkt het plan bij. Zolang Actief aan staat, wordt het stuurscript uitgevoerd met het nieuwe plan. Aanroepen binnen 30 seconden na elkaar worden samengevoegd."
+    }
+  },
+  "exceptions": {
+    "not_loaded": {
+      "message": "Vulpes EMS is niet geladen, dus er is geen plan om bij te werken."
+    }
   }
 }

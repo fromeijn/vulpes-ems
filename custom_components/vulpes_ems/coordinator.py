@@ -1,5 +1,6 @@
-"""Coordinator: gathers Home Assistant data every 15 minutes, plans in Rust and,
-when the Active switch is on, runs the user's control script."""
+"""Coordinator: gathers Home Assistant data every 15 minutes (and when the
+`update_plan` action asks for it), plans in Rust and, when the Active switch is
+on, runs the user's control script."""
 
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from homeassistant.components.recorder.statistics import statistics_during_perio
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -46,11 +48,22 @@ def stats_start(now: datetime) -> datetime:
 
 
 class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    """Plans every 15 minutes; tracks agreement with the current mode."""
+    """Plans every 15 minutes and on request; tracks agreement with the current mode."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(hass, _LOGGER, config_entry=entry, name=DOMAIN, update_interval=None)
         self._unsub: Callable[[], None] | None = None
+        # One run at a time: a tick and a plan update on request never run the script together.
+        self._run_lock = asyncio.Lock()
+        # The `update_plan` action: the first call runs at once; calls during that run or the
+        # cooldown after it become one more run when the cooldown ends.
+        self._update_debouncer = Debouncer(
+            hass,
+            _LOGGER,
+            cooldown=C["update_cooldown_s"],
+            immediate=True,
+            function=self._async_refresh_and_apply,
+        )
         self._wholesale: list[list[float]] = []
         self._wholesale_fetched: float | None = None
         # Wind and solar at the price reference points: day-ahead history and forecast.
@@ -109,15 +122,22 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _controlling(self) -> bool:
         return self.active and bool(self.control_script)
 
+    async def async_update_plan(self) -> None:
+        """Plan now, without waiting for the quarter hour (the `update_plan` action)."""
+        await self._update_debouncer.async_call()
+
     async def _async_refresh_and_apply(self) -> None:
-        await self.async_refresh()
-        if self._closed:
-            return
-        await self.async_apply()
-        # Recorded after the script ran: the mode entity then shows this slot's mode.
-        await self.async_record()
-        await self.async_review()
-        self.update_health()
+        async with self._run_lock:
+            if self._closed:
+                return
+            await self.async_refresh()
+            if self._closed:
+                return
+            await self.async_apply()
+            # Recorded after the script ran: the mode entity then shows this slot's mode.
+            await self.async_record()
+            await self.async_review()
+            self.update_health()
 
     @callback
     def update_health(self) -> None:
@@ -247,6 +267,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         self._closed = True
         self.stop_schedule()
+        self._update_debouncer.async_shutdown()
         # Let a history write that is already running finish before the entry's folder goes.
         async with self._history_lock:
             pass

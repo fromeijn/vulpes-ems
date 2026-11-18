@@ -1,7 +1,8 @@
 //! Active control: the variables Vulpes passes to the user's control script.
 //!
 //! Every 15 minutes, while the Active switch is on, Vulpes runs one script
-//! that the user picked. The script turns the variables into inverter
+//! that the user picked, and again when the plan is updated on request (the
+//! `update_plan` action). The script turns the variables into inverter
 //! actions. When there is no usable plan, Vulpes sends the safe command
 //! instead: self-consume, with solar on and export allowed.
 //!

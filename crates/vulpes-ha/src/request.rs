@@ -32,6 +32,10 @@ pub const PRICE_DRIVERS_PAST_REFRESH_S: f64 = 24.0 * 3600.0;
 /// The weather forecast at the price reference points is fetched again after
 /// this long, like the wholesale prices.
 pub const PRICE_DRIVERS_AHEAD_REFRESH_S: f64 = 6.0 * 3600.0;
+/// After a plan update on request (the `update_plan` action), further requests wait
+/// this long and then run once: each plan fetches the weather, and a price sensor
+/// often updates several times in a row.
+pub const UPDATE_COOLDOWN_S: f64 = 30.0;
 /// Forecast days at the price reference points: the horizon from now, from
 /// the start of today (UTC).
 pub const PRICE_DRIVERS_AHEAD_DAYS: u32 = HORIZON_HOURS / 24 + 2;

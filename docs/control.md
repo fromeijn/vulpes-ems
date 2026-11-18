@@ -8,7 +8,8 @@ Vulpes starts in shadow mode: it plans and publishes sensors, but changes nothin
 2. Vulpes adds two entities: the **Active** switch (off by default) and the **Battery control** sensor (`off`, `following_plan`, `fallback` or `script_error`).
 3. While Active is on, Vulpes runs the script with the variables below:
    - every 15 minutes, 20 s after the quarter hour, right after planning;
-   - immediately when you turn Active on.
+   - immediately when you turn Active on;
+   - when the `vulpes_ems.update_plan` action is called (see [Update the plan now](#update-the-plan-now)).
 
    The switch keeps its state across restarts.
 4. When you turn Active off, Vulpes sends the safe command once, with `fallback: false`, so your inverter returns to normal self-consumption. The same happens when the integration is unloaded while Active is on: for example when you change its settings, clear the script, or disable or delete the entry. After a settings change the switch comes back on and Vulpes applies the plan again straight away.
@@ -16,6 +17,29 @@ Vulpes starts in shadow mode: it plans and publishes sensors, but changes nothin
 Vulpes waits for the script to finish, for at most 60 seconds. So keep it short: no delays or long waits.
 
 **Turn off your own battery automations before you turn Active on.** Otherwise they fight with Vulpes.
+
+## Update the plan now
+
+Vulpes plans 20 s after every quarter hour. The action `vulpes_ems.update_plan` plans at once: it reads the prices and the state of charge as they are now, updates the plan and the sensors, and, while Active is on, runs the control script with the new plan. It has no fields. It also works in shadow mode.
+
+A typical use is to plan as soon as tomorrow's prices arrive. Trigger on the attribute of your price sensor that changes at that moment; its name depends on the price integration:
+
+```yaml
+automation:
+  - alias: Vulpes plans when tomorrow's prices arrive
+    triggers:
+      - trigger: state
+        entity_id: sensor.electricity_price
+        attribute: tomorrow_valid
+        to: true
+    actions:
+      - action: vulpes_ems.update_plan
+```
+
+- **Cooldown:** the first call plans at once. Calls during that run or in the 30 seconds after it become one more run when the 30 seconds are over, so a sensor that updates a few times in a row gives two plans at most. Such a call returns before its plan is made. If a run takes longer than 30 seconds, a call made during it is dropped and the next quarter hour picks the change up.
+- **Don't trigger on every change of the price sensor.** Each plan fetches the weather forecast from a free service, and each run with Active on calls your script.
+- **The plan still starts at the quarter hour.** A plan made at 13:18 covers 13:15 to 13:30 as a whole slot, with the state of charge of 13:18. The mode for that slot can change, so your script may be called with another mode for the rest of it.
+- A failing plan is not an error of the action: it shows on the Status sensor, as for a scheduled run.
 
 ## Script variables
 

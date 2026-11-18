@@ -4,6 +4,14 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 
 ## Unreleased
 
+### Added
+
+- **Action `vulpes_ems.update_plan`:** plans at once, without waiting for the next quarter hour. It reads the prices and the state of charge as they are now and updates the plan and the sensors; while Active is on, it also runs the control script with the new plan. Use it in an automation to plan as soon as tomorrow's prices arrive (example in `docs/control.md`). The first call plans at once; calls in the 30 seconds after it are combined into one more run. Nothing to do if you don't need it; the integration and the wheel must be updated together.
+
+### Fixed
+
+- **History file:** a quarter hour keeps its first state of charge reading. When a quarter hour was recorded a second time (after a settings change or when Active was turned on), the later reading replaced it. In the first quarter of an hour that shifted the reading the "SOC tracking error" sensor and the savings figures use.
+
 ### Changed
 
 - **Building from source needs Rust 1.89** (was 1.85), for the CLI and for a wheel you build yourself. The dependencies are updated, among them PyO3 0.30, rusqlite 0.43 and quick-xml 0.42. Nothing to do when you use the published wheels.

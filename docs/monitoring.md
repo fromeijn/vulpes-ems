@@ -15,6 +15,8 @@ Every 15 minutes, after control has run, Vulpes records:
 | The battery's state of charge | `soc`, 15 minutes | 400 days |
 | Hourly energy from and to the grid, from PV, into and out of the battery; the house load; PV power; wholesale prices | `grid.import`, `grid.export`, `pv.total`, `battery.charge`, `battery.discharge`, `load.house`, `pv.total.power`, `price.wholesale.nl` | 400 days |
 
+A quarter hour can be recorded more than once: after a settings change, when Active is turned on, or when the `vulpes_ems.update_plan` action is called. Its slot record then shows the last plan's mode and prices; its state of charge stays the first reading, the one closest to the start of the quarter hour.
+
 The hourly series of the last 48 hours are rewritten on each tick, so late or corrected recorder statistics are picked up. After each write the write-ahead log is checkpointed, so a backup of the `.db` file alone is complete. A failing write is logged and shows on the Status sensor; planning and control carry on.
 
 Agreement with the user's mode entity ("Agreement with current mode today") is counted from the slot records, so it survives restarts. A slot counts when it had a plan and the entity a known state; it agrees when the entity showed the planned Vulpes mode (the solar-off and zero-export flags aside).

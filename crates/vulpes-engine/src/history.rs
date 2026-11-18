@@ -3,7 +3,8 @@
 //! same format and series keys as the CLI's `local/<house>/vulpes.db`, so a
 //! copy works with `vulpes-cli eval-*` and `replay`.
 //!
-//! [`record`] runs once per 15-minute tick; [`export`] reads a period back
+//! [`record`] runs once per 15-minute tick, and again in the same slot when
+//! the plan is updated on request; [`export`] reads a period back
 //! for the diagnostics download. Both take an open store, so they are tested
 //! on an in-memory one; [`record_file`] and [`export_file`] open the file.
 
@@ -219,7 +220,11 @@ pub fn record(store: &mut Store, req: &RecordRequest) -> Result<RecordResponse> 
         followed: req.active && req.followed,
         user_mode: req.user_mode.clone(),
     })?;
-    if let Some(soc) = req.soc_pct.filter(|s| s.is_finite()) {
+    // The first reading of a slot stays: it is the one closest to the slot's start, and a
+    // slot is recorded again when the plan is updated on request or Active is turned on.
+    if let Some(soc) = req.soc_pct.filter(|s| s.is_finite())
+        && store.samples(keys::SOC, SLOT_S, slot, slot + SLOT_S)?.is_empty()
+    {
         series(store, keys::SOC, "%", SeriesKind::Mean, SLOT_S, &[(slot, soc)])?;
     }
     let since = req.now - req.now.rem_euclid(3600) - REWRITE_H * 3600;
@@ -526,6 +531,34 @@ mod tests {
         );
         // The next hour writes again.
         assert!(record(&mut s, &request(T0 + H + 20)).unwrap().forecasts_written > 0);
+    }
+
+    #[test]
+    fn a_second_record_in_a_slot_keeps_the_first_soc() {
+        let mut s = Store::open_in_memory().unwrap();
+        record(&mut s, &request(T0 + 20)).unwrap();
+        // The plan is updated on request later in the slot, with another mode and SOC.
+        let mut again = request(T0 + 500);
+        again.soc_pct = Some(61.0);
+        again.plan.as_mut().unwrap().slots[0].mode = "charge".into();
+        record(&mut s, &again).unwrap();
+        assert_eq!(s.samples(keys::SOC, SLOT_S, 0, i64::MAX).unwrap(), [(T0, 55.0)]);
+        // The slot record follows the last plan.
+        assert_eq!(
+            s.plan_slots(T0, T0 + SLOT_S).unwrap()[0].mode.as_deref(),
+            Some("charge")
+        );
+        // A slot without a reading yet (the sensor was unavailable) takes the later one.
+        let mut missing = request(T0 + SLOT_S + 20);
+        missing.soc_pct = None;
+        record(&mut s, &missing).unwrap();
+        let mut late = request(T0 + SLOT_S + 400);
+        late.soc_pct = Some(62.0);
+        record(&mut s, &late).unwrap();
+        assert_eq!(
+            s.samples(keys::SOC, SLOT_S, 0, i64::MAX).unwrap(),
+            [(T0, 55.0), (T0 + SLOT_S, 62.0)]
+        );
     }
 
     #[test]

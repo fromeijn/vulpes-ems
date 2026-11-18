@@ -286,6 +286,7 @@ def test_every_ha_op_answers():
         ha(op, **request)
     assert ha("constants")["config_version"] == 3
     assert ha("constants")["script_timeout_s"] == 60
+    assert ha("constants")["update_cooldown_s"] == 30
     with pytest.raises(ValueError, match="unknown op"):
         vulpes_ems.ha("no_such_op", "{}")
 

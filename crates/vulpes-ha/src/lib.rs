@@ -62,6 +62,7 @@ fn constants(_: &Value) -> Result<Value> {
         "control_states": control::STATES,
         "stale_after_s": control::STALE_AFTER_S,
         "script_timeout_s": control::SCRIPT_TIMEOUT_S,
+        "update_cooldown_s": request::UPDATE_COOLDOWN_S,
         "load_history_days": request::LOAD_HISTORY_DAYS,
         "wholesale_history_days": request::WHOLESALE_HISTORY_DAYS,
         "calibration_history_days": request::CALIBRATION_HISTORY_DAYS,
@@ -288,6 +289,7 @@ mod tests {
         assert_eq!(out["modes"][0], json!(["charge", true]));
         assert_eq!(out["control_states"][1], "following_plan");
         assert_eq!(out["script_timeout_s"], json!(60.0));
+        assert_eq!(out["update_cooldown_s"], json!(30.0));
         assert_eq!(out["directions"].as_array().unwrap().len(), 8);
     }
 

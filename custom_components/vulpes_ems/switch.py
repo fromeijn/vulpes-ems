@@ -1,4 +1,5 @@
-"""Switch: hand battery control to Vulpes (runs the control script every 15 minutes)."""
+"""Switch: hand battery control to Vulpes (runs the control script every 15 minutes,
+and when the plan is updated on request)."""
 
 from __future__ import annotations
 

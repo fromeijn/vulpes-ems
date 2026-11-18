@@ -479,5 +479,16 @@
       "title": "Vulpes EMS: control script keeps failing",
       "description": "The control script failed three times in a row. The Battery control sensor shows the error. Vulpes keeps trying every 15 minutes."
     }
+  },
+  "services": {
+    "update_plan": {
+      "name": "Update plan",
+      "description": "Plans now, without waiting for the next quarter hour: reads the current prices and state of charge and updates the plan. While Active is on, the control script runs with the new plan. Calls within 30 seconds of each other are combined."
+    }
+  },
+  "exceptions": {
+    "not_loaded": {
+      "message": "Vulpes EMS is not loaded, so there is no plan to update."
+    }
   }
 }
