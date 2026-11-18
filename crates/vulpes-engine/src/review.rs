@@ -286,12 +286,11 @@ impl Review<'_> {
         let h = ts - ts.rem_euclid(HOUR);
         let latest = |var: &str| self.data.fc_latest.get(var).and_then(|m| m.get(&h)).copied();
         // All four quarter hours were published when the forecast was issued.
-        if latest("price_known").is_some_and(|k| k >= 1.0) {
-            if let Some(p) =
+        if latest("price_known").is_some_and(|k| k >= 1.0)
+            && let Some(p) =
                 latest("import_price").and_then(|i| Some((i, r.export.from_import(i, &r.tariff)?)))
-            {
-                return Some(p);
-            }
+        {
+            return Some(p);
         }
         if let Some(w) = self.data.get(keys::WHOLESALE_NL, h) {
             return Some((r.tariff.price(w), r.export.a * w + r.export.b));
@@ -649,13 +648,12 @@ fn review_cached(store: &mut Store, req: &ReviewRequest) -> Result<(ReviewRespon
     let today =
         crate::time::local_date(req.now, tz).ok_or_else(|| Error::Request("now is out of range".into()))?;
     let key = cache_key(store, req, today)?;
-    if store.meta(META_CACHE_KEY)?.as_deref() == Some(key.as_str()) {
-        if let Some(resp) = store
+    if store.meta(META_CACHE_KEY)?.as_deref() == Some(key.as_str())
+        && let Some(resp) = store
             .meta(META_CACHE)?
             .and_then(|c| serde_json::from_str::<ReviewResponse>(&c).ok())
-        {
-            return Ok((resp, false));
-        }
+    {
+        return Ok((resp, false));
     }
     // Local days from LOOKBACK_DAYS ago to yesterday, plus the day before for persistence.
     let first = today - Days::new(LOOKBACK_DAYS);

@@ -156,11 +156,11 @@ pub fn migrate_v2(cfg: &Cfg) -> Cfg {
         .filter(|(k, _)| *k != CONF_NET_METERING_V2)
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    if truthy(Some(switch)) {
-        if let (Some(a), Some(b)) = (cfg.get(CONF_TARIFF_A), cfg.get(CONF_TARIFF_B)) {
-            new.insert(CONF_EXPORT_A.into(), a.clone());
-            new.insert(CONF_EXPORT_B.into(), b.clone());
-        }
+    if truthy(Some(switch))
+        && let (Some(a), Some(b)) = (cfg.get(CONF_TARIFF_A), cfg.get(CONF_TARIFF_B))
+    {
+        new.insert(CONF_EXPORT_A.into(), a.clone());
+        new.insert(CONF_EXPORT_B.into(), b.clone());
     }
     new
 }
@@ -400,10 +400,10 @@ pub fn dashboard_defaults(prefs: Option<&Value>) -> Cfg {
         .collect();
     prices.sort();
     prices.dedup();
-    if let [only] = prices.as_slice() {
-        if only.starts_with("sensor.") {
-            defaults.insert(CONF_PRICE_ENTITY.into(), json!(only));
-        }
+    if let [only] = prices.as_slice()
+        && only.starts_with("sensor.")
+    {
+        defaults.insert(CONF_PRICE_ENTITY.into(), json!(only));
     }
     defaults
 }

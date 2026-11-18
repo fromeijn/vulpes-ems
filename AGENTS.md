@@ -42,6 +42,7 @@ python3 -m venv .venv && .venv/bin/pip install pytest maturin ziglang
 
 - **Thin Python shell, logic in Rust.** The integration only reads Home Assistant state, calls Rust, and publishes the results as entities, repairs and diagnostics. Everything else is Rust, under the unit-test rules below: calculations, rules and thresholds, parsing, time handling, settings migrations and checks, the control script variables, history and persistence. Python may convert HA objects into JSON (datetimes to Unix seconds, picking attributes from a state), but it makes no decisions. A feature that needs logic adds a Rust function, not Python code.
 - **Rust edition 2024**, small crates, no async. HTTP uses `ureq` with ring + webpki-roots. Don't use reqwest/rustls defaults: aws-lc-sys breaks the zig/musl cross-builds.
+- **Dependencies live in the workspace.** Every dependency, external or one of our own crates, is declared once under `[workspace.dependencies]` in the root `Cargo.toml`, with its version and the features every user needs. A crate refers to it with `name.workspace = true`, or `name = { workspace = true, features = [...] }` when it needs more. No versions or paths in `crates/*/Cargo.toml`. Remove a dependency a crate no longer uses.
 - **Wheels are abi3 (cp313+)**, built for manylinux_2_28 and musllinux_1_2 on x86_64 and aarch64. Home Assistant Container runs Python 3.14 on Alpine (musl).
 - **Health and review only report:** they never change what control does. Thresholds live as constants in `vulpes-ha/src/health.rs` and `vulpes-engine/src/review.rs`; figures stay null until there is enough data (`MIN_DAYS`), decided in Rust.
 - **History file:** `<config>/vulpes_ems/<entry_id>/vulpes.db`, written each tick by `vulpes_ems.record_ha` (forecasts by issue time, slot records, SOC, hourly energy). The history functions take the database path; `plan_json` stays pure. A failing write is logged and never blocks planning or control.
@@ -156,7 +157,7 @@ Keep all work local. Commit, push, tag, publish or create a release only when ex
 Only when asked (see Git and releases).
 
 1. **Bump the version everywhere:**
-   - `[workspace.package] version` in `Cargo.toml`, and the `version = "x.y.z", path = …` dependency entries in `crates/*/Cargo.toml`;
+   - `[workspace.package] version` in `Cargo.toml` (the crates take it from there);
    - `custom_components/vulpes_ems/manifest.json`: both `version` and the `vulpes-ems==x.y.z` requirement.
 2. **Changelog:** rename `## Unreleased` in `CHANGELOG.md` to `## x.y.z - YYYY-MM-DD` and start an empty `## Unreleased` above it.
 3. **Check:** run fmt, clippy, the Rust tests and pytest (see Commands). Commit, push.

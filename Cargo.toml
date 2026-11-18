@@ -7,14 +7,31 @@ version = "0.6.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/fromeijn/vulpes-ems"
-rust-version = "1.85"
+rust-version = "1.89"
 
 [workspace.dependencies]
+# Workspace crates
 vulpes-core = { path = "crates/vulpes-core" }
-vulpes-opt = { path = "crates/vulpes-opt" }
 vulpes-engine = { path = "crates/vulpes-engine" }
-thiserror = "2"
+vulpes-ha = { path = "crates/vulpes-ha" }
+vulpes-load = { path = "crates/vulpes-load" }
+vulpes-opt = { path = "crates/vulpes-opt" }
+vulpes-price = { path = "crates/vulpes-price" }
+vulpes-solar = { path = "crates/vulpes-solar" }
+vulpes-sources = { path = "crates/vulpes-sources" }
+
+# External crates: the features every user needs; a crate adds its own on top.
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+chrono-tz = "0.10.4"
+clap = { version = "4.6.8", features = ["derive"] }
+pyo3 = { version = "0.30.1", features = ["extension-module", "abi3-py313"] }
+quick-xml = "0.42.0"
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2"
+ureq = { version = "3.5.2", features = ["json"] }
 
 [profile.release]
 lto = "thin"

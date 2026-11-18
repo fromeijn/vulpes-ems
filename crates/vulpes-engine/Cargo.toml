@@ -8,14 +8,14 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-chrono = { version = "0.4.45", default-features = false, features = ["std", "serde"] }
-chrono-tz = "0.10.4"
-serde = { workspace = true, features = ["derive"] }
-serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+chrono = { workspace = true, features = ["serde"] }
+chrono-tz.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 thiserror.workspace = true
 vulpes-core.workspace = true
-vulpes-load = { version = "0.6.0", path = "../vulpes-load" }
+vulpes-load.workspace = true
 vulpes-opt.workspace = true
-vulpes-price = { version = "0.6.0", path = "../vulpes-price" }
-vulpes-solar = { version = "0.6.0", path = "../vulpes-solar" }
-vulpes-sources = { version = "0.6.0", path = "../vulpes-sources" }
+vulpes-price.workspace = true
+vulpes-solar.workspace = true
+vulpes-sources.workspace = true

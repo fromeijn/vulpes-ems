@@ -4,6 +4,10 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 
 ## Unreleased
 
+### Changed
+
+- **Building from source needs Rust 1.89** (was 1.85), for the CLI and for a wheel you build yourself. The dependencies are updated, among them PyO3 0.30, rusqlite 0.43 and quick-xml 0.42. Nothing to do when you use the published wheels.
+
 ### Removed
 
 - **Plan cost sensor:** the sensor is gone, and its entity is removed when the integration is updated. It showed the expected cost over the next 84 hours, a figure that could not be compared with a bill or a day and that shifted every time the plan moved on. The Saved last 7 days and Total saved sensors show what the plan is worth. Change dashboards and automations that use the Plan cost sensor. The figure is still in the engine response (`summary.cost`) and in the diagnostics.

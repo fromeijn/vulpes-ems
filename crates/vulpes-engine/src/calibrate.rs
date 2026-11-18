@@ -47,7 +47,7 @@ impl Weeks {
         let week = DateTime::from_timestamp(ts, 0).map_or(0, |d| d.iso_week().week());
         match self {
             Self::All => true,
-            Self::Even => week % 2 == 0,
+            Self::Even => week.is_multiple_of(2),
             Self::Odd => week % 2 == 1,
         }
     }

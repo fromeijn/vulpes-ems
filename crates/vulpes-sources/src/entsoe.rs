@@ -136,7 +136,7 @@ pub fn parse(xml: &str) -> Result<Vec<Series>> {
     loop {
         match reader.read_event().map_err(|e| Error::Parse(e.to_string()))? {
             Event::Start(e) => {
-                let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
+                let name = e.local_name().into_inner().to_owned();
                 if name == "TimeSeries" {
                     psr = None;
                     curve_a03 = false;
@@ -179,7 +179,7 @@ pub fn parse(xml: &str) -> Result<Vec<Series>> {
                 }
             }
             Event::Text(t) => {
-                let text = t.decode().map_err(|e| Error::Parse(e.to_string()))?.into_owned();
+                let text = t.into_inner().into_owned();
                 let leaf = path.last().map(String::as_str).unwrap_or("");
                 let parent = path
                     .len()

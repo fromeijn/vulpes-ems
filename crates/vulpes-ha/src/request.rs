@@ -275,10 +275,10 @@ pub fn wholesale_fetch(req: &Value) -> Result<Value> {
     if cfg.get("wholesale_source").and_then(Value::as_str) != Some("energyzero") {
         return Ok(json!({"fetch": false}));
     }
-    if let Some(at) = req.get("fetched_at").and_then(as_f64) {
-        if now - at < WHOLESALE_REFRESH_S {
-            return Ok(json!({"fetch": false}));
-        }
+    if let Some(at) = req.get("fetched_at").and_then(as_f64)
+        && now - at < WHOLESALE_REFRESH_S
+    {
+        return Ok(json!({"fetch": false}));
     }
     let (window, end, window_ts) = wholesale_window(now)?;
     let cached = |key: &str| req.get(key).and_then(as_f64).map(|t| t as i64);

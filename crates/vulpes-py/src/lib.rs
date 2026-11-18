@@ -18,7 +18,7 @@ fn quarter_hour_floor(now: i64) -> PyResult<i64> {
 /// growing with battery size and the number of modes.
 #[pyfunction]
 fn plan(py: Python<'_>, request_json: String) -> PyResult<String> {
-    py.allow_threads(|| vulpes_engine::plan_json(&request_json))
+    py.detach(|| vulpes_engine::plan_json(&request_json))
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
@@ -28,7 +28,7 @@ fn plan(py: Python<'_>, request_json: String) -> PyResult<String> {
 /// core and one to two minutes on a Raspberry Pi 4-class board.
 #[pyfunction]
 fn calibrate_solar(py: Python<'_>, request_json: String) -> PyResult<String> {
-    py.allow_threads(|| vulpes_engine::calibrate_json(&request_json))
+    py.detach(|| vulpes_engine::calibrate_json(&request_json))
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
@@ -44,7 +44,7 @@ fn ha(op: &str, request_json: &str) -> PyResult<String> {
 /// GIL (it may fetch weather).
 #[pyfunction]
 fn plan_ha(py: Python<'_>, request_json: String) -> PyResult<String> {
-    py.allow_threads(|| vulpes_ha::plan_ha_json(&request_json))
+    py.detach(|| vulpes_ha::plan_ha_json(&request_json))
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
@@ -53,7 +53,7 @@ fn plan_ha(py: Python<'_>, request_json: String) -> PyResult<String> {
 /// archived weather).
 #[pyfunction]
 fn calibrate_ha(py: Python<'_>, request_json: String) -> PyResult<String> {
-    py.allow_threads(|| vulpes_ha::calibrate_ha_json(&request_json))
+    py.detach(|| vulpes_ha::calibrate_ha_json(&request_json))
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
@@ -61,7 +61,7 @@ fn calibrate_ha(py: Python<'_>, request_json: String) -> PyResult<String> {
 /// folder); returns agreement and data freshness. Runs without the GIL (disk I/O).
 #[pyfunction]
 fn record_ha(py: Python<'_>, db_path: String, request_json: String) -> PyResult<String> {
-    py.allow_threads(|| vulpes_ha::record_ha_json(&db_path, &request_json))
+    py.detach(|| vulpes_ha::record_ha_json(&db_path, &request_json))
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
@@ -69,7 +69,7 @@ fn record_ha(py: Python<'_>, db_path: String, request_json: String) -> PyResult<
 /// forecast quality and control. Runs without the GIL (disk I/O).
 #[pyfunction]
 fn review_ha(py: Python<'_>, db_path: String, request_json: String) -> PyResult<String> {
-    py.allow_threads(|| vulpes_ha::review_ha_json(&db_path, &request_json))
+    py.detach(|| vulpes_ha::review_ha_json(&db_path, &request_json))
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
@@ -77,7 +77,7 @@ fn review_ha(py: Python<'_>, db_path: String, request_json: String) -> PyResult<
 /// Runs without the GIL (disk I/O).
 #[pyfunction]
 fn export_history(py: Python<'_>, db_path: String, request_json: String) -> PyResult<String> {
-    py.allow_threads(|| vulpes_ha::export_history_json(&db_path, &request_json))
+    py.detach(|| vulpes_ha::export_history_json(&db_path, &request_json))
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
@@ -90,7 +90,7 @@ fn energyzero_hourly(py: Python<'_>, start: String, end: String) -> PyResult<Vec
             .map_err(|e| PyValueError::new_err(format!("bad date '{s}': {e}")))
     };
     let (start, end) = (parse(&start)?, parse(&end)?);
-    py.allow_threads(|| vulpes_sources::energyzero::fetch_hourly(start, end))
+    py.detach(|| vulpes_sources::energyzero::fetch_hourly(start, end))
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
@@ -100,7 +100,7 @@ fn energyzero_hourly(py: Python<'_>, start: String, end: String) -> PyResult<Vec
 /// per reference point and part).
 #[pyfunction]
 fn price_drivers(py: Python<'_>, request_json: String) -> PyResult<String> {
-    py.allow_threads(|| vulpes_engine::price_drivers::fetch_json(&request_json))
+    py.detach(|| vulpes_engine::price_drivers::fetch_json(&request_json))
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
