@@ -62,6 +62,22 @@ pub fn current_slot(plan: &Value, now: f64) -> Option<&Value> {
     })
 }
 
+/// The import and export price (currency/kWh) of the plan's slot for `now`,
+/// for the Energy dashboard: only a known price, from the price sensor or
+/// published, never a forecast, so the dashboard counts no guessed cost.
+/// Both null without a plan, a slot for now, or a known price.
+pub fn price_now(plan: Option<&Value>, now: f64) -> Value {
+    let slot = plan
+        .and_then(|p| current_slot(p, now))
+        .filter(|s| truthy(s.get("price_known")));
+    let price = |key: &str| {
+        slot.and_then(|s| s.get(key))
+            .and_then(as_f64)
+            .filter(|p| p.is_finite())
+    };
+    json!({"import": price("import_price"), "export": price("export_price")})
+}
+
 /// Script variables for `now`: the planned slot, or the safe command.
 ///
 /// The safe command is used when the last planning run failed, when the plan
@@ -307,6 +323,37 @@ mod tests {
         assert_eq!(
             (&cmd["soc_min"], &cmd["soc_max"], &cmd["power_control"]),
             (&json!(0.0), &json!(100.0), &json!("grid_setpoint"))
+        );
+    }
+
+    #[test]
+    fn price_now_is_the_known_price_of_the_current_slot() {
+        let plan = json!({"slots": [
+            {"start": 900, "import_price": 0.30, "export_price": 0.12, "price_known": true},
+            {"start": 1800, "import_price": 0.25, "export_price": 0.10, "price_known": false},
+        ]});
+        assert_eq!(
+            price_now(Some(&plan), 900.0),
+            json!({"import": 0.30, "export": 0.12})
+        );
+        assert_eq!(
+            price_now(Some(&plan), 1799.0),
+            json!({"import": 0.30, "export": 0.12})
+        );
+        let none = json!({"import": null, "export": null});
+        assert_eq!(
+            price_now(Some(&plan), 1800.0),
+            none,
+            "a forecast price is not shown"
+        );
+        assert_eq!(price_now(Some(&plan), 2700.0), none, "no slot for now");
+        assert_eq!(price_now(Some(&plan), 0.0), none);
+        assert_eq!(price_now(None, 900.0), none);
+        assert_eq!(price_now(Some(&json!({})), 900.0), none);
+        let negative = json!({"slots": [{"start": 0, "import_price": -0.02, "export_price": -0.05, "price_known": true}]});
+        assert_eq!(
+            price_now(Some(&negative), 10.0),
+            json!({"import": -0.02, "export": -0.05})
         );
     }
 

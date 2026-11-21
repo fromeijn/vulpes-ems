@@ -58,7 +58,7 @@ python3 -m venv .venv && .venv/bin/pip install pytest maturin ziglang
 - **Never change entity `unique_id`s.** Users would lose entity history, customisations and dashboards.
 - **Setup never waits for the network:** `async_setup_entry` returns once the entities exist; the first plan and the 15-minute schedule start once Home Assistant has started (`async_at_started`, at once on a reload), the plan as a background task (`VulpesCoordinator.async_first_run`). Entities that show the plan are unavailable until it's there; the Battery control sensor shows `waiting`.
 - **No blocking work on HA's event loop:** Rust calls that fetch or compute for long (plan, calibration, history) and all network or recorder access run in the executor (`async_add_executor_job`, the recorder's own executor). Only the pure `vulpes_ems.ha` ops run inline.
-- **The Python side calls Rust through `core.py`:** `ha(op, **request)` runs a pure op of `vulpes_ha::OPS` (settings, flow checks, input parsing, control commands, solar form, calibration status). Ops take microseconds and may run on the event loop. `plan_ha`, `calibrate_ha`, `energyzero_hourly` and anything that touches the network or disk run in the executor. A new op goes in `vulpes_ha::OPS`, with a Rust test and a call in `tests/test_bindings.py`.
+- **The Python side calls Rust through `core.py`:** `ha(op, **request)` runs a pure op of `vulpes_ha::OPS` (settings, flow checks, input parsing, control commands, solar form, calibration status). Ops take microseconds and may run on the event loop. `plan_ha`, `calibrate_ha`, `energyzero_hourly`, `energyzero_published` and anything that touches the network or disk run in the executor. A new op goes in `vulpes_ha::OPS`, with a Rust test and a call in `tests/test_bindings.py`.
 - **Settings stay a JSON map** in Rust (`vulpes_ha::cfg`), read like Python's `cfg.get(key, default)`, so keys from other versions pass through. Order-sensitive input from HA (state attributes) is passed as a list of `[name, value]` pairs.
 - **One store format.** The integration's history file and the CLI's `local/<house>/vulpes.db` are the same `vulpes-core::Store`, with the same series keys, so a copy of a user's file works with the CLI tools. Users' files cannot be rebuilt: add new tables with `CREATE TABLE IF NOT EXISTS` (no version bump); a change to an existing table needs a schema version bump, a migration and a test for it.
 - **Solar setup:** the array form stores engine planes with `inverter: 0` plus integration-only keys (`power_entity`), stripped by `vulpes_ha::solar_form::engine_planes` before any engine call. `solar_setup` in the settings is `form` or `json`; setups from before 0.3.0 have neither and are treated as JSON. Calibration results live in `.storage/vulpes_ems.<entry_id>.calibration` and are only applied by the user, through the options flow.
@@ -85,7 +85,7 @@ Rules:
 - **Python:** pytest covers the bindings (`tests/test_bindings.py`, against the built module), the strings (`tests/test_strings.py`) and HA glue that can be tested without HA. New logic is tested in Rust.
 
 Known coverage gaps to fill:
-- **Network calls** (`open_meteo::fetch`, `entsoe::fetch`, `energyzero::fetch_hourly`): only the request building and response parsing are tested; there are no tests against live services by design.
+- **Network calls** (`open_meteo::fetch`, `entsoe::fetch`, `energyzero::fetch_hourly`, `energyzero::fetch_published`): only the request building and response parsing are tested; there are no tests against live services by design.
 - **`vulpes-py`** is tested from Python (`tests/test_bindings.py`), against the built module. PyO3 functions can't be unit-tested from Rust because the extension module doesn't link libpython.
 
 ## Model changes
@@ -137,7 +137,7 @@ All three must be green before a release.
 
 ## External APIs
 
-- **Keep requests low:** Open-Meteo, EnergyZero and ENTSO-E are free services. Cache, and fetch only the history windows the models need.
+- **Keep requests low:** Open-Meteo, EnergyZero and ENTSO-E are free services. Cache, and fetch only the history windows the models need. EnergyZero has two endpoints: `api.energyzero.nl/v1/energyprices` (hourly, any date range: the wholesale history) and `public.api.energyzero.nl/public/v1/prices` (per 15 minutes or per hour, two market days per request: the published quarter hours).
 - **User-Agent:** the generic `vulpes-ems/<version>`. Never put personal data (email, location) in headers or URLs beyond the rounded coordinates.
 - **Respect rate limits,** and keep errors free of tokens.
 

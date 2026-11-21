@@ -2,16 +2,17 @@
 //! minutes, solar calibration, and when to refresh wholesale prices.
 
 use crate::cfg::{Cfg, as_f64, num, obj, req_num, ts_pairs};
+use crate::inputs::KnownPrice;
 use crate::inputs::{
     attribute_pairs, energy_rows, hourly_series, load_groups, load_series, parse_price_attributes, soc_value,
     total_power,
 };
 use crate::modes::{engine_modes, split_mode};
-use crate::settings::CONF_SOC_ENTITY;
+use crate::settings::{BillingInterval, CONF_SOC_ENTITY, billing_interval};
 use crate::solar_form::{CONF_PLANES, CONF_POWER_ENTITY, engine_planes};
 use crate::time::zone;
 use crate::{Error, Result};
-use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, Days, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -26,6 +27,13 @@ pub const HORIZON_HOURS: u32 = 84;
 pub const CALIBRATION_HISTORY_DAYS: i64 = 120;
 /// Wholesale prices are fetched again after this long.
 pub const WHOLESALE_REFRESH_S: f64 = 6.0 * 3600.0;
+/// Tomorrow's day-ahead prices are published around noon, market time: from
+/// this hour on they are fetched until the cache has them.
+pub const TOMORROW_FROM_HOUR: u32 = 13;
+/// How often to try again for tomorrow's prices until they are there.
+pub const TOMORROW_RETRY_S: f64 = 1800.0;
+/// The NL day-ahead market's own time zone, for "today" and "tomorrow".
+const MARKET_TZ: &str = "Europe/Amsterdam";
 /// The day-ahead weather history at the price reference points is fetched
 /// again after this long: it gains one day per day.
 pub const PRICE_DRIVERS_PAST_REFRESH_S: f64 = 24.0 * 3600.0;
@@ -71,6 +79,11 @@ pub fn plan_ha(req: &Value) -> Result<Value> {
     let known = attribute_pairs(req, "price_attributes")
         .map(|a| parse_price_attributes(&a, req.get("price_unit").and_then(Value::as_str), tz))
         .unwrap_or_default();
+    // An hourly contract bills the mean of the hour's quarter-hour prices.
+    let known = match billing_interval(cfg) {
+        BillingInterval::Hour => known_to_hours(known),
+        BillingInterval::Quarter => known,
+    };
     let groups = load_groups(cfg);
     if groups.plus.is_empty() && groups.minus.is_empty() {
         return Err(Error::Message("no energy statistics selected".into()));
@@ -78,6 +91,7 @@ pub fn plan_ha(req: &Value) -> Result<Value> {
     let load = load_series(&groups, &energy_rows(req, "stats")?);
     let wholesale = ts_pairs(req, "wholesale");
     let mut request = engine_request(cfg, now, soc_pct, &load, &known, &wholesale, req)?;
+    request["published_wholesale"] = Value::Array(published_wholesale(cfg, req, &wholesale, now));
     if let Some(w) = req.get("weather").filter(|w| !w.is_null()) {
         request["weather"] = w.clone();
     }
@@ -95,11 +109,71 @@ pub fn plan_ha(req: &Value) -> Result<Value> {
     plan["inputs"] = json!({
         "load_hours": load.len(),
         "known_price_slots": known.len(),
+        "published_price_slots": plan["price_forecast"]["published_slots"].as_u64().unwrap_or(0),
         "wholesale_hours": wholesale.len(),
         "price_driver_hours": driver_hours,
     });
     plan["planned_at"] = json!(now as i64);
     Ok(plan)
+}
+
+/// Hourly means of the known prices that are shorter than an hour; hourly
+/// and longer prices stay as they are. In time order.
+pub fn known_to_hours(known: Vec<KnownPrice>) -> Vec<KnownPrice> {
+    let mut out = Vec::with_capacity(known.len());
+    let mut hours: BTreeMap<i64, (f64, usize)> = BTreeMap::new();
+    for p in known {
+        if p.end - p.start >= 3600 {
+            out.push(p);
+        } else {
+            let e = hours.entry(p.start - p.start.rem_euclid(3600)).or_default();
+            e.0 += p.import;
+            e.1 += 1;
+        }
+    }
+    out.extend(hours.into_iter().map(|(h, (sum, n))| KnownPrice {
+        start: h,
+        end: h + 3600,
+        import: sum / n as f64,
+    }));
+    out.sort_by_key(|p| p.start);
+    out
+}
+
+/// `[start, end, price]` rows under `key`; malformed rows are skipped.
+fn period_rows(req: &Value, key: &str) -> Vec<(i64, i64, f64)> {
+    req.get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            let r = r.as_array()?;
+            let num = |i: usize| r.get(i).and_then(as_f64);
+            Some((num(0)? as i64, num(1)? as i64, num(2)?))
+        })
+        .collect()
+}
+
+/// The engine's `published_wholesale`: the published prices still to come,
+/// for the slots the price sensor doesn't cover. With quarter-hour billing
+/// the fetched quarter hours (`published`) come first, then the hourly
+/// wholesale prices for what they don't cover; with hourly billing the hourly
+/// ones. Only with EnergyZero as the wholesale source.
+fn published_wholesale(cfg: &Cfg, req: &Value, wholesale: &[(i64, f64)], now: f64) -> Vec<Value> {
+    if cfg.get("wholesale_source").and_then(Value::as_str) != Some("energyzero") {
+        return Vec::new();
+    }
+    let quarters = match billing_interval(cfg) {
+        BillingInterval::Quarter => period_rows(req, "published"),
+        BillingInterval::Hour => Vec::new(),
+    };
+    let hours = wholesale.iter().map(|&(t, p)| (t, t + 3600, p));
+    quarters
+        .into_iter()
+        .chain(hours)
+        .filter(|&(s, e, p)| e > s && e as f64 > now && p.is_finite())
+        .map(|(s, e, w)| json!({"start": s, "end": e, "wholesale": w}))
+        .collect()
 }
 
 /// The engine's `price_drivers` from the cached rows: `None` when neither
@@ -266,8 +340,11 @@ pub(crate) fn wholesale_window(now: f64) -> Result<(NaiveDate, NaiveDate, i64)> 
     Ok((start, end, start.and_time(NaiveTime::MIN).and_utc().timestamp()))
 }
 
-/// Whether to fetch wholesale prices now, and for which UTC dates, at most
-/// every [`WHOLESALE_REFRESH_S`]. A cache that reaches back to the start of
+/// Whether to fetch wholesale prices now, and for which UTC dates: every
+/// [`WHOLESALE_REFRESH_S`], and every [`TOMORROW_RETRY_S`] while tomorrow's
+/// prices are due (from [`TOMORROW_FROM_HOUR`] market time on, until the cache
+/// has them): they are also the published prices the plan uses where the
+/// price sensor has none. A cache that reaches back to the start of
 /// the window only needs the dates from its last hour on; otherwise the whole
 /// window up to tomorrow is fetched. `req` holds `cfg`, `now`, `fetched_at`
 /// (Unix seconds of the last successful fetch, or null) and `cached_from` and
@@ -279,14 +356,69 @@ pub fn wholesale_fetch(req: &Value) -> Result<Value> {
     if cfg.get("wholesale_source").and_then(Value::as_str) != Some("energyzero") {
         return Ok(json!({"fetch": false}));
     }
+    let until = req.get("cached_until").and_then(as_f64).map(|t| t as i64);
     if let Some(at) = req.get("fetched_at").and_then(as_f64)
         && now - at < WHOLESALE_REFRESH_S
+        && !(tomorrow_due(now, until, 3600) && now - at >= TOMORROW_RETRY_S)
     {
         return Ok(json!({"fetch": false}));
     }
     let (window, end, window_ts) = wholesale_window(now)?;
     let start = fetch_start(req, ("cached_from", "cached_until"), (window, window_ts), end);
     Ok(json!({"fetch": true, "start": start.to_string(), "end": end.to_string()}))
+}
+
+/// Whether tomorrow's prices are due: from [`TOMORROW_FROM_HOUR`] market time
+/// on, while the cache (its last period starts at `cached_until` and lasts
+/// `step` seconds) ends before the end of tomorrow.
+fn tomorrow_due(now: f64, cached_until: Option<i64>, step: i64) -> bool {
+    let tz = zone(MARKET_TZ);
+    let Some(local) = DateTime::from_timestamp(now as i64, 0).map(|t| t.with_timezone(&tz)) else {
+        return false;
+    };
+    let end = local
+        .date_naive()
+        .checked_add_days(Days::new(2))
+        .and_then(|d| vulpes_engine::time::local_time(tz, d, 0));
+    local.hour() >= TOMORROW_FROM_HOUR && end.is_some_and(|end| cached_until.is_none_or(|u| u + step < end))
+}
+
+/// Whether to fetch the published quarter-hour prices now, and around which
+/// market day. Only with EnergyZero and quarter-hour billing; hourly billing
+/// uses the hourly wholesale prices. Due without a cache or when it doesn't
+/// cover now, every [`TOMORROW_RETRY_S`] while tomorrow is due, else every
+/// [`WHOLESALE_REFRESH_S`]. `req` holds `cfg`, `now`, `fetched_at` (the last
+/// successful fetch, or null) and `cached_from` and `cached_until` (the
+/// first and last cached quarter hour, or null). The result's `today` and
+/// `quarter` go to `vulpes_ems.energyzero_published`.
+pub fn published_fetch(req: &Value) -> Result<Value> {
+    let cfg = obj(req, "cfg")?;
+    let now = req_num(req, "now")?;
+    if cfg.get("wholesale_source").and_then(Value::as_str) != Some("energyzero")
+        || billing_interval(cfg) != BillingInterval::Quarter
+    {
+        return Ok(json!({"fetch": false}));
+    }
+    let cached = |key: &str| req.get(key).and_then(as_f64).map(|t| t as i64);
+    let (from, until) = (cached("cached_from"), cached("cached_until"));
+    let covers_now = from
+        .zip(until)
+        .is_some_and(|(f, u)| f as f64 <= now && now < (u + 900) as f64);
+    let due = match req.get("fetched_at").and_then(as_f64) {
+        None => true,
+        Some(_) if !covers_now => true,
+        Some(at) => {
+            now - at >= WHOLESALE_REFRESH_S || (tomorrow_due(now, until, 900) && now - at >= TOMORROW_RETRY_S)
+        }
+    };
+    if !due {
+        return Ok(json!({"fetch": false}));
+    }
+    let today = DateTime::from_timestamp(now as i64, 0)
+        .ok_or_else(|| Error::Message("'now' is out of range".into()))?
+        .with_timezone(&zone(MARKET_TZ))
+        .date_naive();
+    Ok(json!({"fetch": true, "today": today.to_string(), "quarter": true}))
 }
 
 /// The first date to fetch up to `end`: with a cache (its first and last hour
@@ -459,6 +591,66 @@ mod tests {
     }
 
     #[test]
+    fn published_prices_fill_in_when_the_sensor_has_none() {
+        let mut r = request();
+        let hour0 = (T0 - T0 % 3600.0) as i64;
+        r["price_attributes"] = json!([["friendly_name", "Price"]]);
+        r["cfg"]["wholesale_source"] = json!("energyzero");
+        // 30 days of history, today and tomorrow included, per hour.
+        r["wholesale"] = json!(
+            (-30 * 24..36)
+                .map(|h| json!([hour0 + h * 3600, 0.10]))
+                .collect::<Vec<_>>()
+        );
+        let plan = plan_ha(&r).unwrap();
+        assert_eq!(plan["inputs"]["known_price_slots"], 0);
+        // From the current slot to the end of the 36 published hours, per quarter hour.
+        let first = plan["slots"][0]["start"].as_i64().unwrap();
+        let published = (hour0 + 36 * 3600 - first) / 900;
+        assert_eq!(plan["inputs"]["published_price_slots"], json!(published));
+        let s0 = &plan["slots"][0];
+        assert_eq!(s0["price_known"], true);
+        assert!(
+            (s0["import_price"].as_f64().unwrap() - (1.21 * 0.10 + 0.13)).abs() < 1e-9,
+            "{s0}"
+        );
+        // Without EnergyZero nothing is published: every price is forecast.
+        r["cfg"]["wholesale_source"] = json!("none");
+        r["price_attributes"] = request()["price_attributes"].clone();
+        let plan = plan_ha(&r).unwrap();
+        assert_eq!(plan["inputs"]["published_price_slots"], 0);
+    }
+
+    #[test]
+    fn hourly_billing_plans_on_hourly_means_of_quarter_prices() {
+        let mut r = request();
+        let hour0 = T0 - T0 % 3600.0;
+        // Quarter-hour prices alternating 0.10 / 0.30: an hourly mean of 0.20.
+        let quarters: Vec<Value> = (0..96)
+            .map(|q| json!({"start": hour0 + 900.0 * f64::from(q), "price": if q % 2 == 0 { 0.10 } else { 0.30 }}))
+            .collect();
+        r["price_attributes"] = json!([["today", quarters]]);
+        r["cfg"]["billing_interval"] = json!("hour");
+        let plan = plan_ha(&r).unwrap();
+        assert_eq!(plan["inputs"]["known_price_slots"], 24);
+        let known: Vec<f64> = plan["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["price_known"] == true)
+            .map(|s| s["import_price"].as_f64().unwrap())
+            .collect();
+        assert!(
+            !known.is_empty() && known.iter().all(|p| (p - 0.20).abs() < 1e-12),
+            "{known:?}"
+        );
+        // Per quarter hour they're used as they come.
+        r["cfg"]["billing_interval"] = json!("quarter");
+        let plan = plan_ha(&r).unwrap();
+        assert_eq!(plan["inputs"]["known_price_slots"], 96);
+    }
+
+    #[test]
     fn plans_offline_and_splits_modes() {
         let plan = plan_ha(&request()).unwrap();
         assert_eq!(plan["planned_at"], json!(T0 as i64));
@@ -536,20 +728,163 @@ mod tests {
             wholesale_fetch(&json!({"cfg": c, "now": now, "fetched_at": null})).unwrap(),
             json!({"fetch": true, "start": "2026-08-10", "end": "2026-11-09"})
         );
+        // 13:00 in Amsterdam: with tomorrow cached, every 6 hours.
+        let tomorrow_last = 1_794_261_600.0; // 2026-11-09 23:00 local, the last hour of tomorrow
+        let fetch = |at: f64, until: Value| {
+            wholesale_fetch(&json!({"cfg": c, "now": now, "fetched_at": at, "cached_until": until})).unwrap()
+                ["fetch"]
+                .clone()
+        };
+        assert_eq!(fetch(now - 3600.0, json!(tomorrow_last)), false);
+        assert_eq!(fetch(now - WHOLESALE_REFRESH_S, json!(tomorrow_last)), true);
+        // Without tomorrow, every half hour from 13:00 on.
+        assert_eq!(fetch(now - TOMORROW_RETRY_S, json!(tomorrow_last - 3600.0)), true);
         assert_eq!(
-            wholesale_fetch(&json!({"cfg": c, "now": now, "fetched_at": now - 3600.0})).unwrap()["fetch"],
+            fetch(now - TOMORROW_RETRY_S + 1.0, json!(tomorrow_last - 3600.0)),
             false
         );
-        assert_eq!(
-            wholesale_fetch(&json!({"cfg": c, "now": now, "fetched_at": now - WHOLESALE_REFRESH_S})).unwrap()
-                ["fetch"],
-            true
-        );
+        assert_eq!(fetch(now - TOMORROW_RETRY_S, Value::Null), true);
+        // Before 13:00 tomorrow isn't due yet.
+        let morning = now - 2.0 * 3600.0;
+        let early = wholesale_fetch(
+            &json!({"cfg": c, "now": morning, "fetched_at": morning - 3600.0, "cached_until": now}),
+        )
+        .unwrap();
+        assert_eq!(early["fetch"], false);
         let none = json!({"wholesale_source": "none"});
         assert_eq!(
             wholesale_fetch(&json!({"cfg": none, "now": now})).unwrap(),
             json!({"fetch": false})
         );
+    }
+
+    #[test]
+    fn tomorrow_is_due_from_13_market_time_until_cached() {
+        let one = 1_794_139_200.0; // 2026-11-08 12:00 UTC = 13:00 in Amsterdam
+        let last_quarter = 1_794_264_300; // 2026-11-09 23:45 local
+        assert!(!tomorrow_due(one - 1.0, None, 900), "12:59");
+        assert!(tomorrow_due(one, None, 900));
+        assert!(tomorrow_due(one, Some(last_quarter - 900), 900));
+        assert!(!tomorrow_due(one, Some(last_quarter), 900));
+        assert!(
+            !tomorrow_due(one, Some(last_quarter - 2700), 3600),
+            "the last hour, hourly"
+        );
+        // Summer time: 13:00 in Amsterdam is 11:00 UTC.
+        let summer = 1_781_002_800.0; // 2026-06-09 11:00 UTC
+        assert!(tomorrow_due(summer, None, 900));
+        assert!(!tomorrow_due(summer - 1.0, None, 900));
+    }
+
+    #[test]
+    fn published_quarters_are_fetched_with_quarter_billing_only() {
+        let c = json!({"wholesale_source": "energyzero"});
+        let now = 1_794_139_200.0; // 13:00 in Amsterdam
+        let today_start = 1_794_092_400.0; // 2026-11-08 00:00 local
+        let tomorrow_last = 1_794_264_300.0;
+        let fetch = |cfg: &Value, at: Value, from: Value, until: Value| {
+            published_fetch(&json!({"cfg": cfg, "now": now, "fetched_at": at,
+                                    "cached_from": from, "cached_until": until}))
+            .unwrap()
+        };
+        let null = Value::Null;
+        assert_eq!(
+            fetch(&c, null.clone(), null.clone(), null.clone()),
+            json!({"fetch": true, "today": "2026-11-08", "quarter": true})
+        );
+        // A cache with tomorrow: every 6 hours.
+        let cached =
+            |at: f64| fetch(&c, json!(at), json!(today_start), json!(tomorrow_last))["fetch"].clone();
+        assert_eq!(cached(now - 3600.0), false);
+        assert_eq!(cached(now - WHOLESALE_REFRESH_S), true);
+        // Tomorrow missing after 13:00: every half hour.
+        let today_only =
+            |at: f64| fetch(&c, json!(at), json!(today_start), json!(now + 10.0 * 3600.0))["fetch"].clone();
+        assert_eq!(today_only(now - TOMORROW_RETRY_S), true);
+        assert_eq!(today_only(now - 60.0), false);
+        // A cache that doesn't cover now (yesterday's): at once.
+        assert_eq!(
+            fetch(
+                &c,
+                json!(now - 60.0),
+                json!(today_start - 86_400.0),
+                json!(today_start - 900.0)
+            )["fetch"],
+            true
+        );
+        // Hourly billing or another source: never.
+        let hourly = json!({"wholesale_source": "energyzero", "billing_interval": "hour"});
+        assert_eq!(
+            fetch(&hourly, null.clone(), null.clone(), null.clone()),
+            json!({"fetch": false})
+        );
+        let none = json!({"wholesale_source": "none"});
+        assert_eq!(
+            fetch(&none, null.clone(), null.clone(), null),
+            json!({"fetch": false})
+        );
+        assert!(published_fetch(&json!({"cfg": c})).is_err());
+    }
+
+    #[test]
+    fn hourly_billing_averages_finer_prices() {
+        let p = |start: i64, len: i64, import: f64| KnownPrice {
+            start,
+            end: start + len,
+            import,
+        };
+        let h = 3600;
+        let known = vec![
+            p(h, 900, 0.10),
+            p(h + 900, 900, 0.20),
+            p(h + 1800, 900, 0.30),
+            p(h + 2700, 900, 0.40),
+            p(0, h, 0.5),
+            p(2 * h, 900, 0.6),
+        ];
+        let hours = known_to_hours(known);
+        assert_eq!(hours.len(), 3);
+        assert_eq!(
+            (hours[0].start, hours[0].end, hours[0].import),
+            (0, h, 0.5),
+            "hourly stays"
+        );
+        assert_eq!((hours[1].start, hours[1].end), (h, 2 * h));
+        assert!((hours[1].import - 0.25).abs() < 1e-12);
+        // An hour with only some quarters: the mean of those.
+        assert_eq!(
+            (hours[2].start, hours[2].end, hours[2].import),
+            (2 * h, 3 * h, 0.6)
+        );
+        assert!(known_to_hours(vec![]).is_empty());
+    }
+
+    #[test]
+    fn published_wholesale_follows_the_billing_interval() {
+        let now = 1_794_139_200.0;
+        let h = now as i64;
+        let wholesale = vec![(h - 3600, 0.5), (h, 0.10), (h + 3600, 0.12)];
+        let req =
+            json!({"published": [[h, h + 900, 0.08], [h + 900, h + 1800, 0.09], [h - 900, h, 0.7], ["bad"]]});
+        let quarter = json!({"wholesale_source": "energyzero"});
+        let list = published_wholesale(quarter.as_object().unwrap(), &req, &wholesale, now);
+        // The quarters first, then the hours for what they don't cover; nothing that has ended.
+        assert_eq!(
+            list,
+            vec![
+                json!({"start": h, "end": h + 900, "wholesale": 0.08}),
+                json!({"start": h + 900, "end": h + 1800, "wholesale": 0.09}),
+                json!({"start": h, "end": h + 3600, "wholesale": 0.10}),
+                json!({"start": h + 3600, "end": h + 7200, "wholesale": 0.12}),
+            ]
+        );
+        let hour = json!({"wholesale_source": "energyzero", "billing_interval": "hour"});
+        assert_eq!(
+            published_wholesale(hour.as_object().unwrap(), &req, &wholesale, now).len(),
+            2
+        );
+        let none = json!({"wholesale_source": "none", "billing_interval": "hour"});
+        assert!(published_wholesale(none.as_object().unwrap(), &req, &wholesale, now).is_empty());
     }
 
     #[test]

@@ -72,7 +72,7 @@ The Status sensor is the worst state of these checks (`not_enough_data` counts a
 |---|---|---|
 | `plan` | the last refresh failed | no successful plan for 30 minutes |
 | `soc` | not reported for an hour while the plan moves the battery 10 points or more in the coming hour | not a state of charge (unavailable, out of range) |
-| `prices` | no prices for tomorrow after 15:00 local time | no price for now |
+| `prices` | no prices for tomorrow after 15:00 local time, or the price sensor has none and the published EnergyZero prices fill in (see `docs/price.md`) | no price for now, neither from the sensor nor published |
 | `energy_data` | the newest complete hour of energy statistics ended more than 3 hours ago | more than 24 hours ago |
 | `wholesale` (EnergyZero only) | not fetched for 24 hours | – |
 | `price_drivers` (EnergyZero only) | the wind and solar forecast at the price reference points not fetched for 24 hours: the cached forecast is used as far as it reaches, and unpublished prices beyond it fall back to the plain profile (see `docs/price.md`) | – |

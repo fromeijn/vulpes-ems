@@ -58,6 +58,16 @@ pub struct KnownPrice {
     pub import: f64,
 }
 
+/// A published wholesale price (currency/kWh, before the tariff) for
+/// `[start, end)`: per 15 minutes or per hour, as the contract bills.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishedPrice {
+    pub start: i64,
+    pub end: i64,
+    pub wholesale: f64,
+}
+
 /// Weather for one slot (start time), when supplied by the caller instead of fetched.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,8 +80,8 @@ pub struct WeatherSlot {
     pub wind_speed: f64,
 }
 
-/// Unknown keys are rejected here and in `location`, `export`, `known_prices`
-/// and `weather`, so that a misspelled optional key, or a key from another
+/// Unknown keys are rejected here and in `location`, `export`, `known_prices`,
+/// `published_wholesale` and `weather`, so that a misspelled optional key, or a key from another
 /// version like the former `export.net_metering`, cannot silently change the
 /// plan. `battery`, `grid`, `modes`, `planes` and `tariff` are types shared
 /// with the CLI's files and still accept extra keys.
@@ -106,6 +116,10 @@ pub struct PlanRequest {
     pub load_history: Vec<(i64, f64)>,
     #[serde(default)]
     pub known_prices: Vec<KnownPrice>,
+    /// Published wholesale prices for the slots `known_prices` doesn't cover:
+    /// they go through the tariff like a forecast, but count as known.
+    #[serde(default)]
+    pub published_wholesale: Vec<PublishedPrice>,
     pub tariff: LinearTariff,
     pub export: ExportTariff,
     /// Hourly wholesale history `(hour_start, EUR/kWh)` for forecasting unpublished prices.
@@ -153,6 +167,10 @@ pub struct PriceForecast {
     pub method: PriceMethod,
     /// Slots whose price was forecast.
     pub slots: usize,
+    /// Slots priced from `published_wholesale` through the tariff, because
+    /// `known_prices` had no price for them.
+    #[serde(default)]
+    pub published_slots: usize,
     /// The recent check of regression against profile (mean absolute error
     /// per hour, currency/kWh before the tariff); `null` without drivers or
     /// with too little history.

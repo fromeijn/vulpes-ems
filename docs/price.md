@@ -6,6 +6,18 @@ Prices are handled in two layers:
 
 Published day-ahead prices always take precedence. Forecasts only fill the hours that aren't published yet: the next day before the auction results, and further ahead. With the 84-hour horizon, that is up to three and a half days of each plan.
 
+## Published prices
+
+In Home Assistant the published prices come from the user's price sensor, as all-in prices. Where the sensor has no price for a slot (it is unavailable, or its source has a gap), the published wholesale price from EnergyZero fills in, through the tariff (`a · wholesale + b`, export `export a · wholesale + export b`). Such a slot counts as known, like a sensor price; the plan's `inputs.published_price_slots` counts them, and the health check `prices` is degraded meanwhile. Only with EnergyZero as the wholesale source.
+
+The **billing interval** setting says what one price covers in the contract:
+- **per 15 minutes** (the default, as the day-ahead market since October 2025): the sensor's prices are used as they come, and the fallback fetches EnergyZero's quarter-hour prices (`public.api.energyzero.nl/public/v1/prices`, one request for today and tomorrow), with the hourly prices for what they don't cover;
+- **per hour**: the sensor's prices shorter than an hour are averaged per hour, as hourly contracts bill the mean of the four quarter-hour prices, and the fallback uses the hourly wholesale prices Vulpes already keeps.
+
+The **Current import price** and **Current export price** sensors show the known price of the current slot, from either source, so they can serve as the price entity in Home Assistant's Energy dashboard. They are unknown while the price for now is only forecast.
+
+Tomorrow's prices are fetched from 13:00 Amsterdam time every 30 minutes until they are there, otherwise every 6 hours. Prices not published yet are forecast per hour in both cases.
+
 ## Tariff fit
 
 `vulpes-cli fit-tariff` fits `all_in = a · wholesale + b` per calendar year. Energy taxes usually change on 1 January.
@@ -55,7 +67,7 @@ Windy or sunny hours after calm, dull reference days are cheaper than the profil
 **Self-check.** Each planning run scores both methods on the last 14 days, each day forecast with a model fitted on the days before it. The correction is used only when its mean absolute error was lower. The plan's `price_forecast` says which method was used, with both errors.
 
 **In Home Assistant**, only with EnergyZero as the wholesale source, because the reference points are for the Dutch market:
-- the wholesale history (90 days) every 6 hours, only from the last known day on;
+- the wholesale history (90 days) every 6 hours, only from the last known day on, and every 30 minutes from 13:00 Amsterdam time until tomorrow's prices are in;
 - the reference-point history once a day, only from the last known day on;
 - the reference-point forecast every 6 hours.
 

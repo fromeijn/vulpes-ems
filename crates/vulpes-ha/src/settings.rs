@@ -24,6 +24,9 @@ pub const CONF_TARIFF_A: &str = "tariff_a";
 pub const CONF_TARIFF_B: &str = "tariff_b";
 pub const CONF_EXPORT_A: &str = "export_a";
 pub const CONF_EXPORT_B: &str = "export_b";
+/// How the contract bills: `quarter` (default, also for settings from before
+/// it existed) or `hour`.
+pub const CONF_BILLING_INTERVAL: &str = "billing_interval";
 const CONF_MODES_V1: &str = "modes";
 const CONF_NET_METERING_V2: &str = "net_metering";
 
@@ -186,6 +189,32 @@ pub fn check_battery(cfg: &Cfg) -> Result<Errors> {
 /// the import price, which a fixed import price (a = 0) doesn't allow. The
 /// export price then cannot follow the wholesale price either, so Export a
 /// has to be 0 too.
+/// The period one price applies to in the user's contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BillingInterval {
+    /// Per 15 minutes, as the day-ahead market since October 2025.
+    Quarter,
+    /// Per hour: the mean of the hour's four quarter-hour prices.
+    Hour,
+}
+
+impl BillingInterval {
+    pub fn seconds(self) -> i64 {
+        match self {
+            Self::Quarter => 900,
+            Self::Hour => 3600,
+        }
+    }
+}
+
+/// The billing interval from the settings; anything but `hour` is `quarter`.
+pub fn billing_interval(cfg: &Cfg) -> BillingInterval {
+    match cfg.get(CONF_BILLING_INTERVAL).and_then(Value::as_str) {
+        Some("hour") => BillingInterval::Hour,
+        _ => BillingInterval::Quarter,
+    }
+}
+
 pub fn check_tariff(cfg: &Cfg) -> Result<Errors> {
     Ok(
         if num(cfg, CONF_TARIFF_A)? == 0.0 && num(cfg, CONF_EXPORT_A)? != 0.0 {
@@ -548,6 +577,31 @@ mod tests {
             json!({"base": "soc_range"})
         );
         assert!(check_battery(&Cfg::new()).is_err());
+    }
+
+    #[test]
+    fn billing_interval_defaults_to_quarter() {
+        let with = |v: Value| {
+            let mut c = Map::new();
+            c.insert(CONF_BILLING_INTERVAL.into(), v);
+            billing_interval(&c)
+        };
+        assert_eq!(
+            billing_interval(&Map::new()),
+            BillingInterval::Quarter,
+            "settings from before it"
+        );
+        assert_eq!(with(json!("quarter")), BillingInterval::Quarter);
+        assert_eq!(with(json!("hour")), BillingInterval::Hour);
+        assert_eq!(with(json!("daily")), BillingInterval::Quarter);
+        assert_eq!(with(json!(null)), BillingInterval::Quarter);
+        assert_eq!(
+            (
+                BillingInterval::Quarter.seconds(),
+                BillingInterval::Hour.seconds()
+            ),
+            (900, 3600)
+        );
     }
 
     #[test]

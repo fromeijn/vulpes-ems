@@ -175,12 +175,33 @@ pub fn health(snap: &Value) -> Result<Value> {
         .unwrap_or_default();
     let local = DateTime::from_timestamp(now as i64, 0).map(|t| t.with_timezone(&tz));
     let last_known = known.iter().map(|p| p.end).max();
+    // The plan's slots with a known price: the sensor's, or published ones from EnergyZero
+    // where the sensor has none.
+    let plan_known: Vec<i64> = plan
+        .and_then(|p| p.get("slots"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|s| truthy(s.get("price_known")))
+        .filter_map(|s| s.get("start").and_then(Value::as_i64))
+        .collect();
+    let plan_known_now = plan_known
+        .iter()
+        .any(|&t| t as f64 <= now && now < (t + 900) as f64);
     checks.push(
         if !known
             .iter()
             .any(|p| (p.start as f64) <= now && now < p.end as f64)
         {
-            check("prices", PROBLEM, "the price sensor has no price for now")
+            if plan_known_now {
+                check(
+                    "prices",
+                    DEGRADED,
+                    "the price sensor has no price for now; using the published EnergyZero price",
+                )
+            } else {
+                check("prices", PROBLEM, "the price sensor has no price for now")
+            }
         } else if let Some(local) = local.filter(|l| l.hour() >= PRICES_TOMORROW_HOUR) {
             // The start of tomorrow's last hour.
             let day_end = local
@@ -188,10 +209,16 @@ pub fn health(snap: &Value) -> Result<Value> {
                 .succ_opt()
                 .and_then(|d| vulpes_engine::time::local_time(tz, d, 23));
             if last_known.zip(day_end).is_some_and(|(k, e)| k < e) {
+                let published = day_end.is_some_and(|e| plan_known.iter().any(|&t| t >= e));
                 check(
                     "prices",
                     DEGRADED,
-                    format!("no prices for tomorrow yet after {PRICES_TOMORROW_HOUR}:00"),
+                    if published {
+                        "the price sensor has no prices for tomorrow yet; using the published EnergyZero prices"
+                            .to_string()
+                    } else {
+                        format!("no prices for tomorrow yet after {PRICES_TOMORROW_HOUR}:00")
+                    },
                 )
             } else {
                 check("prices", OK, "")
@@ -508,6 +535,60 @@ mod tests {
         assert_eq!(state_of(&with(today), "prices"), "degraded");
         let both = json!({"now": at15, "price_attributes": prices(NOW - 13.0 * 3600.0, 48)});
         assert_eq!(state_of(&with(both), "prices"), "ok");
+    }
+
+    #[test]
+    fn published_prices_stand_in_for_the_sensor() {
+        let detail = |h: &Value| {
+            h["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["check"] == "prices")
+                .unwrap()["detail"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // A plan with known (published) prices from 13 hours ago to `hours` after that.
+        let known_plan = |hours: i64| {
+            let start = (NOW - 13.0 * 3600.0) as i64;
+            let slots: Vec<Value> = (0..hours * 4)
+                .map(|q| json!({"start": start + q * 900, "price_known": true, "soc_pct": 50.0}))
+                .collect();
+            json!({"slots": slots, "warnings": []})
+        };
+        // No sensor price for now, but a published one: degraded, not a problem.
+        let h = with(json!({"price_attributes": null, "plan": known_plan(24)}));
+        assert_eq!(state_of(&h, "prices"), "degraded");
+        assert!(
+            detail(&h).contains("published EnergyZero price"),
+            "{}",
+            detail(&h)
+        );
+        // Neither: a problem, as before.
+        let mut unknown = known_plan(24);
+        for s in unknown["slots"].as_array_mut().unwrap() {
+            s["price_known"] = json!(false);
+        }
+        let h = with(json!({"price_attributes": null, "plan": unknown}));
+        assert_eq!(state_of(&h, "prices"), "problem");
+        // After 15:00 without tomorrow from the sensor, but published: degraded, saying so.
+        let at15 = NOW + 2.0 * 3600.0;
+        let today = prices(NOW - 13.0 * 3600.0, 24);
+        let h = with(json!({"now": at15, "price_attributes": today, "plan": known_plan(48)}));
+        assert_eq!(state_of(&h, "prices"), "degraded");
+        assert!(
+            detail(&h).contains("using the published EnergyZero prices"),
+            "{}",
+            detail(&h)
+        );
+        let h = with(json!({"now": at15, "price_attributes": today, "plan": known_plan(24)}));
+        assert!(
+            detail(&h).contains("no prices for tomorrow yet"),
+            "{}",
+            detail(&h)
+        );
     }
 
     #[test]

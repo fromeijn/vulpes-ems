@@ -347,7 +347,7 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
         };
         WholesaleForecaster::new(&req.wholesale_history, past, ahead, tz, req.now)
     });
-    let (mut forecast_slots, mut corrected_slots) = (0usize, 0usize);
+    let (mut forecast_slots, mut corrected_slots, mut published_slots) = (0usize, 0usize, 0usize);
     // One wholesale forecast per hour, shared by the hour's slots.
     let mut last_hour: Option<(i64, Option<(f64, bool)>)> = None;
     let mut hour_fc = |hour: i64| match last_hour {
@@ -364,8 +364,19 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
             .from_import(import, &req.tariff)
             .unwrap_or(req.export.b)
     };
-    let mean_known = (!req.known_prices.is_empty())
-        .then(|| req.known_prices.iter().map(|p| p.import).sum::<f64>() / req.known_prices.len() as f64);
+    // The mean of the published prices: the known ones and the published wholesale ones.
+    let published_imports: Vec<f64> = req
+        .known_prices
+        .iter()
+        .map(|p| p.import)
+        .chain(
+            req.published_wholesale
+                .iter()
+                .map(|p| req.tariff.price(p.wholesale)),
+        )
+        .collect();
+    let mean_known = (!published_imports.is_empty())
+        .then(|| published_imports.iter().sum::<f64>() / published_imports.len() as f64);
     let mut price_fallback = 0;
 
     let mut inputs = Vec::with_capacity(n);
@@ -378,12 +389,20 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
             mean_load
         });
         let known = req.known_prices.iter().find(|p| p.start <= t && t < p.end);
-        if known.is_none() {
-            forecast_slots += 1;
+        // Without a known price, a published wholesale price through the tariff.
+        let published = known
+            .is_none()
+            .then(|| req.published_wholesale.iter().find(|p| p.start <= t && t < p.end))
+            .flatten();
+        match (known, published) {
+            (None, None) => forecast_slots += 1,
+            (None, Some(_)) => published_slots += 1,
+            _ => {}
         }
-        let import = match known {
-            Some(p) => p.import,
-            None => match hour_fc(hour) {
+        let import = match (known, published) {
+            (Some(p), _) => p.import,
+            (None, Some(p)) => req.tariff.price(p.wholesale),
+            (None, None) => match hour_fc(hour) {
                 Some((w, corrected)) => {
                     corrected_slots += usize::from(corrected);
                     req.tariff.price(w)
@@ -395,12 +414,16 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
                 }
             },
         };
-        known_flags.push(known.is_some());
+        known_flags.push(known.is_some() || published.is_some());
         inputs.push(SlotInput {
             load_w: load,
             pv_w: pv_w.unwrap_or(0.0),
             import_price: import,
-            export_price: export_from(import),
+            // From the wholesale price itself where it was published, as the review does.
+            export_price: published.map_or_else(
+                || export_from(import),
+                |p| req.export.a * p.wholesale + req.export.b,
+            ),
             min_soc_wh: None,
         });
     }
@@ -414,7 +437,7 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
             "no price forecast for {price_fallback} slots; used the mean known price"
         ));
     }
-    let price_forecast = price_forecast(
+    let mut price_forecast = price_forecast(
         price_fc.as_ref(),
         req.price_drivers.is_some(),
         forecast_slots,
@@ -422,6 +445,7 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
         price_fallback,
         &mut warnings,
     );
+    price_forecast.published_slots = published_slots;
 
     let terminal = {
         let mut v: Vec<f64> = inputs.iter().map(|s| s.import_price).collect();
@@ -513,6 +537,7 @@ fn price_forecast(
     PriceForecast {
         method,
         slots,
+        published_slots: 0,
         check_days: check.map(|c| c.days),
         profile_mae: check.map(|c| c.profile_mae),
         regression_mae: check.map(|c| c.regression_mae),
@@ -522,7 +547,7 @@ fn price_forecast(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExportTariff, KnownPrice, Location};
+    use crate::{ExportTariff, KnownPrice, Location, PublishedPrice};
     use chrono::TimeZone;
     use vulpes_core::{BatteryParams, Behaviour, GridLimits, ModeDef};
     use vulpes_price::LinearTariff;
@@ -600,6 +625,7 @@ mod tests {
                     }
                 })
                 .collect(),
+            published_wholesale: vec![],
             tariff: LinearTariff { a: 1.21, b: 0.13 },
             export: ExportTariff { a: 1.21, b: 0.0 },
             wholesale_history: vec![],
@@ -1437,6 +1463,119 @@ mod tests {
             "{:?}",
             resp.warnings
         );
+    }
+
+    #[test]
+    fn published_wholesale_fills_the_slots_without_a_known_price() {
+        let mut r = request(1_781_000_000);
+        r.known_prices.truncate(6); // the sensor has the first 6 hours
+        let hour0 = r.known_prices[0].start;
+        let sensor_end = r.known_prices[5].end;
+        // Published quarter hours from hour 4 to hour 12: the sensor wins where both exist.
+        let w = |q: i64| 0.05 + 0.01 * (q % 4) as f64;
+        r.published_wholesale = (16..48)
+            .map(|q| PublishedPrice {
+                start: hour0 + q * 900,
+                end: hour0 + q * 900 + 900,
+                wholesale: w(q),
+            })
+            .collect();
+        let published_end = hour0 + 48 * 900;
+        r.wholesale_history = (0..(24 * 30))
+            .map(|h| (r.now - 30 * 86_400 + h * 3600, 0.10))
+            .collect();
+        let resp = plan(&r).unwrap();
+        for s in &resp.slots {
+            if s.start < sensor_end {
+                assert!(
+                    s.price_known && s.import_price == 0.10,
+                    "the sensor's price: {s:?}"
+                );
+            } else if s.start < published_end {
+                let q = (s.start - hour0) / 900;
+                assert!(s.price_known, "{s:?}");
+                assert!((s.import_price - (1.21 * w(q) + 0.13)).abs() < 1e-12, "{s:?}");
+                assert!((s.export_price - 1.21 * w(q)).abs() < 1e-12, "{s:?}");
+            } else {
+                assert!(!s.price_known, "forecast: {s:?}");
+                assert!((s.import_price - (1.21 * 0.10 + 0.13)).abs() < 1e-9, "{s:?}");
+            }
+        }
+        let pf = resp.price_forecast.unwrap();
+        let first = resp.slots[0].start;
+        let sensor_slots = ((sensor_end - first) / 900) as usize;
+        assert_eq!(pf.published_slots, 24, "hours 6 to 12, per quarter");
+        assert_eq!(pf.slots, resp.slots.len() - sensor_slots - 24);
+        assert!(resp.warnings.is_empty(), "{:?}", resp.warnings);
+    }
+
+    #[test]
+    fn published_hours_alone_plan_without_known_prices_or_history() {
+        let mut r = request(1_781_000_000);
+        let hour0 = r.known_prices[0].start;
+        r.known_prices.clear();
+        r.published_wholesale = (0..12)
+            .map(|h| PublishedPrice {
+                start: hour0 + h * 3600,
+                end: hour0 + h * 3600 + 3600,
+                wholesale: if h < 6 { 0.0 } else { 0.20 },
+            })
+            .collect();
+        // Every quarter of a published hour has its price; later slots use the mean
+        // published price, since there is no wholesale history to forecast from.
+        let resp = plan(&r).unwrap();
+        let mean = (1.21 * 0.10) + 0.13;
+        for s in &resp.slots {
+            if s.start < hour0 + 6 * 3600 {
+                assert!(s.price_known && (s.import_price - 0.13).abs() < 1e-12, "{s:?}");
+            } else if s.start < hour0 + 12 * 3600 {
+                assert!(
+                    s.price_known && (s.import_price - (1.21 * 0.20 + 0.13)).abs() < 1e-12,
+                    "{s:?}"
+                );
+            } else {
+                assert!(!s.price_known && (s.import_price - mean).abs() < 1e-9, "{s:?}");
+            }
+        }
+        assert_eq!(resp.price_forecast.unwrap().method, PriceMethod::MeanKnown);
+        // Without any price at all, still an error.
+        r.published_wholesale.clear();
+        assert!(plan(&r).is_err());
+    }
+
+    #[test]
+    fn published_wholesale_json_round_trip() {
+        let mut r = request(1_781_000_000);
+        r.published_wholesale = vec![PublishedPrice {
+            start: 0,
+            end: 900,
+            wholesale: -0.01,
+        }];
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(
+            json["published_wholesale"],
+            serde_json::json!([{"start": 0, "end": 900, "wholesale": -0.01}])
+        );
+        let back: PlanRequest = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back.published_wholesale, r.published_wholesale);
+        // Requests from before it still parse; unknown keys inside it are rejected.
+        let mut old = json.clone();
+        old.as_object_mut().unwrap().remove("published_wholesale");
+        assert!(
+            serde_json::from_value::<PlanRequest>(old)
+                .unwrap()
+                .published_wholesale
+                .is_empty()
+        );
+        let mut bad = json;
+        bad["published_wholesale"][0]["import"] = 0.2.into();
+        assert!(crate::plan_json(&bad.to_string()).is_err());
+        // And the response counts the published slots.
+        let resp: serde_json::Value = serde_json::from_str(
+            &crate::plan_json(&serde_json::to_string(&request(1_781_000_000)).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(resp["price_forecast"]["published_slots"], 0);
     }
 
     #[test]

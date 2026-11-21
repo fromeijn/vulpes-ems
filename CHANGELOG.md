@@ -6,6 +6,10 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 
 ### Added
 
+- **Published EnergyZero prices where the price sensor has none.** When your price sensor is unavailable or has a gap, Vulpes now plans with the published day-ahead price from EnergyZero, through your tariff (a × wholesale + b), instead of a forecast. The Status sensor is degraded meanwhile ("using the published EnergyZero price"), so a broken price integration still shows. Only with EnergyZero as the wholesale source. Nothing to do. The plan's `inputs` has a new `published_price_slots`; the engine request takes a new optional `published_wholesale`, and the response's `price_forecast` has `published_slots`.
+- **Current import price and Current export price sensors** (`<currency>/kWh`), for the Energy dashboard ("Use an entity with current price" for grid consumption and return to grid) when you have no other price entity. They show the price Vulpes plans with for the current quarter hour: your price sensor's, or the published EnergyZero price where it has none. Never a forecast: the sensor is unknown while the price for now isn't published, so the dashboard counts no guessed cost.
+- **Billing interval** (Tariff settings): per 15 minutes (the default, as before) or per hour. Set it to "per hour" if your contract bills hourly prices: Vulpes then plans on the hourly mean of a price sensor's quarter-hour prices, which is what such contracts bill. With per 15 minutes, the fallback above uses EnergyZero's quarter-hour prices.
+
 - **Action `vulpes_ems.update_plan`:** plans at once, without waiting for the next quarter hour. It reads the prices and the state of charge as they are now and updates the plan and the sensors; while Active is on, it also runs the control script with the new plan. Use it in an automation to plan as soon as tomorrow's prices arrive (example in `docs/control.md`). The first call plans at once; calls in the 30 seconds after it are combined into one more run. Nothing to do if you don't need it; the integration and the wheel must be updated together.
 
 ### Fixed
@@ -16,6 +20,7 @@ What changed for users of the Home Assistant integration, the `vulpes-ems` wheel
 
 ### Changed
 
+- **Tomorrow's wholesale prices** are fetched every 30 minutes from 13:00 (Amsterdam time) until they are in, instead of up to 6 hours after they are published.
 - **Active after a restart:** a restored Active switch waits for the first plan and applies it when it is ready, usually within seconds of Home Assistant having started, instead of being applied during setup. No safe command is sent before it, unless that plan fails. Meanwhile the Battery control sensor shows the new state `waiting` ("Waiting for the first plan"); automations that compare its state to the four existing ones may need it.
 - **Price history in the history file:** the wholesale prices and the wind and solar at the price reference points are now kept in the history file (new series `price.driver.wind` and `price.driver.solar`). After a restart Vulpes only fetches the days after them. The first start after the update still fetches all 90 days once. The weather at the four reference points now takes one request per range to Open-Meteo instead of four.
 - **Building from source needs Rust 1.89** (was 1.85), for the CLI and for a wheel you build yourself. The dependencies are updated, among them PyO3 0.30, rusqlite 0.43 and quick-xml 0.42. Nothing to do when you use the published wheels.

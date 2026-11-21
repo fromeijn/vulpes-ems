@@ -17,9 +17,11 @@ from homeassistant.helpers import selector
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    BILLING_INTERVALS,
     CONF_ARRAY_COUNT,
     CONF_BATTERY_CHARGE,
     CONF_BATTERY_DISCHARGE,
+    CONF_BILLING_INTERVAL,
     CONF_CAPACITY_KWH,
     CONF_CHARGE_EFF,
     CONF_CHARGE_W,
@@ -129,6 +131,9 @@ def _tariff_schema(d: dict[str, Any], currency: str) -> vol.Schema:
             vol.Required(CONF_TARIFF_B, default=d.get(CONF_TARIFF_B, 0.13)): _num(-1, 2, "any", f"{currency}/kWh"),
             vol.Required(CONF_EXPORT_A, default=d.get(CONF_EXPORT_A, 1.0)): _num(0, 5, "any"),
             vol.Required(CONF_EXPORT_B, default=d.get(CONF_EXPORT_B, 0.0)): _num(-1, 2, "any", f"{currency}/kWh"),
+            vol.Required(CONF_BILLING_INTERVAL, default=d.get(CONF_BILLING_INTERVAL, "quarter")): selector.SelectSelector(
+                selector.SelectSelectorConfig(options=BILLING_INTERVALS, translation_key=CONF_BILLING_INTERVAL)
+            ),
         }
     )
 

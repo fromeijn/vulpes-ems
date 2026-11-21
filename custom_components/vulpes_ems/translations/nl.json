@@ -47,16 +47,18 @@
       },
       "tariff": {
         "title": "Tarief",
-        "description": "Prijzen voor uren die nog niet bekend zijn worden geschat als a × groothandelsprijs + b. Teruglevering levert teruglevering-a × groothandelsprijs + teruglevering-b op.",
+        "description": "Prijzen die de prijssensor niet heeft komen uit de gepubliceerde EnergyZero-prijzen, en prijzen die nog niet bekend zijn worden geschat; beide als a × groothandelsprijs + b. Teruglevering levert teruglevering-a × groothandelsprijs + teruglevering-b op.",
         "data": {
           "tariff_a": "Afname a (meestal de btw-factor)",
           "tariff_b": "Afname b (energiebelasting + opslag, incl. btw)",
           "export_a": "Teruglevering a",
-          "export_b": "Teruglevering b"
+          "export_b": "Teruglevering b",
+          "billing_interval": "Afrekenperiode"
         },
         "data_description": {
           "export_a": "Meestal 1: teruglevering wordt vergoed tegen de marktprijs zonder btw. Zolang salderen voor jou nog geldt, vul je dezelfde waarden in als bij Afname a en b. Controleer je contract.",
-          "export_b": "Terugleverkosten per kWh als negatief getal, een bonus als positief getal."
+          "export_b": "Terugleverkosten per kWh als negatief getal, een bonus als positief getal.",
+          "billing_interval": "Hoe je contract de prijs afrekent: per kwartier, zoals de day-aheadmarkt sinds oktober 2025, of per uur, het gemiddelde van de vier kwartierprijzen van dat uur. Controleer je contract."
         }
       },
       "modes": {
@@ -218,16 +220,18 @@
       },
       "tariff": {
         "title": "Tarief",
-        "description": "Prijzen voor uren die nog niet bekend zijn worden geschat als a × groothandelsprijs + b. Teruglevering levert teruglevering-a × groothandelsprijs + teruglevering-b op.",
+        "description": "Prijzen die de prijssensor niet heeft komen uit de gepubliceerde EnergyZero-prijzen, en prijzen die nog niet bekend zijn worden geschat; beide als a × groothandelsprijs + b. Teruglevering levert teruglevering-a × groothandelsprijs + teruglevering-b op.",
         "data": {
           "tariff_a": "Afname a (meestal de btw-factor)",
           "tariff_b": "Afname b (energiebelasting + opslag, incl. btw)",
           "export_a": "Teruglevering a",
-          "export_b": "Teruglevering b"
+          "export_b": "Teruglevering b",
+          "billing_interval": "Afrekenperiode"
         },
         "data_description": {
           "export_a": "Meestal 1: teruglevering wordt vergoed tegen de marktprijs zonder btw. Zolang salderen voor jou nog geldt, vul je dezelfde waarden in als bij Afname a en b. Controleer je contract.",
-          "export_b": "Terugleverkosten per kWh als negatief getal, een bonus als positief getal."
+          "export_b": "Terugleverkosten per kWh als negatief getal, een bonus als positief getal.",
+          "billing_interval": "Hoe je contract de prijs afrekent: per kwartier, zoals de day-aheadmarkt sinds oktober 2025, of per uur, het gemiddelde van de vier kwartierprijzen van dat uur. Controleer je contract."
         }
       },
       "modes": {
@@ -354,6 +358,12 @@
         "w": "West",
         "nw": "Noordwest"
       }
+    },
+    "billing_interval": {
+      "options": {
+        "quarter": "Per kwartier",
+        "hour": "Per uur"
+      }
     }
   },
   "entity": {
@@ -442,6 +452,12 @@
       },
       "newest_energy_data": {
         "name": "Energiegegevens tot"
+      },
+      "price_import_now": {
+        "name": "Huidige afnameprijs"
+      },
+      "price_export_now": {
+        "name": "Huidige terugleverprijs"
       }
     },
     "binary_sensor": {

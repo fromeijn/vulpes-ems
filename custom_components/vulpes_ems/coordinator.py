@@ -67,6 +67,9 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._wholesale: list[list[float]] = []
         self._wholesale_fetched: float | None = None
+        # Published quarter-hour prices of today and tomorrow, with quarter-hour billing.
+        self._published: list[list[float]] = []
+        self._published_fetched: float | None = None
         # Wind and solar at the price reference points: day-ahead history and forecast.
         self._drivers: dict[str, list | None] = {"past": None, "ahead": None}
         self._drivers_fetched: dict[str, float | None] = {"past": None, "ahead": None}
@@ -392,6 +395,30 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.warning("Wholesale price history unavailable, keeping cached data: %s", err)
         return self._wholesale
 
+    async def _published_prices(self, cfg: dict[str, Any], now: datetime) -> list[list[float]]:
+        """Today's and tomorrow's published quarter-hour prices (with quarter-hour billing)."""
+        cached = self._published
+        fetch = ha(
+            "published_fetch",
+            cfg=cfg,
+            now=now.timestamp(),
+            fetched_at=self._published_fetched,
+            cached_from=cached[0][0] if cached else None,
+            cached_until=cached[-1][0] if cached else None,
+        )
+        if not fetch["fetch"]:
+            return self._published
+        try:
+            rows = await self.hass.async_add_executor_job(
+                vulpes_ems.energyzero_published, fetch["today"], fetch["quarter"]
+            )
+        except ValueError as err:
+            _LOGGER.warning("Published quarter-hour prices unavailable, keeping cached data: %s", err)
+            return self._published
+        self._published = [list(r) for r in rows]
+        self._published_fetched = now.timestamp()
+        return self._published
+
     async def _price_drivers(self, cfg: dict[str, Any], now: datetime) -> dict[str, list | None]:
         past = self._drivers["past"] or []
         fetch = ha(
@@ -440,6 +467,8 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         took["statistics"], t = time.monotonic() - t, time.monotonic()
         wholesale = await self._wholesale_history(cfg, now)
         took["wholesale"], t = time.monotonic() - t, time.monotonic()
+        published = await self._published_prices(cfg, now)
+        took["published prices"], t = time.monotonic() - t, time.monotonic()
         drivers = await self._price_drivers(cfg, now)
         took["price drivers"], t = time.monotonic() - t, time.monotonic()
         request = {
@@ -454,6 +483,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "price_unit": price.attributes.get("unit_of_measurement") if price else None,
             "stats": self._stats,
             "wholesale": wholesale,
+            "published": published,
             "price_drivers": drivers,
         }
         try:

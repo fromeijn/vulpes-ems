@@ -155,6 +155,12 @@ pub const OPS: &[(&str, Op)] = &[
             req_num(r, "now")?,
         ))
     }),
+    ("price_now", |r| {
+        Ok(control::price_now(
+            r.get("plan").filter(|p| !p.is_null()),
+            req_num(r, "now")?,
+        ))
+    }),
     ("control_state", |r| {
         let last = r.get("last").filter(|l| !l.is_null());
         Ok(json!(control::state_of(
@@ -211,6 +217,7 @@ pub const OPS: &[(&str, Op)] = &[
     ("wholesale_merge", request::wholesale_merge),
     ("price_drivers_fetch", request::price_drivers_fetch),
     ("price_drivers_merge", request::price_drivers_merge),
+    ("published_fetch", request::published_fetch),
     ("redact_settings", |r| {
         Ok(history::redact_settings(obj(r, "cfg")?))
     }),

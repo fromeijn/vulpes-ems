@@ -34,6 +34,7 @@ CONF_TARIFF_A = "tariff_a"
 CONF_TARIFF_B = "tariff_b"
 CONF_EXPORT_A = "export_a"
 CONF_EXPORT_B = "export_b"
+CONF_BILLING_INTERVAL = "billing_interval"
 
 # Modes (step "modes"); each mode key from core.C["modes"] is a boolean field too
 CONF_POWER_CONTROL = "power_control"
@@ -56,6 +57,8 @@ CONF_KWP = "kwp"
 CONF_POWER_ENTITY = "power_entity"
 
 WHOLESALE_SOURCES = ["energyzero", "none"]
+# How the contract bills; "quarter" is the default, also for settings from before the option.
+BILLING_INTERVALS = ["quarter", "hour"]
 
 # First automatic calibration after setup: late enough not to slow down startup.
 CALIBRATION_DELAY_S = 600

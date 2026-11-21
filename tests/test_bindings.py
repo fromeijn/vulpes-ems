@@ -145,6 +145,28 @@ def test_plan_errors_raise_value_error(payload):
         vulpes_ems.plan(payload)
 
 
+def test_price_now_for_the_energy_dashboard():
+    start = NOW - NOW % 900
+    plan = {"slots": [
+        {"start": start, "import_price": 0.31, "export_price": 0.12, "price_known": True},
+        {"start": start + 900, "import_price": 0.25, "export_price": 0.10, "price_known": False},
+    ]}
+    assert ha("price_now", plan=plan, now=NOW) == {"import": 0.31, "export": 0.12}
+    assert ha("price_now", plan=plan, now=start + 900) == {"import": None, "export": None}
+    assert ha("price_now", plan=None, now=NOW) == {"import": None, "export": None}
+
+
+def test_published_prices_fetch_plan():
+    """Quarter-hour billing (the default) fetches; the date is checked before any request."""
+    fetch = ha("published_fetch", cfg={"wholesale_source": "energyzero"}, now=NOW, fetched_at=None)
+    assert fetch["fetch"] is True and fetch["quarter"] is True
+    assert len(fetch["today"]) == 10
+    hourly = {"wholesale_source": "energyzero", "billing_interval": "hour"}
+    assert ha("published_fetch", cfg=hourly, now=NOW, fetched_at=None) == {"fetch": False}
+    with pytest.raises(ValueError, match="bad date"):
+        vulpes_ems.energyzero_published("21-11-2026", True)
+
+
 def test_price_drivers_without_a_request_fetches_nothing():
     # Nothing asked: no network, both parts null.
     assert json.loads(vulpes_ems.price_drivers("{}")) == {"past": None, "ahead": None}
@@ -263,6 +285,7 @@ def test_every_ha_op_answers():
         "command": {"cfg": HA_CFG, "plan": plan, "now": NOW, "failed": False},
         "safe_command": {"cfg": HA_CFG, "now": NOW, "fallback": False},
         "control_state": {"active": True, "last": {"fallback": False}, "error": None},
+        "price_now": {"plan": plan, "now": NOW},
         "script_result": {"cmd": {"mode": "hold"}, "error": None, "timed_out": False, "failures": 0, "now": NOW},
         "stats_start": {"now": NOW},
         "plane_from_array": {"array": {"direction": "s", "tilt": 35, "kwp": 3}, "inverter_w": 2800, "existing": None},
@@ -286,6 +309,13 @@ def test_every_ha_op_answers():
             "past_cached_until": None,
         },
         "price_drivers_merge": {"now": NOW, "cached": [[NOW - 3600, 0.5, None]], "fetched": [[NOW, 0.4, 0.2]]},
+        "published_fetch": {
+            "cfg": {"wholesale_source": "energyzero"},
+            "now": NOW,
+            "fetched_at": None,
+            "cached_from": None,
+            "cached_until": None,
+        },
         "known_prices": {"price_attributes": prices, "price_unit": "EUR/kWh", "timezone": "UTC"},
         "load_series": {"cfg": HA_CFG, "stats": stats},
     }
@@ -353,6 +383,7 @@ def test_plan_ha_offline():
     assert plan["inputs"] == {
         "load_hours": 24 * 7 - 1,
         "known_price_slots": 24,
+        "published_price_slots": 0,
         "wholesale_hours": 0,
         "price_driver_hours": 0,
     }

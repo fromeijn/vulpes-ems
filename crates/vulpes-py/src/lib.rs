@@ -103,6 +103,20 @@ fn energyzero_hourly(py: Python<'_>, start: String, end: String) -> PyResult<Vec
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Published NL day-ahead wholesale prices `(start, end, EUR/kWh excl. VAT)`
+/// from EnergyZero around the market day `today` (`YYYY-MM-DD`, as
+/// `vulpes_ems.ha("published_fetch", …)` returns it): tomorrow and today once
+/// tomorrow is published, else today and yesterday; per 15 minutes when
+/// `quarter`, else per hour. Runs without the GIL (network).
+#[pyfunction]
+fn energyzero_published(py: Python<'_>, today: String, quarter: bool) -> PyResult<Vec<(i64, i64, f64)>> {
+    let today = today
+        .parse::<chrono::NaiveDate>()
+        .map_err(|e| PyValueError::new_err(format!("bad date '{today}': {e}")))?;
+    py.detach(|| vulpes_sources::energyzero::fetch_published(today, quarter))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 /// Wind and solar at the price reference points from a JSON `DriversRequest`
 /// (as `vulpes_ems.ha("price_drivers_fetch", …)` returns it); returns a JSON
 /// `DriversResponse`. Runs without the GIL (it fetches weather, one request
@@ -127,6 +141,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(record_ha, m)?)?;
     m.add_function(wrap_pyfunction!(review_ha, m)?)?;
     m.add_function(wrap_pyfunction!(history_cache, m)?)?;
+    m.add_function(wrap_pyfunction!(energyzero_published, m)?)?;
     m.add_function(wrap_pyfunction!(export_history, m)?)?;
     Ok(())
 }

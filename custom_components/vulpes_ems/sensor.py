@@ -13,10 +13,11 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfEnergy, UnitOfPower
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
@@ -267,6 +268,7 @@ async def async_setup_entry(
         VulpesSensor(coordinator, entry, d) for d in SENSORS if compare or d.key != "agreement_today"
     ]
     entities.append(SolarCalibrationSensor(coordinator, entry))
+    entities += [PriceNowSensor(coordinator, entry, "import"), PriceNowSensor(coordinator, entry, "export")]
     entities += [StatusSensor(coordinator, entry), LastPlanSensor(coordinator, entry), EnergyDataSensor(coordinator, entry)]
     has = {"planes": bool(coordinator.cfg.get(CONF_PLANES)), "script": bool(coordinator.control_script)}
     for d in REVIEW_SENSORS:
@@ -343,6 +345,46 @@ class VulpesSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
         if key == "agreement_today":
             return {"compared": self.coordinator.compared, "agreed": self.coordinator.agree}
         return None
+
+
+class PriceNowSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
+    """The import or export price now (currency/kWh), for the Energy dashboard.
+
+    Only a known price: the price sensor's, or the published EnergyZero price
+    where it has none. Unknown while the price for now is only forecast.
+    """
+
+    _attr_has_entity_name = True
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 3
+
+    def __init__(self, coordinator: VulpesCoordinator, entry: VulpesConfigEntry, key: str) -> None:
+        super().__init__(coordinator)
+        self._key = key
+        self._attr_translation_key = f"price_{key}_now"
+        self._attr_unique_id = f"{entry.entry_id}_price_{key}_now"
+        self._attr_device_info = device_info(entry)
+        # The Energy dashboard takes a price entity in <currency>/kWh.
+        self._attr_native_unit_of_measurement = f"{coordinator.hass.config.currency}/kWh"
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # The price changes at each quarter hour, between plans.
+        self.async_on_remove(
+            async_track_time_change(self.hass, self._new_quarter, minute=[0, 15, 30, 45], second=0)
+        )
+
+    @callback
+    def _new_quarter(self, _now: Any) -> None:
+        self.async_write_ha_state()
+
+    @property
+    def available(self) -> bool:
+        return True  # a failed refresh leaves the earlier plan's known prices valid
+
+    @property
+    def native_value(self) -> float | None:
+        return ha("price_now", plan=self.coordinator.data, now=dt_util.utcnow().timestamp())[self._key]
 
 
 class ControlSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
