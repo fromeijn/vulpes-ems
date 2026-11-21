@@ -55,7 +55,11 @@ def _request(**overrides):
 def test_version_matches_package():
     from importlib.metadata import version
 
-    assert vulpes_ems.__version__ == version("vulpes-ems")
+    from packaging.version import Version
+
+    # `__version__` is the Cargo version (`0.7.0-rc.1`), the package's the PEP 440 form
+    # (`0.7.0rc1`): the same version, spelled differently for pre-releases.
+    assert Version(vulpes_ems.__version__) == Version(version("vulpes-ems"))
 
 
 def test_quarter_hour_floor():
