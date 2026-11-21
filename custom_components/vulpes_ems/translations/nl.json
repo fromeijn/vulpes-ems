@@ -425,7 +425,8 @@
           "off": "Uit (schaduwmodus)",
           "following_plan": "Volgt het plan",
           "fallback": "Terugvalstand (eigen verbruik)",
-          "script_error": "Script mislukt (zie het attribuut error)"
+          "script_error": "Script mislukt (zie het attribuut error)",
+          "waiting": "Wacht op het eerste plan"
         }
       },
       "status": {

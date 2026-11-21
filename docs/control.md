@@ -5,13 +5,13 @@ Vulpes starts in shadow mode: it plans and publishes sensors, but changes nothin
 ## How it works
 
 1. In the modes step, tick the modes your system can do and pick a **control script**.
-2. Vulpes adds two entities: the **Active** switch (off by default) and the **Battery control** sensor (`off`, `following_plan`, `fallback` or `script_error`).
+2. Vulpes adds two entities: the **Active** switch (off by default) and the **Battery control** sensor (`off`, `following_plan`, `fallback`, `script_error`, or `waiting` while the first plan after a restart runs).
 3. While Active is on, Vulpes runs the script with the variables below:
    - every 15 minutes, 20 s after the quarter hour, right after planning;
    - immediately when you turn Active on;
    - when the `vulpes_ems.update_plan` action is called (see [Update the plan now](#update-the-plan-now)).
 
-   The switch keeps its state across restarts.
+   The switch keeps its state across restarts. After a restart Vulpes applies the first plan as soon as it is ready, usually within seconds of Home Assistant having started; it sends no safe command before it, and the Battery control sensor shows `waiting` until then. If that first plan fails, the safe command (`fallback: true`) is sent, as for any failed plan.
 4. When you turn Active off, Vulpes sends the safe command once, with `fallback: false`, so your inverter returns to normal self-consumption. The same happens when the integration is unloaded while Active is on: for example when you change its settings, clear the script, or disable or delete the entry. After a settings change the switch comes back on and Vulpes applies the plan again straight away.
 
 Vulpes waits for the script to finish, for at most 60 seconds. So keep it short: no delays or long waits.

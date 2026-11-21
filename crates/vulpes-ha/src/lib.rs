@@ -210,6 +210,7 @@ pub const OPS: &[(&str, Op)] = &[
     ("wholesale_fetch", request::wholesale_fetch),
     ("wholesale_merge", request::wholesale_merge),
     ("price_drivers_fetch", request::price_drivers_fetch),
+    ("price_drivers_merge", request::price_drivers_merge),
     ("redact_settings", |r| {
         Ok(history::redact_settings(obj(r, "cfg")?))
     }),
@@ -251,6 +252,11 @@ pub fn call(op: &str, request: &str) -> Result<String> {
 /// Record a tick in the history file at `path` (see [`history::record_ha`]).
 pub fn record_ha_json(path: &str, request: &str) -> Result<String> {
     Ok(history::record_ha(path, &serde_json::from_str(request)?)?.to_string())
+}
+
+/// The price history in the file at `path`, for the cache at startup (see [`history::cache_ha`]).
+pub fn history_cache_json(path: &str, request: &str) -> Result<String> {
+    Ok(history::cache_ha(path, &serde_json::from_str(request)?)?.to_string())
 }
 
 /// Review the history file at `path` (see [`history::review_ha`]).
@@ -339,7 +345,7 @@ mod tests {
         );
         assert_eq!(
             r("control_state", json!({"active": true, "last": null})),
-            json!("fallback")
+            json!("waiting")
         );
         assert_eq!(r("safe_command", json!({"now": 0}))["fallback"], json!(true));
         assert_eq!(

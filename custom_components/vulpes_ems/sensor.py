@@ -299,12 +299,19 @@ class VulpesSensor(CoordinatorEntity[VulpesCoordinator], SensorEntity):
             self._attr_options = ha("enabled_modes", cfg=coordinator.cfg)
 
     @property
+    def available(self) -> bool:
+        # Unavailable until the first plan, which runs after setup.
+        return super().available and self.coordinator.data is not None
+
+    @property
     def native_value(self) -> Any:
         return self.entity_description.value(self.coordinator)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         data = self.coordinator.data
+        if data is None:
+            return None
         key = self.entity_description.key
         iso = lambda t: dt_util.utc_from_timestamp(t).isoformat()  # noqa: E731
         if key == "planned_mode":

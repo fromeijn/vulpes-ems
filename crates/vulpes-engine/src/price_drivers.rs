@@ -103,32 +103,43 @@ pub fn rows(wind: &[HashMap<i64, f64>], solar: &[HashMap<i64, f64>]) -> Vec<Driv
     Drivers::from_points(wind, solar).to_rows()
 }
 
-fn fetch_range(range: open_meteo::Range) -> Result<Vec<DriverRow>> {
-    let fetch = |p: &RefPoint, var: &str| -> Result<HashMap<i64, f64>> {
-        let series = open_meteo::fetch(&open_meteo::Request {
-            location: Location {
-                lat: p.lat,
-                lon: p.lon,
-            },
-            models: &[MODEL],
-            vars: &[var],
-            range,
-        })
-        .map_err(|e| Error::Weather(e.to_string()))?;
-        point_hours(series, var, p)
-    };
-    let wind: Vec<_> = WIND_POINTS
-        .iter()
-        .map(|p| fetch(p, WIND_VAR))
-        .collect::<Result<_>>()?;
-    let solar: Vec<_> = SOLAR_POINTS
-        .iter()
-        .map(|p| fetch(p, SOLAR_VAR))
-        .collect::<Result<_>>()?;
+/// The reference points in request order: the wind points, then the solar points.
+fn points() -> impl Iterator<Item = &'static RefPoint> {
+    WIND_POINTS.iter().chain(SOLAR_POINTS.iter())
+}
+
+/// Driver rows from the series per point, in [`points`] order: wind from the
+/// wind points, solar from the solar points.
+fn point_rows(per_point: Vec<Vec<open_meteo::WeatherSeries>>) -> Result<Vec<DriverRow>> {
+    let mut wind = Vec::new();
+    let mut solar = Vec::new();
+    for (i, (p, series)) in points().zip(per_point).enumerate() {
+        if i < WIND_POINTS.len() {
+            wind.push(point_hours(series, WIND_VAR, p)?);
+        } else {
+            solar.push(point_hours(series, SOLAR_VAR, p)?);
+        }
+    }
+    if wind.len() != WIND_POINTS.len() || solar.len() != SOLAR_POINTS.len() {
+        return Err(Error::Weather("weather missing for some reference points".into()));
+    }
     Ok(rows(&wind, &solar))
 }
 
-/// Fetch the requested drivers: one request per reference point and range.
+/// One request for all reference points over `range`.
+fn fetch_range(range: open_meteo::Range) -> Result<Vec<DriverRow>> {
+    let locations: Vec<Location> = points()
+        .map(|p| Location {
+            lat: p.lat,
+            lon: p.lon,
+        })
+        .collect();
+    let per_point = open_meteo::fetch_many(&locations, &[MODEL], &[WIND_VAR, SOLAR_VAR], range)
+        .map_err(|e| Error::Weather(e.to_string()))?;
+    point_rows(per_point)
+}
+
+/// Fetch the requested drivers: one request per range for all reference points.
 /// The parts fail on their own, so a failing history doesn't hold back the
 /// forecast; only an invalid request is an error.
 pub fn fetch(req: &DriversRequest) -> Result<DriversResponse> {
@@ -230,6 +241,35 @@ mod tests {
         let err = point_hours(vec![s(SOLAR_VAR, vec![(0, 1.0)])], WIND_VAR, p).unwrap_err();
         assert!(err.to_string().contains("no wind_speed_100m"), "{err}");
         assert!(err.to_string().contains(p.label));
+    }
+
+    #[test]
+    fn point_rows_take_wind_and_solar_from_their_own_points() {
+        let s = |var: &str, v: f64| open_meteo::WeatherSeries {
+            model: MODEL.into(),
+            var: var.into(),
+            points: (0..4).map(|q| (q * 900, v)).collect(),
+        };
+        // Every point has both variables; only its own one may be used.
+        let both = |w: f64, r: f64| vec![s(WIND_VAR, w), s(SOLAR_VAR, r)];
+        let per_point = vec![
+            both(12.0, 999.0),
+            both(12.0, 999.0),
+            both(-1.0, 200.0),
+            both(-1.0, 400.0),
+        ];
+        let expected = rows(
+            &[[(0, 12.0)].into(), [(0, 12.0)].into()],
+            &[[(0, 200.0)].into(), [(0, 400.0)].into()],
+        );
+        assert_eq!(point_rows(per_point.clone()).unwrap(), expected);
+        // A point without data, or missing points, fail the range.
+        let mut no_solar = per_point.clone();
+        no_solar[3] = vec![s(WIND_VAR, 1.0)];
+        let err = point_rows(no_solar).unwrap_err().to_string();
+        assert!(err.contains(SOLAR_POINTS[1].label), "{err}");
+        assert!(point_rows(per_point[..3].to_vec()).is_err());
+        assert_eq!(points().count(), WIND_POINTS.len() + SOLAR_POINTS.len());
     }
 
     #[test]

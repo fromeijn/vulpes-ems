@@ -278,7 +278,10 @@ def test_every_ha_op_answers():
             "now": NOW,
             "past_fetched_at": None,
             "ahead_fetched_at": None,
+            "past_cached_from": None,
+            "past_cached_until": None,
         },
+        "price_drivers_merge": {"now": NOW, "cached": [[NOW - 3600, 0.5, None]], "fetched": [[NOW, 0.4, 0.2]]},
         "known_prices": {"price_attributes": prices, "price_unit": "EUR/kWh", "timezone": "UTC"},
         "load_series": {"cfg": HA_CFG, "stats": stats},
     }
@@ -408,6 +411,7 @@ def test_record_and_export_history(tmp_path):
         "stats": {"sensor.import": [[hour - 3600, 0.5]], "sensor.export": [[hour - 3600, 0.0]],
                   "sensor.pv_energy": [[hour - 3600, 1.0]]},
         "wholesale": [[hour - 3600, 0.1]],
+        "price_drivers_past": [[hour - 7200, 0.5, None], [hour - 3600, 0.6, 0.2]],
     }
     out = json.loads(vulpes_ems.record_ha(db, json.dumps(request)))
     assert out["agreement_today"] == {"compared": 1, "agreed": 1, "pct": 100.0}
@@ -418,6 +422,15 @@ def test_record_and_export_history(tmp_path):
     assert history["plan_slots"][0]["mode"] == "hold" and history["plan_slots"][0]["followed"] is True
     assert history["samples"]["soc"] == [[start, 60.0]]
     assert history["forecasts"]["pv_w"]
+    cache = json.loads(vulpes_ems.history_cache(db, json.dumps({"now": NOW})))
+    assert cache == {
+        "wholesale": [[hour - 3600, 0.1]],
+        "price_drivers_past": [[hour - 7200, 0.5, None], [hour - 3600, 0.6, 0.2]],
+    }
+    empty = json.loads(vulpes_ems.history_cache(str(tmp_path / "new" / "vulpes.db"), json.dumps({"now": NOW})))
+    assert empty == {"wholesale": [], "price_drivers_past": []}
+    with pytest.raises(ValueError, match="history"):
+        vulpes_ems.history_cache("", json.dumps({"now": NOW}))
     redacted = ha("redact_settings", cfg=request["cfg"])
     assert "sensor." not in json.dumps(redacted)
     with pytest.raises(ValueError, match="history"):

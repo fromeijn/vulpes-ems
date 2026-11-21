@@ -258,7 +258,7 @@ pub fn calibrate_ha(req: &Value) -> Result<Value> {
 
 /// The wholesale window at `now`: the first and last UTC date to hold, and
 /// the start of the first date in Unix seconds.
-fn wholesale_window(now: f64) -> Result<(NaiveDate, NaiveDate, i64)> {
+pub(crate) fn wholesale_window(now: f64) -> Result<(NaiveDate, NaiveDate, i64)> {
     let t: DateTime<Utc> = DateTime::from_timestamp(now as i64, 0)
         .ok_or_else(|| Error::Message("'now' is out of range".into()))?;
     let start = (t - Duration::days(WHOLESALE_HISTORY_DAYS)).date_naive();
@@ -285,14 +285,26 @@ pub fn wholesale_fetch(req: &Value) -> Result<Value> {
         return Ok(json!({"fetch": false}));
     }
     let (window, end, window_ts) = wholesale_window(now)?;
+    let start = fetch_start(req, ("cached_from", "cached_until"), (window, window_ts), end);
+    Ok(json!({"fetch": true, "start": start.to_string(), "end": end.to_string()}))
+}
+
+/// The first date to fetch up to `end`: with a cache (its first and last hour
+/// under `keys`) that reaches back to the start of the window, the date of its
+/// last hour; otherwise the whole window from its first date.
+fn fetch_start(
+    req: &Value,
+    keys: (&str, &str),
+    (window, window_ts): (NaiveDate, i64),
+    end: NaiveDate,
+) -> NaiveDate {
     let cached = |key: &str| req.get(key).and_then(as_f64).map(|t| t as i64);
-    let start = match (cached("cached_from"), cached("cached_until")) {
+    match (cached(keys.0), cached(keys.1)) {
         (Some(from), Some(until)) if from <= window_ts => {
             DateTime::from_timestamp(until, 0).map_or(window, |t| t.date_naive().clamp(window, end))
         }
         _ => window,
-    };
-    Ok(json!({"fetch": true, "start": start.to_string(), "end": end.to_string()}))
+    }
 }
 
 /// The cached wholesale prices (`cached`) with the fetched ones (`fetched`)
@@ -310,10 +322,14 @@ pub fn wholesale_merge(req: &Value) -> Result<Value> {
 /// Whether to fetch weather at the price reference points now, and what:
 /// the day-ahead history over the wholesale window once a day, the forecast
 /// every [`PRICE_DRIVERS_AHEAD_REFRESH_S`]. Only with EnergyZero prices: the
-/// points are chosen for the Dutch market. `req` holds `cfg`, `now`, and
+/// points are chosen for the Dutch market. `req` holds `cfg`, `now`,
 /// `past_fetched_at` and `ahead_fetched_at` (Unix seconds of the last
-/// successful fetch of each part, or null). The result's `request` goes to
-/// `vulpes_ems.price_drivers` as is.
+/// successful fetch of each part, or null), and `past_cached_from` and
+/// `past_cached_until` (the first and last hour of the cached history, or
+/// null). As for the wholesale prices, a cache that reaches back to the start
+/// of the window only needs the dates from its last hour on. The result's
+/// `request` goes to `vulpes_ems.price_drivers` as is; the history it fetches
+/// goes to [`price_drivers_merge`] with the cache.
 pub fn price_drivers_fetch(req: &Value) -> Result<Value> {
     let cfg = obj(req, "cfg")?;
     let now = req_num(req, "now")?;
@@ -325,10 +341,17 @@ pub fn price_drivers_fetch(req: &Value) -> Result<Value> {
         .ok_or_else(|| Error::Message("'now' is out of range".into()))?;
     let mut request = serde_json::Map::new();
     if due("past_fetched_at", PRICE_DRIVERS_PAST_REFRESH_S) {
-        let start = (t - Duration::days(WHOLESALE_HISTORY_DAYS)).date_naive();
+        let (window, _, window_ts) = wholesale_window(now)?;
+        let today = t.date_naive();
+        let start = fetch_start(
+            req,
+            ("past_cached_from", "past_cached_until"),
+            (window, window_ts),
+            today,
+        );
         request.insert(
             "past".into(),
-            json!({"start": start.to_string(), "end": t.date_naive().to_string()}),
+            json!({"start": start.to_string(), "end": today.to_string()}),
         );
     }
     if due("ahead_fetched_at", PRICE_DRIVERS_AHEAD_REFRESH_S) {
@@ -338,6 +361,39 @@ pub fn price_drivers_fetch(req: &Value) -> Result<Value> {
         return Ok(json!({"fetch": false}));
     }
     Ok(json!({"fetch": true, "request": request}))
+}
+
+/// The cached history of the price drivers (`cached`) with the fetched one
+/// (`fetched`) merged in, both `[hour, wind, solar]` rows (an index may be
+/// null): a fetched row replaces a cached one, and hours before the wholesale
+/// window at `now` are dropped. In time order.
+pub fn price_drivers_merge(req: &Value) -> Result<Value> {
+    let (_, _, window_ts) = wholesale_window(req_num(req, "now")?)?;
+    let mut rows: BTreeMap<i64, (Option<f64>, Option<f64>)> = driver_rows(req, "cached").collect();
+    rows.extend(driver_rows(req, "fetched"));
+    Ok(Value::Array(
+        rows.range(window_ts..)
+            .map(|(t, (w, s))| json!([t, w, s]))
+            .collect(),
+    ))
+}
+
+/// `[hour, wind, solar]` rows under `key`; malformed rows are skipped, and a
+/// non-numeric index counts as missing.
+pub(crate) fn driver_rows<'a>(
+    req: &'a Value,
+    key: &str,
+) -> impl Iterator<Item = (i64, (Option<f64>, Option<f64>))> + 'a {
+    req.get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let row = row.as_array()?;
+            let t = row.first().and_then(as_f64)?;
+            let index = |i: usize| row.get(i).and_then(as_f64).filter(|v| v.is_finite());
+            Some((t as i64, (index(1), index(2))))
+        })
 }
 
 #[cfg(test)]
@@ -558,6 +614,64 @@ mod tests {
             json!([[w, 0.1]])
         );
         assert!(wholesale_merge(&json!({"cached": []})).is_err());
+    }
+
+    #[test]
+    fn price_drivers_history_only_fetches_after_the_cache() {
+        let c = json!({"wholesale_source": "energyzero"});
+        let now = 1_794_139_200.0; // 2026-11-08 12:00 UTC, window from 2026-08-10
+        let w = 1_786_320_000.0;
+        let past = |from: Value, until: Value| {
+            price_drivers_fetch(&json!({
+                "cfg": c, "now": now, "ahead_fetched_at": now,
+                "past_cached_from": from, "past_cached_until": until,
+            }))
+            .unwrap()["request"]["past"]
+                .clone()
+        };
+        let range = |start: &str| json!({"start": start, "end": "2026-11-08"});
+        // A cache from the window start on: from the date of its last hour.
+        assert_eq!(
+            past(json!(w), json!(now - 86_400.0 - 3600.0)),
+            range("2026-11-07")
+        );
+        assert_eq!(past(json!(w - 86_400.0), json!(now)), range("2026-11-08"));
+        // No cache, or one that starts after the window: the whole window.
+        assert_eq!(past(Value::Null, Value::Null), range("2026-08-10"));
+        assert_eq!(past(json!(w + 3600.0), json!(now)), range("2026-08-10"));
+        // A cache that ended before the window: clamped to it.
+        assert_eq!(
+            past(json!(w - 400.0 * 86_400.0), json!(w - 200.0 * 86_400.0)),
+            range("2026-08-10")
+        );
+        // The cache doesn't make the history due: once a day as before.
+        let not_due = price_drivers_fetch(&json!({
+            "cfg": c, "now": now, "past_fetched_at": now - 3600.0, "ahead_fetched_at": now,
+            "past_cached_from": w, "past_cached_until": now,
+        }))
+        .unwrap();
+        assert_eq!(not_due, json!({"fetch": false}));
+    }
+
+    #[test]
+    fn price_drivers_merge_replaces_and_trims() {
+        let now = 1_794_139_200.0;
+        let w = 1_786_320_000_i64;
+        let merged = price_drivers_merge(&json!({
+            "now": now,
+            "cached": [[w - 3600, 0.5, 0.1], [w, 0.4, null], [w + 3600, 0.3, 0.2], "junk", [w + 7200]],
+            "fetched": [[w + 3600, 0.35, 0.25], [w + 7200, null, 0.3]],
+        }))
+        .unwrap();
+        assert_eq!(
+            merged,
+            json!([[w, 0.4, null], [w + 3600, 0.35, 0.25], [w + 7200, null, 0.3]])
+        );
+        assert_eq!(price_drivers_merge(&json!({"now": now})).unwrap(), json!([]));
+        assert!(price_drivers_merge(&json!({"cached": []})).is_err());
+        // The merged rows are what the plan request takes as `price_drivers.past`.
+        let rows: Vec<vulpes_price::wholesale::DriverRow> = serde_json::from_value(merged).unwrap();
+        assert_eq!(rows[0], (w, Some(0.4), None));
     }
 
     #[test]

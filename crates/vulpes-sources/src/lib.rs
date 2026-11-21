@@ -38,9 +38,21 @@ impl Location {
     }
 }
 
+/// The longest a whole request may take. The largest request (120 days of
+/// 15-minute weather for the solar calibration) takes about 2 s.
+pub const TIMEOUT: Duration = Duration::from_secs(20);
+/// The longest connecting may take, over all of the host's addresses. ureq
+/// tries them in turn and gives the first two thirds of this when there are
+/// two, so a broken IPv6 route costs about 4 s before IPv4 is tried, instead
+/// of most of [`TIMEOUT`].
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
+// With an IPv6 and an IPv4 address, IPv4 still gets at least a second.
+const _: () = assert!(CONNECT_TIMEOUT.as_secs() / 3 >= 1 && CONNECT_TIMEOUT.as_secs() < TIMEOUT.as_secs());
+
 pub(crate) fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(60)))
+        .timeout_global(Some(TIMEOUT))
+        .timeout_connect(Some(CONNECT_TIMEOUT))
         .user_agent(concat!("vulpes-ems/", env!("CARGO_PKG_VERSION")))
         .build()
         .into()
@@ -49,6 +61,12 @@ pub(crate) fn agent() -> ureq::Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_gives_up_on_a_hanging_address() {
+        let t = agent().config().timeouts();
+        assert_eq!((t.global, t.connect), (Some(TIMEOUT), Some(CONNECT_TIMEOUT)));
+    }
 
     #[test]
     fn rounds_location() {

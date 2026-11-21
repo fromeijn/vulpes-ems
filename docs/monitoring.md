@@ -14,6 +14,9 @@ Every 15 minutes, after control has run, Vulpes records:
 | The quarter hour's planned mode and prices, the plan's terminal value, whether the Active switch was on and the script ran the plan, and the state of the user's mode entity as a Vulpes mode | `plan_slots` | 400 days |
 | The battery's state of charge | `soc`, 15 minutes | 400 days |
 | Hourly energy from and to the grid, from PV, into and out of the battery; the house load; PV power; wholesale prices | `grid.import`, `grid.export`, `pv.total`, `battery.charge`, `battery.discharge`, `load.house`, `pv.total.power`, `price.wholesale.nl` | 400 days |
+| The wind and solar indices at the price reference points, as forecast a day ahead (see `docs/price.md`) | `price.driver.wind`, `price.driver.solar` | 400 days |
+
+The wholesale prices and the reference-point indices also serve as the price cache: at startup Vulpes reads them back, so it only fetches the days after them. They are written in full, but only hours that are new or changed.
 
 A quarter hour can be recorded more than once: after a settings change, when Active is turned on, or when the `vulpes_ems.update_plan` action is called. Its slot record then shows the last plan's mode and prices; its state of charge stays the first reading, the one closest to the start of the quarter hour.
 
@@ -80,6 +83,8 @@ The Status sensor is the worst state of these checks (`not_enough_data` counts a
 | `soc_tracking` | above 5 points per hour over 7 days | – |
 | `coverage` | PV planes without solar energy statistics (no load, no savings), or no battery charge/discharge statistics (no savings) | – |
 
+After a start, the first plan runs once Home Assistant has started. Until it is done, for at most 30 minutes, the checks of what it fetches, records or sends (`plan`, `energy_data`, `wholesale`, `price_drivers`, `control`) are ok with the detail "waiting for the first plan".
+
 A silent SOC sensor only counts while the plan expects the battery to move, because a full or empty battery can legitimately report nothing new for hours.
 
 **Repairs:** a repair issue opens when the battery SOC has been unavailable for an hour, there has been no plan for an hour, the energy statistics have had no new data for a day, or the control script failed three times in a row while Active is on. It closes by itself when the cause is gone; the script issue also closes when Active is switched off.
@@ -93,6 +98,5 @@ The diagnostics download contains the settings with entity ids, the script and m
 - Actuals are hourly statistics, so the actual cost uses the hour's mean price; differences between quarter-hour prices within an hour are not visible.
 - Measured PV is after curtailment, so in hours the plan switched solar off, the baseline sees less PV than it could have had.
 - Past days are reviewed with the current battery settings; after a settings change they are scored again with the new ones.
-- When the first plan fails at startup, Home Assistant retries the setup and no entities exist yet, the Status sensor included.
 - With PV planes but no solar energy statistics, the house load cannot be derived: savings and load accuracy are left out, and the coverage check says why.
 - Without the battery's charge and discharge statistics, the house load includes the battery's own power: a baseline simulated on it would count the battery twice, so the savings are left out, and the coverage check says why.

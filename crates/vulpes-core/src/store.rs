@@ -57,6 +57,10 @@ pub mod keys {
     pub const PV_TOTAL_POWER: &str = "pv.total.power";
     /// Day-ahead wholesale price for the Netherlands (EUR/kWh, hourly mean).
     pub const WHOLESALE_NL: &str = "price.wholesale.nl";
+    /// Wind and solar indices at the NL price reference points, as forecast a
+    /// day ahead (hourly; `vulpes_price::wholesale::DriverRow`).
+    pub const PRICE_DRIVER_WIND: &str = "price.driver.wind";
+    pub const PRICE_DRIVER_SOLAR: &str = "price.driver.solar";
     /// Energy from and to the grid, from PV, into and out of the battery (kWh per hour).
     pub const GRID_IMPORT: &str = "grid.import";
     pub const GRID_EXPORT: &str = "grid.export";

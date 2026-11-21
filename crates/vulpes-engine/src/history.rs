@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use vulpes_core::store::keys;
 use vulpes_core::{ForecastPoint, PlanSlotRecord, SeriesKind, Store};
+use vulpes_price::wholesale::DriverRow;
 
 /// Slot length (s).
 const SLOT_S: i64 = 900;
@@ -91,6 +92,10 @@ pub struct RecordRequest {
     /// Hourly wholesale prices (EUR/kWh).
     #[serde(default)]
     pub wholesale: Vec<(i64, f64)>,
+    /// The day-ahead wind and solar indices at the price reference points
+    /// (the drivers' history), kept so a restart only fetches what's missing.
+    #[serde(default)]
+    pub price_drivers_past: Vec<DriverRow>,
     /// Start of the local day the response's `today` covers (Unix seconds).
     #[serde(default)]
     pub day_start: Option<i64>,
@@ -121,6 +126,22 @@ fn series(
     store.ensure_series(key, unit, kind)?;
     store.put_samples(key, step, rows)?;
     Ok(())
+}
+
+/// Write the rows of a `Mean` series that are new or differ from the stored
+/// value; non-finite values are skipped. Returns the rows written.
+fn changed_series(store: &mut Store, key: &str, unit: &str, step: i64, rows: &[(i64, f64)]) -> Result<usize> {
+    let rows: Vec<(i64, f64)> = rows.iter().copied().filter(|(_, v)| v.is_finite()).collect();
+    let (Some(from), Some(to)) = (rows.iter().map(|r| r.0).min(), rows.iter().map(|r| r.0).max()) else {
+        return Ok(0);
+    };
+    let stored: BTreeMap<i64, f64> = store.samples(key, step, from, to + 1)?.into_iter().collect();
+    let changed: Vec<(i64, f64)> = rows
+        .into_iter()
+        .filter(|(t, v)| stored.get(t) != Some(v))
+        .collect();
+    series(store, key, unit, SeriesKind::Mean, step, &changed)?;
+    Ok(changed.len())
 }
 
 /// Hourly means of the plan's slots, for hours all four quarter hours of which are planned.
@@ -188,6 +209,8 @@ fn prune(store: &mut Store, now: i64) -> Result<()> {
         keys::LOAD_HOUSE,
         keys::PV_TOTAL_POWER,
         keys::WHOLESALE_NL,
+        keys::PRICE_DRIVER_WIND,
+        keys::PRICE_DRIVER_SOLAR,
     ] {
         store.prune_samples(key, before)?;
     }
@@ -264,21 +287,21 @@ pub fn record(store: &mut Store, req: &RecordRequest) -> Result<RecordResponse> 
         3600,
         &recent(&req.load),
     )?;
-    // Wholesale prices: the recent past and whatever is published ahead.
-    let wholesale: Vec<(i64, f64)> = req
-        .wholesale
-        .iter()
-        .copied()
-        .filter(|(t, v)| *t >= since && v.is_finite())
-        .collect();
-    series(
-        store,
-        keys::WHOLESALE_NL,
-        "EUR/kWh",
-        SeriesKind::Mean,
-        3600,
-        &wholesale,
-    )?;
+    // Wholesale prices and the price drivers: all of them, so a restart only
+    // fetches what's missing. Only new or changed hours are written.
+    let hourly = |f: fn(&DriverRow) -> Option<f64>| -> Vec<(i64, f64)> {
+        req.price_drivers_past
+            .iter()
+            .filter_map(|r| f(r).map(|v| (r.0, v)))
+            .collect()
+    };
+    for (key, unit, rows) in [
+        (keys::WHOLESALE_NL, "EUR/kWh", req.wholesale.clone()),
+        (keys::PRICE_DRIVER_WIND, "", hourly(|r| r.1)),
+        (keys::PRICE_DRIVER_SOLAR, "", hourly(|r| r.2)),
+    ] {
+        changed_series(store, key, unit, 3600, &rows)?;
+    }
     if forecasts_written > 0 {
         prune(store, req.now)?;
     }
@@ -368,6 +391,36 @@ pub fn open(path: &str) -> Result<Store> {
     Ok(Store::open(path)?)
 }
 
+/// The price history kept in the file: wholesale prices and the drivers'
+/// history from `from` on, in time order.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PriceCache {
+    pub wholesale: Vec<(i64, f64)>,
+    pub price_drivers_past: Vec<DriverRow>,
+}
+
+/// Read the price history back from `from` on. An hour with only one of the
+/// driver indices keeps the other as `None`.
+pub fn price_cache(store: &Store, from: i64) -> Result<PriceCache> {
+    let mut drivers: BTreeMap<i64, (Option<f64>, Option<f64>)> = BTreeMap::new();
+    for (t, v) in store.samples(keys::PRICE_DRIVER_WIND, 3600, from, i64::MAX)? {
+        drivers.entry(t).or_default().0 = Some(v);
+    }
+    for (t, v) in store.samples(keys::PRICE_DRIVER_SOLAR, 3600, from, i64::MAX)? {
+        drivers.entry(t).or_default().1 = Some(v);
+    }
+    Ok(PriceCache {
+        wholesale: store.samples(keys::WHOLESALE_NL, 3600, from, i64::MAX)?,
+        price_drivers_past: drivers.into_iter().map(|(t, (w, s))| (t, w, s)).collect(),
+    })
+}
+
+/// [`price_cache`] of the history file at `path` (created with its folder
+/// when missing, so a new file gives an empty cache).
+pub fn price_cache_file(path: &str, from: i64) -> Result<PriceCache> {
+    price_cache(&open(path)?, from)
+}
+
 /// Record a tick in the history file at `path` (created with its folder).
 pub fn record_file(path: &str, req: &RecordRequest) -> Result<RecordResponse> {
     let mut store = open(path)?;
@@ -426,6 +479,7 @@ mod tests {
             },
             load: vec![(T0 - H, 450.0)],
             wholesale: vec![(T0 - H, 0.1), (T0 + 10 * H, 0.12), (T0 - 100 * H, 0.3)],
+            price_drivers_past: vec![(T0 - 100 * H, Some(0.5), Some(0.2)), (T0 - H, Some(0.7), None)],
             day_start: Some(T0 - 12 * H),
         }
     }
@@ -466,7 +520,16 @@ mod tests {
         );
         assert_eq!(
             s.samples(keys::WHOLESALE_NL, H, 0, i64::MAX).unwrap(),
-            [(T0 - H, 0.1), (T0 + 10 * H, 0.12)]
+            [(T0 - 100 * H, 0.3), (T0 - H, 0.1), (T0 + 10 * H, 0.12)],
+            "all wholesale prices are kept, not only the recent ones"
+        );
+        assert_eq!(
+            s.samples(keys::PRICE_DRIVER_WIND, H, 0, i64::MAX).unwrap(),
+            [(T0 - 100 * H, 0.5), (T0 - H, 0.7)]
+        );
+        assert_eq!(
+            s.samples(keys::PRICE_DRIVER_SOLAR, H, 0, i64::MAX).unwrap(),
+            [(T0 - 100 * H, 0.2)]
         );
         // Forecasts by lead: the plan issued at 12:00:20 is the "1 hour ahead" forecast of
         // 13:00 (just under an hour) and the "24 hours ahead" one of 12:00 the next day.
@@ -604,6 +667,7 @@ mod tests {
             energy: EnergyHours::default(),
             load: vec![],
             wholesale: vec![],
+            price_drivers_past: vec![],
             day_start: None,
         };
         let resp = record(&mut s, &r).unwrap();
@@ -679,6 +743,77 @@ mod tests {
     }
 
     #[test]
+    fn only_new_or_changed_hours_are_written() {
+        let mut s = Store::open_in_memory().unwrap();
+        let rows = [(0, 0.1), (H, 0.2), (2 * H, f64::NAN)];
+        assert_eq!(
+            changed_series(&mut s, keys::WHOLESALE_NL, "EUR/kWh", H, &rows).unwrap(),
+            2
+        );
+        assert_eq!(
+            changed_series(&mut s, keys::WHOLESALE_NL, "EUR/kWh", H, &rows).unwrap(),
+            0
+        );
+        let rows = [(0, 0.1), (H, 0.25), (3 * H, 0.3)];
+        assert_eq!(
+            changed_series(&mut s, keys::WHOLESALE_NL, "EUR/kWh", H, &rows).unwrap(),
+            2
+        );
+        assert_eq!(
+            s.samples(keys::WHOLESALE_NL, H, 0, i64::MAX).unwrap(),
+            [(0, 0.1), (H, 0.25), (3 * H, 0.3)]
+        );
+        assert_eq!(
+            changed_series(&mut s, keys::WHOLESALE_NL, "EUR/kWh", H, &[]).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn the_price_cache_reads_back_what_was_recorded() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert_eq!(
+            price_cache(&s, 0).unwrap(),
+            PriceCache::default(),
+            "a new file is empty"
+        );
+        record(&mut s, &request(T0)).unwrap();
+        let all = price_cache(&s, 0).unwrap();
+        assert_eq!(
+            all.wholesale,
+            [(T0 - 100 * H, 0.3), (T0 - H, 0.1), (T0 + 10 * H, 0.12)]
+        );
+        assert_eq!(
+            all.price_drivers_past,
+            [(T0 - 100 * H, Some(0.5), Some(0.2)), (T0 - H, Some(0.7), None)]
+        );
+        // Only an hour with solar alone keeps wind as None.
+        s.ensure_series(keys::PRICE_DRIVER_SOLAR, "", SeriesKind::Mean)
+            .unwrap();
+        s.put_samples(keys::PRICE_DRIVER_SOLAR, H, &[(T0, 0.4)]).unwrap();
+        let recent = price_cache(&s, T0 - H).unwrap();
+        assert_eq!(recent.wholesale, [(T0 - H, 0.1), (T0 + 10 * H, 0.12)]);
+        assert_eq!(
+            recent.price_drivers_past,
+            [(T0 - H, Some(0.7), None), (T0, None, Some(0.4))]
+        );
+        let back: PriceCache = serde_json::from_str(&serde_json::to_string(&recent).unwrap()).unwrap();
+        assert_eq!(back, recent);
+    }
+
+    #[test]
+    fn requests_without_price_drivers_still_parse() {
+        let mut v = serde_json::to_value(request(T0)).unwrap();
+        v.as_object_mut().unwrap().remove("price_drivers_past");
+        let r: RecordRequest = serde_json::from_value(v).unwrap();
+        assert!(r.price_drivers_past.is_empty());
+        let v = serde_json::to_value(request(T0)).unwrap();
+        assert_eq!(v["price_drivers_past"][1], serde_json::json!([T0 - H, 0.7, null]));
+        let back: RecordRequest = serde_json::from_value(v).unwrap();
+        assert_eq!(back, request(T0));
+    }
+
+    #[test]
     fn files_are_created_with_their_folder() {
         let dir = std::env::temp_dir().join(format!("vulpes-history-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -695,7 +830,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(back.plan_slots.len(), 1);
+        assert_eq!(price_cache_file(path, 0).unwrap().wholesale.len(), 3);
         assert!(record_file("", &request(T0)).is_err());
+        assert!(price_cache_file("", 0).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

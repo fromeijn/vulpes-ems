@@ -108,13 +108,25 @@ pub fn health(snap: &Value) -> Result<Value> {
     let last_success = num("last_success");
     let since_plan = last_success.map(|t| now - t);
     let error = text("refresh_error").unwrap_or("planning failed");
+    let started = num("started_at").unwrap_or(now);
+    // The first plan runs in the background after startup: until it ends,
+    // nothing has failed (`refresh_ok` stays true and there is no error).
+    let first_pending = truthy(snap.get("refresh_ok")) && text("refresh_error").is_none();
+    // Until then, checks of what the first plan fetches or records say so instead of failing.
+    let waiting = last_success.is_none() && first_pending && now - started <= NO_PLAN_S;
+    let pending = |name: &str| check(name, OK, "waiting for the first plan");
     checks.push(match (truthy(snap.get("refresh_ok")), since_plan) {
         (true, Some(age)) if age <= NO_PLAN_S => check("plan", OK, ""),
         (_, Some(age)) if age <= NO_PLAN_S => check("plan", DEGRADED, error),
         (_, Some(age)) => check("plan", PROBLEM, format!("no plan for {}: {error}", minutes(age))),
+        (_, None) if waiting => check("plan", OK, "waiting for the first plan"),
+        (_, None) if first_pending => check(
+            "plan",
+            PROBLEM,
+            format!("no plan yet after {}", minutes(now - started)),
+        ),
         (_, None) => check("plan", PROBLEM, error),
     });
-    let started = num("started_at").unwrap_or(now);
     if since_plan.unwrap_or(now - started) > ISSUE_NO_PLAN_S {
         issues.push("no_plan");
     }
@@ -191,6 +203,7 @@ pub fn health(snap: &Value) -> Result<Value> {
 
     // Energy statistics (newest complete hour in the history file).
     checks.push(match num("newest_energy_ts").map(|t| now - (t + 3600.0)) {
+        None if waiting => pending("energy_data"),
         None => check("energy_data", PROBLEM, "no energy statistics recorded"),
         Some(age) if age > ENERGY_STOPPED_S => {
             issues.push("energy_stopped");
@@ -217,12 +230,13 @@ pub fn health(snap: &Value) -> Result<Value> {
                 DEGRADED,
                 format!("last fetched {} ago", minutes(age)),
             ),
+            None if waiting => pending("wholesale"),
             None => check("wholesale", DEGRADED, "not fetched yet"),
         });
-        checks.push(price_drivers_check(
-            num("price_drivers_fetched_at").map(|t| now - t),
-            plan,
-        ));
+        checks.push(match num("price_drivers_fetched_at").map(|t| now - t) {
+            None if waiting => pending("price_drivers"),
+            age => price_drivers_check(age, plan),
+        });
     }
 
     // What the engine had to guess.
@@ -250,6 +264,8 @@ pub fn health(snap: &Value) -> Result<Value> {
             check("control", OK, "not active")
         } else if let Some(e) = text("last_error") {
             check("control", PROBLEM, format!("the control script failed: {e}"))
+        } else if snap.get("last_command").is_none_or(Value::is_null) {
+            check("control", OK, "waiting for the first plan")
         } else if snap
             .get("last_command")
             .is_none_or(|c| !c.is_object() || truthy(c.get("fallback")))
@@ -401,6 +417,58 @@ mod tests {
     }
 
     #[test]
+    fn the_first_plan_after_startup_is_awaited() {
+        let pending = |since: f64| {
+            with(
+                json!({"refresh_ok": true, "last_success": null, "refresh_error": null,
+                        "plan": null, "started_at": NOW - since, "newest_energy_ts": null,
+                        "wholesale_fetched_at": null, "price_drivers_fetched_at": null,
+                        "last_command": null}),
+            )
+        };
+        let h = pending(30.0);
+        // Only what the first plan fetches, records or sends waits; the SOC and price
+        // sensors are checked as always.
+        for name in ["plan", "energy_data", "wholesale", "price_drivers", "control"] {
+            let c = h["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["check"] == name)
+                .unwrap()
+                .clone();
+            assert_eq!(
+                (name, c["state"].as_str(), c["detail"].as_str()),
+                (name, Some("ok"), Some("waiting for the first plan"))
+            );
+        }
+        assert_eq!(h["status"], "ok", "{:?}", h["problems"]);
+        let plan = h["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["check"] == "plan")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (plan["state"].as_str(), plan["detail"].as_str()),
+            (Some("ok"), Some("waiting for the first plan"))
+        );
+        assert_eq!(h["issues"], json!([]));
+        // Still nothing after half an hour: a problem, and the repair issue after an hour.
+        let h = pending(NO_PLAN_S + 1.0);
+        assert_eq!(state_of(&h, "plan"), "problem");
+        assert_eq!(h["issues"], json!([]));
+        assert_eq!(pending(ISSUE_NO_PLAN_S + 1.0)["issues"], json!(["no_plan"]));
+        // A failed first plan is a problem at once.
+        let h = with(
+            json!({"refresh_ok": false, "last_success": null, "refresh_error": "weather unavailable",
+                            "plan": null, "started_at": NOW - 30.0}),
+        );
+        assert_eq!(state_of(&h, "plan"), "problem");
+    }
+
+    #[test]
     fn soc_sensor() {
         let h = with(json!({"soc_state": "unavailable", "soc_last_changed": NOW - 600.0}));
         assert_eq!(
@@ -543,10 +611,17 @@ mod tests {
             state_of(&with(json!({"last_command": {"fallback": true}})), "control"),
             "problem"
         );
-        assert_eq!(
-            state_of(&with(json!({"last_command": null})), "control"),
-            "problem"
-        );
+        // Active, but nothing sent since the start: the first plan is still running.
+        let waiting = with(json!({"last_command": null}));
+        assert_eq!(state_of(&waiting, "control"), "ok");
+        let control = waiting["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["check"] == "control")
+            .unwrap()
+            .clone();
+        assert_eq!(control["detail"], "waiting for the first plan");
         assert_eq!(
             state_of(&with(json!({"active": false, "last_error": "x"})), "control"),
             "ok"

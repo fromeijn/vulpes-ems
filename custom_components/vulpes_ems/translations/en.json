@@ -425,7 +425,8 @@
           "off": "Off (shadow mode)",
           "following_plan": "Following the plan",
           "fallback": "Fallback (self-consume)",
-          "script_error": "Script failed (see the error attribute)"
+          "script_error": "Script failed (see the error attribute)",
+          "waiting": "Waiting for the first plan"
         }
       },
       "status": {

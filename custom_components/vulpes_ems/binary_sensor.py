@@ -41,6 +41,11 @@ class PvOffPlanned(CoordinatorEntity[VulpesCoordinator], BinarySensorEntity):
         self._attr_device_info = device_info(entry)
 
     @property
+    def available(self) -> bool:
+        # Unavailable until the first plan, which runs after setup.
+        return super().available and self.coordinator.data is not None
+
+    @property
     def is_on(self) -> bool | None:
         return self.coordinator.data["summary"].get("pv_off_now")
 

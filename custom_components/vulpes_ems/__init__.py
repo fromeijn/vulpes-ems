@@ -1,5 +1,8 @@
 """Vulpes EMS: forecasting and ESS mode optimization for Home Assistant.
 
+Setup returns at once and the first plan runs in the background once Home
+Assistant has started, so its startup never waits for the network.
+
 By default the integration runs in shadow mode: it only reads Home Assistant
 data and publishes its own entities with the plan. Control is handed over
 explicitly: the user picks a control script and turns the Active switch on,
@@ -15,9 +18,10 @@ import shutil
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 
 from .calibration import SolarCalibration
@@ -50,18 +54,30 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: VulpesConfigEntry) -> bool:
-    """Set up Vulpes EMS from a config entry."""
+    """Set up Vulpes EMS from a config entry.
+
+    Setup doesn't wait for the first plan: that needs the network, and Home
+    Assistant's startup shouldn't. The plan starts once Home Assistant has
+    started. The entities exist at once and show the plan when it's ready;
+    the Status sensor says it's waiting until then.
+    """
     coordinator = VulpesCoordinator(hass, entry)
     await coordinator.calibration.async_load()
     entry.async_on_unload(coordinator.calibration.async_unload)
-    await coordinator.async_config_entry_first_refresh()
-    await coordinator.async_record()
-    await coordinator.async_review()
-    coordinator.update_health()
-    coordinator.start_schedule()
     entry.runtime_data = coordinator
-    entry.async_on_unload(entry.add_update_listener(_async_reload))
+    coordinator.update_health()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_on_unload(entry.add_update_listener(_async_reload))
+
+    @callback
+    def _start(_hass: HomeAssistant) -> None:
+        # After Home Assistant has started, so the SOC and price sensors of other
+        # integrations have their states; at once on a reload. The task is cancelled on
+        # unload, and the coordinator also stops between steps once it is closed.
+        coordinator.start_schedule()
+        entry.async_create_background_task(hass, coordinator.async_first_run(), "vulpes_ems first plan")
+
+    entry.async_on_unload(async_at_started(hass, _start))
     return True
 
 

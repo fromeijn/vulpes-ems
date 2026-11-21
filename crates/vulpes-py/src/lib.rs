@@ -65,6 +65,15 @@ fn record_ha(py: Python<'_>, db_path: String, request_json: String) -> PyResult<
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// The price history kept in the file at `db_path` (wholesale prices and the
+/// price drivers' history), to fill the cache at startup. Runs without the
+/// GIL (disk I/O).
+#[pyfunction]
+fn history_cache(py: Python<'_>, db_path: String, request_json: String) -> PyResult<String> {
+    py.detach(|| vulpes_ha::history_cache_json(&db_path, &request_json))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 /// Review the history file at `db_path` with the current settings: savings,
 /// forecast quality and control. Runs without the GIL (disk I/O).
 #[pyfunction]
@@ -117,6 +126,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calibrate_ha, m)?)?;
     m.add_function(wrap_pyfunction!(record_ha, m)?)?;
     m.add_function(wrap_pyfunction!(review_ha, m)?)?;
+    m.add_function(wrap_pyfunction!(history_cache, m)?)?;
     m.add_function(wrap_pyfunction!(export_history, m)?)?;
     Ok(())
 }

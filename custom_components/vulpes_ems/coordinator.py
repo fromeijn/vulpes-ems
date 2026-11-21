@@ -9,6 +9,7 @@ from collections.abc import Callable
 from datetime import datetime
 import json
 import logging
+import time
 from typing import Any
 
 import vulpes_ems
@@ -122,6 +123,35 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _controlling(self) -> bool:
         return self.active and bool(self.control_script)
 
+    async def async_first_run(self) -> None:
+        """The first plan after setup, in the background: Home Assistant doesn't wait for it.
+
+        The price history comes from the history file first, so only what's
+        missing is fetched.
+        """
+        await self.async_load_cache()
+        await self._async_refresh_and_apply()
+
+    async def async_load_cache(self) -> None:
+        """Fill the wholesale and price driver caches from the history file."""
+        request = dumps({"now": dt_util.utcnow().timestamp()})
+        async with self._history_lock:
+            if self._closed:
+                return
+            try:
+                raw = await self.hass.async_add_executor_job(vulpes_ems.history_cache, self.history_path, request)
+            except ValueError as err:
+                _LOGGER.warning("Could not read the price history from the history file: %s", err)
+                return
+        cache = json.loads(raw)
+        self._wholesale = cache["wholesale"]
+        self._drivers["past"] = cache["price_drivers_past"] or None
+        _LOGGER.debug(
+            "Price history from the history file: %d wholesale hours, %d price driver hours",
+            len(self._wholesale),
+            len(cache["price_drivers_past"]),
+        )
+
     async def async_update_plan(self) -> None:
         """Plan now, without waiting for the quarter hour (the `update_plan` action)."""
         await self._update_debouncer.async_call()
@@ -231,6 +261,7 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "last_error": self.last_error,
             "stats": self._stats,
             "wholesale": self._wholesale,
+            "price_drivers_past": self._drivers["past"] or [],
         }
         async with self._history_lock:
             if self._closed:
@@ -280,7 +311,11 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._closed:
             return
         was_active, self.active = self.active, active
-        if active:
+        if active and self.data is None and self.last_update_success:
+            # The first plan is still running (the switch is restored at startup): it is
+            # applied when it's ready, without the safe command first.
+            self.update_health()
+        elif active:
             await self.async_apply()
             await self.async_record()
             self.update_health()
@@ -358,12 +393,15 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self._wholesale
 
     async def _price_drivers(self, cfg: dict[str, Any], now: datetime) -> dict[str, list | None]:
+        past = self._drivers["past"] or []
         fetch = ha(
             "price_drivers_fetch",
             cfg=cfg,
             now=now.timestamp(),
             past_fetched_at=self._drivers_fetched["past"],
             ahead_fetched_at=self._drivers_fetched["ahead"],
+            past_cached_from=past[0][0] if past else None,
+            past_cached_until=past[-1][0] if past else None,
         )
         if not fetch["fetch"]:
             return self._drivers
@@ -375,10 +413,13 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         resp = json.loads(raw)
         for err in resp.get("errors", []):
             _LOGGER.warning("Wind and solar for the price forecast unavailable, keeping cached data: %s", err)
-        for part in ("past", "ahead"):
-            if resp.get(part) is not None:
-                self._drivers[part] = resp[part]
-                self._drivers_fetched[part] = now.timestamp()
+        if resp.get("past") is not None:
+            # The history fetched covers the days after the cache: merge it in.
+            self._drivers["past"] = ha("price_drivers_merge", cached=past, fetched=resp["past"], now=now.timestamp())
+            self._drivers_fetched["past"] = now.timestamp()
+        if resp.get("ahead") is not None:
+            self._drivers["ahead"] = resp["ahead"]
+            self._drivers_fetched["ahead"] = now.timestamp()
         return self._drivers
 
     async def _async_update_data(self) -> dict[str, Any]:
@@ -387,12 +428,20 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         soc = self.hass.states.get(cfg.get(CONF_SOC_ENTITY, ""))
         price = self.hass.states.get(cfg.get(CONF_PRICE_ENTITY, ""))
         ids = ha("energy_ids", cfg=cfg)
+        # How long each step takes, for the debug log: a slow network shows up here.
+        took: dict[str, float] = {}
+        t = time.monotonic()
         stats = (
             await async_energy_changes(self.hass, set(ids), stats_start(now))
             if ids
             else {}
         )
         self._stats = stat_rows(stats, ids, "change")
+        took["statistics"], t = time.monotonic() - t, time.monotonic()
+        wholesale = await self._wholesale_history(cfg, now)
+        took["wholesale"], t = time.monotonic() - t, time.monotonic()
+        drivers = await self._price_drivers(cfg, now)
+        took["price drivers"], t = time.monotonic() - t, time.monotonic()
         request = {
             "cfg": cfg,
             "now": now.timestamp(),
@@ -404,12 +453,15 @@ class VulpesCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "price_attributes": list(price.attributes.items()) if price else None,
             "price_unit": price.attributes.get("unit_of_measurement") if price else None,
             "stats": self._stats,
-            "wholesale": await self._wholesale_history(cfg, now),
-            "price_drivers": await self._price_drivers(cfg, now),
+            "wholesale": wholesale,
+            "price_drivers": drivers,
         }
         try:
             raw = await self.hass.async_add_executor_job(vulpes_ems.plan_ha, dumps(request))
         except ValueError as err:
             raise UpdateFailed(str(err)) from err
+        finally:
+            took["plan (weather and optimizer)"] = time.monotonic() - t
+            _LOGGER.debug("Planning took %s", ", ".join(f"{k} {v:.1f} s" for k, v in took.items()))
         self.last_success_ts = now.timestamp()
         return json.loads(raw)

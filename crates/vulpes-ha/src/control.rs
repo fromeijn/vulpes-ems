@@ -26,7 +26,9 @@ pub const OFF: &str = "off";
 pub const FOLLOWING: &str = "following_plan";
 pub const FALLBACK: &str = "fallback";
 pub const SCRIPT_ERROR: &str = "script_error";
-pub const STATES: [&str; 4] = [OFF, FOLLOWING, FALLBACK, SCRIPT_ERROR];
+/// Active, but nothing sent since the start: the first plan after a restart is still running.
+pub const WAITING: &str = "waiting";
+pub const STATES: [&str; 5] = [OFF, FOLLOWING, FALLBACK, SCRIPT_ERROR, WAITING];
 
 fn variables(cfg: &Cfg, mode: &str, pv_off: bool, no_export: bool) -> Map<String, Value> {
     let v = json!({
@@ -98,13 +100,16 @@ pub fn command(cfg: &Cfg, plan: Option<&Value>, now: f64, failed: bool) -> Value
     Value::Object(cmd)
 }
 
-/// The control status: off, following the plan, in fallback, or the script failed.
+/// The control status: off, following the plan, in fallback, the script failed, or
+/// waiting (active, but nothing sent since the start).
 pub fn state_of(active: bool, last: Option<&Value>, error: Option<&str>) -> &'static str {
     if !active {
         OFF
     } else if error.is_some_and(|e| !e.is_empty()) {
         SCRIPT_ERROR
-    } else if last.is_none_or(|l| l.is_null() || truthy(l.get("fallback"))) {
+    } else if last.is_none_or(Value::is_null) {
+        WAITING
+    } else if truthy(last.and_then(|l| l.get("fallback"))) {
         FALLBACK
     } else {
         FOLLOWING
@@ -309,8 +314,10 @@ mod tests {
     fn control_states() {
         let following = json!({"fallback": false});
         assert_eq!(state_of(false, Some(&following), None), OFF);
-        assert_eq!(state_of(true, None, None), FALLBACK);
-        assert_eq!(state_of(true, Some(&json!(null)), None), FALLBACK);
+        // Nothing sent yet since the start: waiting for the first plan.
+        assert_eq!(state_of(true, None, None), WAITING);
+        assert_eq!(state_of(true, Some(&json!(null)), None), WAITING);
+        assert_eq!(state_of(true, None, Some("boom")), SCRIPT_ERROR);
         assert_eq!(state_of(true, Some(&json!({"fallback": true})), None), FALLBACK);
         assert_eq!(state_of(true, Some(&following), None), FOLLOWING);
         assert_eq!(

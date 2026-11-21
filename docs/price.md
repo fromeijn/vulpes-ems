@@ -55,9 +55,11 @@ Windy or sunny hours after calm, dull reference days are cheaper than the profil
 **Self-check.** Each planning run scores both methods on the last 14 days, each day forecast with a model fitted on the days before it. The correction is used only when its mean absolute error was lower. The plan's `price_forecast` says which method was used, with both errors.
 
 **In Home Assistant**, only with EnergyZero as the wholesale source, because the reference points are for the Dutch market:
-- the wholesale history (90 days) is fetched in full once after a start, then every 6 hours only from the last known day on;
-- the reference-point history once a day;
+- the wholesale history (90 days) every 6 hours, only from the last known day on;
+- the reference-point history once a day, only from the last known day on;
 - the reference-point forecast every 6 hours.
+
+Both histories are kept in the history file (`price.wholesale.nl`, `price.driver.wind`, `price.driver.solar`), so after a restart only the missing days are fetched; a new install fetches the full 90 days once. All four reference points come in one Open-Meteo request per range.
 
 A failed fetch keeps the cached data. The health check `price_drivers` reports a forecast older than 24 hours.
 

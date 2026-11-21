@@ -61,7 +61,7 @@ fn user_mode(cfg: &Cfg, state: Option<&str>) -> Option<String> {
 /// `now`, `timezone`, the `plan` (null when the refresh failed), the SOC
 /// state `soc_state`, the mode entity's `mode_state`, `active`, the
 /// `last_command` and `last_error` of the control script, the energy
-/// `stats` and the `wholesale` history.
+/// `stats`, the `wholesale` history and the `price_drivers_past` rows.
 pub fn record_request(req: &Value) -> Result<RecordRequest> {
     let cfg = obj(req, "cfg")?;
     let now = req_num(req, "now")? as i64;
@@ -100,6 +100,9 @@ pub fn record_request(req: &Value) -> Result<RecordRequest> {
         },
         load: load_series(&load_groups(cfg), &stats),
         wholesale: ts_pairs(req, "wholesale"),
+        price_drivers_past: crate::request::driver_rows(req, "price_drivers_past")
+            .map(|(t, (wind, solar))| (t, wind, solar))
+            .collect(),
         day_start: vulpes_engine::time::day_start(now, tz),
     })
 }
@@ -154,6 +157,18 @@ pub fn export_ha(path: &str, req: &Value) -> Result<Value> {
     )
     .map_err(|e| Error::Message(format!("history: {e}")))?;
     Ok(serde_json::to_value(e)?)
+}
+
+/// The price history kept in the file at `path` (created when missing), for
+/// the coordinator's cache at startup: `{"wholesale": [[hour, price]...],
+/// "price_drivers_past": [[hour, wind, solar]...]}` within the wholesale
+/// window at `now`, so a restart only fetches the hours after it. `req` holds
+/// `now`.
+pub fn cache_ha(path: &str, req: &Value) -> Result<Value> {
+    let (_, _, window_ts) = crate::request::wholesale_window(req_num(req, "now")?)?;
+    let cache =
+        engine::price_cache_file(path, window_ts).map_err(|e| Error::Message(format!("history: {e}")))?;
+    Ok(serde_json::to_value(cache)?)
 }
 
 /// Review the history file at `path` with the current settings: savings,
@@ -266,7 +281,8 @@ mod tests {
             "soc_state": "61", "mode_state": "Grid", "active": true,
             "last_command": {"mode": "hold", "fallback": false}, "last_error": null,
             "stats": {"sensor.i": rows(0.5), "sensor.e": rows(0.1), "sensor.s": rows(1.0)},
-            "wholesale": [[T0 - 3600, 0.1]]
+            "wholesale": [[T0 - 3600, 0.1]],
+            "price_drivers_past": [[T0 - 7200, 0.5, null], [T0 - 3600, 0.6, 0.2], ["bad"]]
         })
     }
 
@@ -292,6 +308,10 @@ mod tests {
         // Load = import + solar − export = 1.4 kWh per hour.
         assert!(r.load.iter().all(|(_, w)| (w - 1400.0).abs() < 1e-9));
         assert_eq!(r.wholesale, [(T0 - 3600, 0.1)]);
+        assert_eq!(
+            r.price_drivers_past,
+            [(T0 - 7200, Some(0.5), None), (T0 - 3600, Some(0.6), Some(0.2))]
+        );
         // Local midnight in Amsterdam (UTC+1 in November).
         assert_eq!(r.day_start, Some(T0 - 13 * 3600));
     }
@@ -374,6 +394,22 @@ mod tests {
         assert_eq!(second["energy_until"], json!(T0));
         let export = export_ha(path, &json!({"now": T0 + 1000})).unwrap();
         assert_eq!(export["plan_slots"].as_array().unwrap().len(), 2);
+        // The price history comes back for the cache, limited to the wholesale window.
+        let cache = cache_ha(path, &json!({"now": T0 + 1000})).unwrap();
+        assert_eq!(
+            cache,
+            json!({"wholesale": [[T0 - 3600, 0.1]],
+                   "price_drivers_past": [[T0 - 7200, 0.5, null], [T0 - 3600, 0.6, 0.2]]})
+        );
+        let later = cache_ha(path, &json!({"now": T0 + 100 * 86_400})).unwrap();
+        assert_eq!(later, json!({"wholesale": [], "price_drivers_past": []}));
+        assert!(cache_ha(path, &json!({})).is_err());
+        assert!(
+            cache_ha("", &json!({"now": T0}))
+                .unwrap_err()
+                .to_string()
+                .starts_with("history:")
+        );
         assert!(
             record_ha("", &request(T0))
                 .unwrap_err()
