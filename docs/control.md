@@ -77,17 +77,25 @@ The mode values stay in English whatever the Home Assistant language: they are a
 
 ## Example: Solis hybrid inverter with `solis_modbus`
 
-The `solis_modbus` integration has a remote dispatch action with an inverter-side failsafe. Replace the switch entity with your own. Make sure each power stays within your inverter's limits and Vulpes's battery and grid settings.
+The `solis_modbus` integration has a remote dispatch action with an inverter-side failsafe. Replace the entity IDs with your own and `normal_export_w` with your usual export limit. Make sure each power stays within your inverter's limits and Vulpes's battery and grid settings.
 
 ```yaml
-vulpes_apply:
+vulpes_control:
   alias: Vulpes control
   mode: restart
   sequence:
-    # Zero export via the inverter's export switch (not reverted by the failsafe).
-    - action: "switch.turn_{{ 'off' if no_export else 'on' }}"
-      target:
-        entity_id: switch.solis_allow_export
+    # Zero export through the inverter's feed-in limit, which the failsafe doesn't revert.
+    # Written only when it changes: it is a persistent inverter setting.
+    - variables:
+        normal_export_w: 5000
+        export_w: "{{ 0 if no_export else normal_export_w }}"
+    - if: "{{ states('number.solis_backflow_power') | int(-1) != export_w | int }}"
+      then:
+        - action: number.set_value
+          target:
+            entity_id: number.solis_backflow_power
+          data:
+            value: "{{ export_w }}"
     - choose:
         - conditions: "{{ mode == 'charge' }}"
           sequence:
@@ -105,15 +113,18 @@ vulpes_apply:
               data:
                 mode: "{{ 'grid_export' if power_control == 'grid_setpoint' else 'battery_discharge' }}"
                 power_watts: "{{ power_w }}"
+                allow_grid_charge: false
                 soc_min: "{{ soc_min | int }}"
                 pv_shutdown: "{{ pv_off }}"
                 failsafe_minutes: 20
+        # Needs Remote Dispatch V02; see the notes for V01.
         - conditions: "{{ mode == 'hold' }}"
           sequence:
             - action: solis_modbus.solis_dispatch
               data:
                 mode: self_consumption
                 disable_discharge: true
+                allow_grid_charge: false
                 pv_shutdown: "{{ pv_off }}"
                 failsafe_minutes: 20
         - conditions: "{{ mode == 'idle' }}"
@@ -121,8 +132,10 @@ vulpes_apply:
             - action: solis_modbus.solis_dispatch
               data:
                 mode: battery_hold
+                allow_grid_charge: false
                 pv_shutdown: "{{ pv_off }}"
                 failsafe_minutes: 20
+        # Needs Remote Dispatch V02.
         - conditions: "{{ mode == 'self_consume' and pv_off }}"
           sequence:
             - action: solis_modbus.solis_dispatch
@@ -136,5 +149,27 @@ vulpes_apply:
 ```
 
 Notes:
-- The dispatch action leaves `pv_shutdown` unchanged when it's omitted, so the script always passes it.
+- **Script ID:** Vulpes runs the script through its own action, which Home Assistant names after the script's ID (`vulpes_control` above), not after its entity ID. If you rename the entity (for example to `script.vulpes_apply`), the action keeps its old name and Vulpes reports "Action script.vulpes_apply not found". Keep the entity ID and the script ID the same.
+- **Firmware version:** the `self_consumption` mode and `disable_discharge` need Remote Dispatch V02 or later. The "Remote Dispatch Function Map" sensor of `solis_modbus` shows the version (1 = V01). On V01 `solis_modbus` rejects those calls ("The requested features require Remote Dispatch V02"), so:
+  - leave **solar curtailment** off in the modes step, or the `self_consume` + `pv_off` branch fails;
+  - do `hold` with `grid_import` at 0 W and the lower SOC limit at the current state of charge, rounded down. The battery keeps the meter at zero, so solar surplus still charges it, and the limit stops it from discharging. This has not yet been checked on a V01 inverter: in sunshine, check that the battery charges from the surplus and never discharges.
+
+    ```yaml
+            - conditions: "{{ mode == 'hold' }}"
+              sequence:
+                - action: solis_modbus.solis_dispatch
+                  data:
+                    mode: grid_import
+                    power_watts: 0
+                    allow_grid_charge: false
+                    soc_min: >-
+                      {{ [states('sensor.solis_battery_soc') | float(soc_max) | int,
+                          soc_max | int] | min }}
+                    soc_max: "{{ soc_max | int }}"
+                    pv_shutdown: "{{ pv_off }}"
+                    failsafe_minutes: 20
+    ```
+- **Zero export:** on some models the "allow export" switch doesn't stop export in self-use. The feed-in limit (`Backflow Power`, with the grid feed-in limit switch on) does. Check it once: with `no_export: true` the export should drop to zero.
+- The dispatch action leaves `pv_shutdown` and `allow_grid_charge` unchanged when they're omitted, so the script always passes `pv_shutdown`, and every mode other than `charge` turns grid charging off.
+- Turn off other automations that call `solis_dispatch` or `solis_dispatch_stop`; they cancel Vulpes's dispatch.
 - After the first `solis_dispatch_stop`, check that the inverter's normal settings are back, including solar power.
