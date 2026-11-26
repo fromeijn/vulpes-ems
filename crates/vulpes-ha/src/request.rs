@@ -15,6 +15,7 @@ use crate::{Error, Result};
 use chrono::{DateTime, Days, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use vulpes_price::tariff::TariffSample;
 
 /// Hours of load history the load forecast learns from.
 pub const LOAD_HISTORY_DAYS: i64 = 60;
@@ -90,6 +91,7 @@ pub fn plan_ha(req: &Value) -> Result<Value> {
     }
     let load = load_series(&groups, &energy_rows(req, "stats")?);
     let wholesale = ts_pairs(req, "wholesale");
+    let tariff = tariff_fit(&known, &wholesale, num(cfg, "tariff_a")?, num(cfg, "tariff_b")?);
     let mut request = engine_request(cfg, now, soc_pct, &load, &known, &wholesale, req)?;
     request["published_wholesale"] = Value::Array(published_wholesale(cfg, req, &wholesale, now));
     if let Some(w) = req.get("weather").filter(|w| !w.is_null()) {
@@ -112,9 +114,66 @@ pub fn plan_ha(req: &Value) -> Result<Value> {
         "published_price_slots": plan["price_forecast"]["published_slots"].as_u64().unwrap_or(0),
         "wholesale_hours": wholesale.len(),
         "price_driver_hours": driver_hours,
+        "tariff_fit": tariff,
     });
     plan["planned_at"] = json!(now as i64);
     Ok(plan)
+}
+
+/// The tariff the price sensor itself follows: `import = a · wholesale + b`,
+/// fitted on the hours that have both a sensor price for the whole hour (the
+/// mean of its quarter hours) and a wholesale price. With it, how far the
+/// settings' tariff (`a`, `b`) is off: the mean absolute difference between
+/// the two over those hours, which is the error of the prices Vulpes derives
+/// through the settings.
+///
+/// Returns `{a, b, rms_error, hours, settings_diff}`, or null with fewer than
+/// two such hours or wholesale prices that don't vary. The health check
+/// `tariff` reads it (`health.rs`); nothing in the plan uses it.
+pub fn tariff_fit(known: &[KnownPrice], wholesale: &[(i64, f64)], a: f64, b: f64) -> Value {
+    // Price × seconds and seconds per hour: an hour counts when it is covered in full.
+    let mut hours: BTreeMap<i64, (f64, i64)> = BTreeMap::new();
+    for p in known.iter().filter(|p| p.end > p.start && p.import.is_finite()) {
+        let mut hour = p.start - p.start.rem_euclid(3600);
+        while hour < p.end {
+            let seconds = p.end.min(hour + 3600) - p.start.max(hour);
+            let e = hours.entry(hour).or_default();
+            e.0 += p.import * seconds as f64;
+            e.1 += seconds;
+            hour += 3600;
+        }
+    }
+    let wholesale: BTreeMap<i64, f64> = wholesale.iter().copied().filter(|w| w.1.is_finite()).collect();
+    let samples: Vec<TariffSample> = hours
+        .iter()
+        .filter(|(_, (_, seconds))| *seconds == 3600)
+        .filter_map(|(hour, (sum, _))| {
+            Some(TariffSample {
+                energy_kwh: 1.0,
+                wholesale: *wholesale.get(hour)?,
+                cost: sum / 3600.0,
+            })
+        })
+        .collect();
+    let Some(fit) = vulpes_price::tariff::fit(&samples) else {
+        return Value::Null;
+    };
+    let diff = samples
+        .iter()
+        .map(|s| (a * s.wholesale + b - fit.tariff.price(s.wholesale)).abs())
+        .sum::<f64>()
+        / samples.len() as f64;
+    let out = [fit.tariff.a, fit.tariff.b, fit.rms_error, diff];
+    if out.iter().any(|v| !v.is_finite()) {
+        return Value::Null;
+    }
+    json!({
+        "a": fit.tariff.a,
+        "b": fit.tariff.b,
+        "rms_error": fit.rms_error,
+        "hours": fit.samples,
+        "settings_diff": diff,
+    })
 }
 
 /// Hourly means of the known prices that are shorter than an hour; hourly
@@ -648,6 +707,144 @@ mod tests {
         r["cfg"]["billing_interval"] = json!("quarter");
         let plan = plan_ha(&r).unwrap();
         assert_eq!(plan["inputs"]["known_price_slots"], 96);
+    }
+
+    /// Wholesale price of hour `h`: varies from hour to hour, negative now and then.
+    fn wholesale_of(h: i64) -> f64 {
+        0.02 * ((h * 7).rem_euclid(11)) as f64 - 0.02
+    }
+
+    /// `hours` hours of sensor prices at `a × wholesale + b` in steps of
+    /// `step` seconds, spread within the hour around its mean, and the hourly
+    /// wholesale prices.
+    fn tariff_inputs(hours: i64, step: i64, a: f64, b: f64) -> (Vec<KnownPrice>, Vec<(i64, f64)>) {
+        let hour0 = (T0 - T0 % 3600.0) as i64;
+        let per_hour = 3600 / step;
+        let known = (0..hours * per_hour)
+            .map(|k| {
+                let (h, q) = (k / per_hour, k % per_hour);
+                // Around the hour's mean: the spread over the steps sums to zero.
+                let spread = 0.01 * (q as f64 - (per_hour - 1) as f64 / 2.0);
+                KnownPrice {
+                    start: hour0 + k * step,
+                    end: hour0 + (k + 1) * step,
+                    import: a * wholesale_of(h) + b + spread,
+                }
+            })
+            .collect();
+        let wholesale = (0..hours).map(|h| (hour0 + h * 3600, wholesale_of(h))).collect();
+        (known, wholesale)
+    }
+
+    #[test]
+    fn tariff_fit_recovers_the_tariff_the_sensor_follows() {
+        for step in [900, 3600] {
+            let (known, wholesale) = tariff_inputs(48, step, 1.21, 0.1357);
+            assert!(wholesale.iter().any(|w| w.1 < 0.0), "a negative price is in");
+            // Settings with the default b: every derived price is 0.0057 too low.
+            let fit = tariff_fit(&known, &wholesale, 1.21, 0.13);
+            let num = |k: &str| fit[k].as_f64().unwrap();
+            assert!(
+                (num("a") - 1.21).abs() < 1e-9 && (num("b") - 0.1357).abs() < 1e-9,
+                "{fit}"
+            );
+            assert!(num("rms_error") < 1e-9, "{fit}");
+            assert_eq!(fit["hours"], 48);
+            assert!((num("settings_diff") - 0.0057).abs() < 1e-9, "{fit}");
+            // Matching settings differ by nothing.
+            let fit = tariff_fit(&known, &wholesale, 1.21, 0.1357);
+            assert!(fit["settings_diff"].as_f64().unwrap() < 1e-9, "{fit}");
+        }
+        // Errors in a and b that cancel on average still count: the difference is absolute.
+        let (known, wholesale) = tariff_inputs(48, 3600, 1.21, 0.1357);
+        let mean = wholesale.iter().map(|w| w.1).sum::<f64>() / 48.0;
+        let fit = tariff_fit(&known, &wholesale, 1.71, 0.1357 - 0.5 * mean);
+        assert!(fit["settings_diff"].as_f64().unwrap() > 0.01, "{fit}");
+        // A fixed price is a tariff with a = 0.
+        let fixed: Vec<KnownPrice> = known.iter().map(|p| KnownPrice { import: 0.30, ..*p }).collect();
+        let fit = tariff_fit(&fixed, &wholesale, 0.0, 0.30);
+        let num = |k: &str| fit[k].as_f64().unwrap();
+        assert!(num("a").abs() < 1e-9 && (num("b") - 0.30).abs() < 1e-9 && num("settings_diff") < 1e-9);
+    }
+
+    #[test]
+    fn tariff_fit_needs_whole_hours_with_a_wholesale_price() {
+        let (known, wholesale) = tariff_inputs(24, 900, 1.21, 0.1357);
+        assert_eq!(tariff_fit(&[], &wholesale, 1.21, 0.13), Value::Null);
+        assert_eq!(tariff_fit(&known, &[], 1.21, 0.13), Value::Null);
+        // No hour in common.
+        let elsewhere: Vec<(i64, f64)> = wholesale.iter().map(|&(t, w)| (t + 90 * 86_400, w)).collect();
+        assert_eq!(tariff_fit(&known, &elsewhere, 1.21, 0.13), Value::Null);
+        // One hour is no line, and neither are wholesale prices that don't vary.
+        assert_eq!(tariff_fit(&known[..4], &wholesale, 1.21, 0.13), Value::Null);
+        let flat: Vec<(i64, f64)> = wholesale.iter().map(|&(t, _)| (t, 0.10)).collect();
+        assert_eq!(tariff_fit(&known, &flat, 1.21, 0.13), Value::Null);
+        // An hour with a quarter missing is left out; so is a price that isn't a number.
+        let mut gap = known.clone();
+        gap.remove(5);
+        gap[40].import = f64::NAN;
+        let fit = tariff_fit(&gap, &wholesale, 1.21, 0.13);
+        assert_eq!(fit["hours"], 22);
+        assert!((fit["b"].as_f64().unwrap() - 0.1357).abs() < 1e-9, "{fit}");
+        // A price that spans two hours counts for both.
+        let hour0 = known[0].start;
+        let mut blocks = vec![KnownPrice {
+            start: hour0,
+            end: hour0 + 7200,
+            import: 0.25,
+        }];
+        blocks.extend(known[8..].iter().copied());
+        assert_eq!(tariff_fit(&blocks, &wholesale, 1.21, 0.13)["hours"], 24);
+        // Wholesale prices that aren't numbers are skipped.
+        let mut holes = wholesale.clone();
+        holes[3].1 = f64::NAN;
+        let fit = tariff_fit(&known, &holes, 1.21, 0.13);
+        assert_eq!(fit["hours"], 23);
+        assert!(
+            fit.as_object()
+                .unwrap()
+                .values()
+                .all(|v| v.as_f64().is_some_and(f64::is_finite))
+        );
+    }
+
+    #[test]
+    fn plan_reports_the_tariff_the_price_sensor_follows() {
+        let mut r = request();
+        assert_eq!(
+            plan_ha(&r).unwrap()["inputs"]["tariff_fit"],
+            Value::Null,
+            "no wholesale prices"
+        );
+        let hour0 = (T0 - T0 % 3600.0) as i64;
+        let w = |h: i64| 0.10 + 0.01 * (h.rem_euclid(5)) as f64;
+        r["wholesale"] = json!(
+            (-30 * 24..24)
+                .map(|h| json!([hour0 + h * 3600, w(h)]))
+                .collect::<Vec<_>>()
+        );
+        let prices: Vec<Value> = (0..24)
+            .map(|h| json!({"start": hour0 + h * 3600, "price": 1.21 * w(h) + 0.1357}))
+            .collect();
+        r["price_attributes"] = json!([["today", prices]]);
+        let plan = plan_ha(&r).unwrap();
+        let fit = &plan["inputs"]["tariff_fit"];
+        assert_eq!(fit["hours"], 24);
+        assert!((fit["a"].as_f64().unwrap() - 1.21).abs() < 1e-6, "{fit}");
+        assert!((fit["b"].as_f64().unwrap() - 0.1357).abs() < 1e-6, "{fit}");
+        assert!(
+            (fit["settings_diff"].as_f64().unwrap() - 0.0057).abs() < 1e-6,
+            "{fit}"
+        );
+        // It only reports: the plan's forecast prices still go through the settings.
+        r["cfg"]["tariff_b"] = json!(0.1357);
+        let matching = plan_ha(&r).unwrap();
+        assert!(
+            matching["inputs"]["tariff_fit"]["settings_diff"]
+                .as_f64()
+                .unwrap()
+                < 1e-6
+        );
     }
 
     #[test]

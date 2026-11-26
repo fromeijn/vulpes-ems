@@ -177,6 +177,12 @@ pub struct PriceForecast {
     pub check_days: Option<usize>,
     pub profile_mae: Option<f64>,
     pub regression_mae: Option<f64>,
+    /// What the anchor to the latest wholesale prices adds to the first
+    /// forecast hour (currency/kWh before the tariff), fading out over the
+    /// hours after it; `null` when no slot was forecast from the wholesale
+    /// history, or its latest hour has no forecast to compare with.
+    #[serde(default)]
+    pub anchor_offset: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

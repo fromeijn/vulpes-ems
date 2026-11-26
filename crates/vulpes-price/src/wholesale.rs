@@ -4,7 +4,8 @@
 //! The profile takes the same local hour on recent days of the same type. The
 //! regression explains the profile's error by how the hour's wind-power and
 //! solar indices differ from the profile's reference days: a windy day after
-//! calm ones is cheaper than the profile says. `vulpes-cli eval-price` and the
+//! calm ones is cheaper than the profile says. An anchor then connects the
+//! forecast to the latest known prices. `vulpes-cli eval-price` and the
 //! engine both use these functions, so the evaluation measures what runs live.
 
 use crate::ridge::{Ridge, recency_weight};
@@ -63,6 +64,10 @@ pub const CHECK_DAYS: i64 = 14;
 /// Days of wholesale history the live forecaster gets: the profile's look-back
 /// before each day the regression learns from, and about two months of those days.
 pub const HISTORY_DAYS: i64 = 90;
+/// The anchor takes the forecast's error over this many of the latest known hours.
+pub const ANCHOR_HOURS: usize = 1;
+/// The anchor's offset falls to 1/e in this many hours.
+pub const ANCHOR_FADE_H: f64 = 12.0;
 
 /// Profile settings for wholesale prices: 28 days back, 7-day half-life.
 pub fn profile_options() -> ProfileOptions {
@@ -266,6 +271,54 @@ pub fn fit(rows: &[Row], at: i64) -> Option<Ridge> {
     Ridge::fit(&weighted, LAMBDA)
 }
 
+/// Connects the forecast to the latest known prices. The profile's level lags
+/// when the market has moved in the last days, which shows as a step where the
+/// known prices end. The forecast's error in the last known hours says how
+/// large that step is: the anchor adds it to the hours that follow, fading out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Anchor {
+    /// Start of the first hour after the latest known one.
+    from: i64,
+    offset: f64,
+}
+
+impl Anchor {
+    /// From `(hour start, actual − forecast)` of known hours, in any order:
+    /// the mean error over the last [`ANCHOR_HOURS`] hours that are contiguous
+    /// up to the latest one. `None` without errors or with a non-finite one.
+    pub fn new(errors: &[(i64, f64)]) -> Option<Self> {
+        let last = errors.iter().map(|e| e.0).max()?;
+        let mut used = Vec::with_capacity(ANCHOR_HOURS);
+        for k in 0..ANCHOR_HOURS as i64 {
+            match errors.iter().find(|e| e.0 == last - k * 3600) {
+                Some(e) => used.push(e.1),
+                None => break,
+            }
+        }
+        let offset = used.iter().sum::<f64>() / used.len() as f64;
+        offset.is_finite().then_some(Self {
+            from: last + 3600,
+            offset,
+        })
+    }
+
+    /// The mean error of the latest known hours.
+    pub fn offset(&self) -> f64 {
+        self.offset
+    }
+
+    /// What the anchor adds to the forecast of the hour starting at `t`:
+    /// nothing up to the latest known hour, then the offset, fading with
+    /// [`ANCHOR_FADE_H`] from the middle of each hour.
+    pub fn at(&self, t: i64) -> f64 {
+        if t < self.from {
+            return 0.0;
+        }
+        let hours = (t - self.from) as f64 / 3600.0 + 0.5;
+        self.offset * (-hours / ANCHOR_FADE_H).exp()
+    }
+}
+
 /// Which forecast the live forecaster gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
@@ -293,6 +346,7 @@ pub struct WholesaleForecaster {
     model: Option<Ridge>,
     method: Method,
     check: Option<Check>,
+    anchor: Option<Anchor>,
 }
 
 impl WholesaleForecaster {
@@ -306,6 +360,8 @@ impl WholesaleForecaster {
     /// The regression trains on complete local days that have the profile's full
     /// look-back behind them. It is used only when it beat the profile over the
     /// last [`CHECK_DAYS`] days, each forecast with a model of the days before.
+    /// The forecast's error in the last hours of `history` anchors the hours
+    /// after them ([`Anchor`]).
     pub fn new(history: &[(i64, f64)], past: Drivers, ahead: Drivers, tz: Tz, now: i64) -> Self {
         let profile = profile(history, tz);
         let rows = training_rows(&profile, &past, history, tz, now);
@@ -316,14 +372,32 @@ impl WholesaleForecaster {
             (Some(_), Some(c)) if c.regression_mae < c.profile_mae => Method::Regression,
             _ => Method::Profile,
         };
-        Self {
+        let mut forecaster = Self {
             profile,
             past,
             ahead,
             model,
             method,
             check,
-        }
+            anchor: None,
+        };
+        forecaster.anchor = forecaster.latest_errors(history).and_then(|e| Anchor::new(&e));
+        forecaster
+    }
+
+    /// The forecast's error in the last [`ANCHOR_HOURS`] hours of `history`.
+    /// `None` when the latest hour has no forecast: an anchor on earlier hours
+    /// would start before the known prices end.
+    fn latest_errors(&self, history: &[(i64, f64)]) -> Option<Vec<(i64, f64)>> {
+        let last = history.iter().map(|x| x.0).max()?;
+        let error = |t: i64| {
+            let actual = history.iter().rev().find(|x| x.0 == t)?.1;
+            let (wind, solar) = self.drivers_at(t);
+            Some((t, actual - self.unanchored(t, wind, solar)?.0))
+        };
+        let mut errors = vec![error(last)?];
+        errors.extend((1..ANCHOR_HOURS as i64).map_while(|k| error(last - k * 3600)));
+        Some(errors)
     }
 
     pub fn method(&self) -> Method {
@@ -338,23 +412,39 @@ impl WholesaleForecaster {
         self.model.as_ref()
     }
 
-    /// Forecast for the hour starting at `t`, and whether the regression
-    /// corrected it, with the hour's drivers from `ahead`, else from `past`.
-    pub fn forecast(&self, t: i64) -> Option<(f64, bool)> {
+    /// The anchor to the latest known prices; `None` when their last hour has no forecast.
+    pub fn anchor(&self) -> Option<&Anchor> {
+        self.anchor.as_ref()
+    }
+
+    /// The wind and solar indices of the hour starting at `t`: from `ahead`, else from `past`.
+    fn drivers_at(&self, t: i64) -> (Option<f64>, Option<f64>) {
         let pick = |ahead: &HashMap<i64, f64>, past: &HashMap<i64, f64>| {
             ahead.get(&t).or_else(|| past.get(&t)).copied()
         };
-        self.forecast_with(
-            t,
+        (
             pick(&self.ahead.wind, &self.past.wind),
             pick(&self.ahead.solar, &self.past.solar),
         )
     }
 
+    /// Forecast for the hour starting at `t`, and whether the regression
+    /// corrected it, with the hour's drivers from `ahead`, else from `past`.
+    pub fn forecast(&self, t: i64) -> Option<(f64, bool)> {
+        let (wind, solar) = self.drivers_at(t);
+        self.forecast_with(t, wind, solar)
+    }
+
     /// Forecast for the hour starting at `t` with the given wind and solar
-    /// indices for that hour. The profile alone when the method is the profile
-    /// or a driver is missing.
+    /// indices for that hour: the profile, corrected by the regression unless
+    /// the method is the profile or a driver is missing, plus the anchor.
     pub fn forecast_with(&self, t: i64, wind: Option<f64>, solar: Option<f64>) -> Option<(f64, bool)> {
+        let (v, corrected) = self.unanchored(t, wind, solar)?;
+        Some((v + self.anchor.map_or(0.0, |a| a.at(t)), corrected))
+    }
+
+    /// The forecast before the anchor.
+    fn unanchored(&self, t: i64, wind: Option<f64>, solar: Option<f64>) -> Option<(f64, bool)> {
         let hour = Drivers {
             wind: wind.map(|v| (t, v)).into_iter().collect(),
             solar: solar.map(|v| (t, v)).into_iter().collect(),
@@ -601,7 +691,8 @@ mod tests {
         assert_eq!(f.method(), Method::Profile);
         let (v, corrected) = f.forecast(now + 86_400).unwrap();
         assert!(!corrected);
-        assert_eq!(v, f.profile.forecast(now + 86_400).unwrap());
+        let anchor = f.anchor().unwrap().at(now + 86_400);
+        assert_eq!(v, f.profile.forecast(now + 86_400).unwrap() + anchor);
     }
 
     #[test]
@@ -612,8 +703,13 @@ mod tests {
         let f = WholesaleForecaster::new(&known, Drivers::default(), Drivers::default(), TZ, now);
         assert_eq!(f.method(), Method::Profile);
         assert!(f.check().is_none() && f.model().is_none());
+        let anchor = f.anchor().unwrap();
         for t in (now..now + 3 * 86_400).step_by(3600) {
-            assert_eq!(f.forecast(t), f.profile.forecast(t).map(|v| (v, false)));
+            assert_eq!(
+                f.forecast(t),
+                f.profile.forecast(t).map(|v| (v + anchor.at(t), false)),
+                "the profile and the anchor"
+            );
         }
     }
 
@@ -622,6 +718,7 @@ mod tests {
         let f = WholesaleForecaster::new(&[], Drivers::default(), Drivers::default(), TZ, START);
         assert_eq!(f.forecast(START + 3600), None);
         assert_eq!(f.method(), Method::Profile);
+        assert!(f.anchor().is_none());
         // One day: a profile, no training rows (no full look-back).
         let (prices, drivers) = windy_market(1);
         let now = START + 86_400;
@@ -629,6 +726,145 @@ mod tests {
         assert_eq!(f.method(), Method::Profile);
         let (v, corrected) = f.forecast(now + 3600).unwrap();
         assert!(v.is_finite() && !corrected);
+        // The day itself has no forecast (nothing before it), so there is no error to anchor on.
+        assert!(f.anchor().is_none());
+    }
+
+    #[test]
+    fn anchor_takes_the_latest_contiguous_hours() {
+        assert_eq!(Anchor::new(&[]), None);
+        let last = 50 * 3600;
+        // One hour: its error is the offset, from the hour after it.
+        let a = Anchor::new(&[(last, 0.03)]).unwrap();
+        assert_eq!(a.offset(), 0.03);
+        assert_eq!(a.at(last), 0.0, "the known hour itself is not shifted");
+        assert!(a.at(last + 3600) > 0.0);
+        // The latest ANCHOR_HOURS hours, in any order; older hours don't count.
+        let mut errors: Vec<(i64, f64)> = (0..ANCHOR_HOURS as i64)
+            .map(|k| (last - k * 3600, -0.02))
+            .collect();
+        errors.push((last - ANCHOR_HOURS as i64 * 3600, 9.0));
+        errors.reverse();
+        let a = Anchor::new(&errors).unwrap();
+        assert!((a.offset() + 0.02).abs() < 1e-15, "{a:?}");
+        assert!(a.at(last + 3600) < 0.0, "a negative offset lowers the forecast");
+        // A gap before the latest hour: only the hours up to the gap count.
+        let a = Anchor::new(&[(last - 2 * 3600, 9.0), (last, 0.01)]).unwrap();
+        assert_eq!(a.offset(), 0.01);
+        // No number, no anchor.
+        assert_eq!(Anchor::new(&[(last, f64::NAN)]), None);
+        assert_eq!(Anchor::new(&[(last, f64::INFINITY)]), None);
+    }
+
+    #[test]
+    fn anchor_fades_after_the_known_hours() {
+        let last = 50 * 3600;
+        for offset in [0.05, -0.05] {
+            let a = Anchor::new(&[(last, offset)]).unwrap();
+            for t in [last - 86_400, last - 3600, last] {
+                assert_eq!(a.at(t), 0.0, "nothing up to the latest known hour");
+            }
+            let mut before = offset.abs();
+            for k in 1..=96 {
+                let v = a.at(last + k * 3600);
+                assert!(v.is_finite() && v.signum() == offset.signum());
+                assert!(v.abs() < before, "hour {k}: {v} after {before}");
+                before = v.abs();
+            }
+            let first = a.at(last + 3600);
+            assert!((first - offset * (-0.5 / ANCHOR_FADE_H).exp()).abs() < 1e-15);
+            assert!(first.abs() > 0.9 * offset.abs(), "most of the error carries over");
+            assert!(
+                a.at(last + 24 * 3600).abs() < 0.2 * offset.abs(),
+                "a day on, little is left"
+            );
+            assert!(a.at(last + 96 * 3600).abs() < 1e-3 * offset.abs());
+        }
+    }
+
+    /// Prices that follow the local hour, `shift` higher from `shift_from` on.
+    fn shifted_market(until: i64, shift_from: i64, shift: f64) -> Vec<(i64, f64)> {
+        (START..until)
+            .step_by(3600)
+            .map(|t| {
+                let level = if t >= shift_from { shift } else { 0.0 };
+                (t, 0.10 + 0.01 * local_hour(t) + level)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn forecast_connects_to_the_latest_known_prices() {
+        // The market went up 5 ct two days ago and stays there: the profile lags.
+        let end = START + 60 * 86_400;
+        let known = shifted_market(end, end - 2 * 86_400, 0.05);
+        let f = WholesaleForecaster::new(&known, Drivers::default(), Drivers::default(), TZ, end);
+        let truth = |t: i64| 0.15 + 0.01 * local_hour(t);
+        let last = end - 3600;
+        let offset = f.anchor().unwrap().offset();
+        assert!(
+            offset > 0.03,
+            "the profile is too low in the latest hour: {offset}"
+        );
+        // The first hours follow the level of the latest prices.
+        for t in (end..end + 3 * 3600).step_by(3600) {
+            let (v, _) = f.forecast(t).unwrap();
+            assert!((v - truth(t)).abs() < 0.01, "{v} vs {}", truth(t));
+            assert!(
+                (f.profile.forecast(t).unwrap() - truth(t)).abs() > 0.03,
+                "without it"
+            );
+        }
+        // Four days on it is the profile again.
+        let t = end + 96 * 3600;
+        assert!((f.forecast(t).unwrap().0 - f.profile.forecast(t).unwrap()).abs() < 1e-4);
+        // Known hours keep their plain forecast.
+        for t in [last, last - 86_400] {
+            assert_eq!(f.forecast(t).unwrap().0, f.profile.forecast(t).unwrap());
+        }
+        // A market that fell is anchored downwards.
+        let known = shifted_market(end, end - 2 * 86_400, -0.05);
+        let f = WholesaleForecaster::new(&known, Drivers::default(), Drivers::default(), TZ, end);
+        assert!(f.anchor().unwrap().offset() < -0.03);
+        assert!(f.forecast(end).unwrap().0 < f.profile.forecast(end).unwrap() - 0.03);
+    }
+
+    #[test]
+    fn a_steady_market_needs_no_anchor() {
+        let end = START + 40 * 86_400;
+        let known = shifted_market(end, end, 0.0);
+        let f = WholesaleForecaster::new(&known, Drivers::default(), Drivers::default(), TZ, end);
+        assert!(f.anchor().unwrap().offset().abs() < 1e-12);
+        for t in (end..end + 2 * 86_400).step_by(3600) {
+            let (v, _) = f.forecast(t).unwrap();
+            assert!((v - f.profile.forecast(t).unwrap()).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn anchor_follows_elapsed_time_across_a_dst_change() {
+        // Known up to local midnight before the 23-hour day (2026-03-29).
+        let day: chrono::NaiveDate = "2026-03-29".parse().unwrap();
+        let start = local_midnight(day, TZ).unwrap();
+        let next = local_midnight(day + chrono::Duration::days(1), TZ).unwrap();
+        let known = shifted_market(start, start - 2 * 86_400, 0.05);
+        let f = WholesaleForecaster::new(&known, Drivers::default(), Drivers::default(), TZ, start);
+        let hours = day_hours(start, next);
+        assert_eq!(hours.len(), 23);
+        let added: Vec<f64> = hours
+            .iter()
+            .map(|&t| f.forecast(t).unwrap().0 - f.profile.forecast(t).unwrap())
+            .collect();
+        assert!(added[0] > 0.03 && added.iter().all(|v| v.is_finite()));
+        assert!(
+            added.windows(2).all(|w| w[1] < w[0]),
+            "fades hour by hour: {added:?}"
+        );
+        let ratio = added[22] / added[0];
+        assert!(
+            (ratio - (-22.0 / ANCHOR_FADE_H).exp()).abs() < 1e-9,
+            "22 hours later, not 23"
+        );
     }
 
     #[test]
@@ -722,5 +958,7 @@ mod tests {
         let b = WholesaleForecaster::new(&later, drivers.clone(), drivers, TZ, now);
         assert_eq!(a.model(), b.model());
         assert_eq!(a.check(), b.check());
+        // The anchor is the only part that looks at the latest (published) hours.
+        assert_ne!(a.anchor(), b.anchor());
     }
 }

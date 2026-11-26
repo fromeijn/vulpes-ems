@@ -23,6 +23,14 @@ pub const ENERGY_LATE_S: f64 = 3.0 * 3600.0;
 pub const ENERGY_STOPPED_S: f64 = 24.0 * 3600.0;
 /// Wholesale prices not refreshed for this long (s).
 pub const WHOLESALE_OLD_S: f64 = 24.0 * 3600.0;
+/// The tariff check needs this many hours with a sensor price and a wholesale price.
+pub const TARIFF_MIN_HOURS: f64 = 12.0;
+/// The sensor's prices follow the wholesale prices when a line fits them
+/// this closely (RMS, currency/kWh); otherwise the check says nothing.
+pub const TARIFF_FIT_RMS: f64 = 0.002;
+/// The Tariff settings are reported when their price differs from the
+/// sensor's by more than this on average (currency/kWh).
+pub const TARIFF_DIFF: f64 = 0.002;
 /// Repair issues: how long a problem lasts before the user is told.
 pub const ISSUE_SOC_S: f64 = 3600.0;
 pub const ISSUE_NO_PLAN_S: f64 = 3600.0;
@@ -59,6 +67,39 @@ fn minutes(s: f64) -> String {
 fn counts(warning: &str, cfg: &Cfg) -> bool {
     let no_wholesale = cfg.get("wholesale_source").and_then(Value::as_str) != Some("energyzero");
     !(no_wholesale && warning.starts_with("no price forecast for"))
+}
+
+/// The Tariff settings against the tariff the price sensor itself follows
+/// (`inputs.tariff_fit` of the plan). Prices the sensor doesn't have go
+/// through the settings, so a difference is a step where the sensor's prices
+/// end. Only said when the sensor's prices are a line through the wholesale
+/// prices, on enough hours.
+fn tariff_check(plan: Option<&Value>, cfg: &Cfg) -> Value {
+    let fit = plan.and_then(|p| p.get("inputs")?.get("tariff_fit"));
+    let get = |k: &str| fit.and_then(|f| f.get(k)).and_then(as_f64);
+    let setting = |k: &str| cfg.get(k).and_then(as_f64);
+    let (Some(a), Some(b), Some(rms), Some(hours), Some(diff), Some(set_a), Some(set_b)) = (
+        get("a"),
+        get("b"),
+        get("rms_error"),
+        get("hours"),
+        get("settings_diff"),
+        setting("tariff_a"),
+        setting("tariff_b"),
+    ) else {
+        return check("tariff", OK, "");
+    };
+    if hours < TARIFF_MIN_HOURS || rms > TARIFF_FIT_RMS || diff <= TARIFF_DIFF {
+        return check("tariff", OK, "");
+    }
+    check(
+        "tariff",
+        DEGRADED,
+        format!(
+            "the price sensor follows {a:.3} × wholesale + {b:.4}, the Tariff settings have \
+             {set_a:.3} × wholesale + {set_b:.4}: prices not published yet are off by {diff:.4} per kWh"
+        ),
+    )
 }
 
 /// Wind and solar at the price reference points: fetched lately, and whether
@@ -227,6 +268,7 @@ pub fn health(snap: &Value) -> Result<Value> {
             check("prices", OK, "")
         },
     );
+    checks.push(tariff_check(plan, cfg));
 
     // Energy statistics (newest complete hour in the history file).
     checks.push(match num("newest_energy_ts").map(|t| now - (t + 3600.0)) {
@@ -406,6 +448,69 @@ mod tests {
             "not_enough_data",
             "review checks are merged"
         );
+    }
+
+    /// A snapshot whose plan found the sensor on `1.21 × wholesale + 0.1357`,
+    /// with the given fit error, hours and difference from the settings.
+    fn with_tariff_fit(rms: f64, hours: u32, diff: f64) -> Value {
+        let mut s = snap();
+        s["cfg"]["tariff_a"] = json!(1.21);
+        s["cfg"]["tariff_b"] = json!(0.13);
+        s["plan"]["inputs"] = json!({"tariff_fit": {
+            "a": 1.21, "b": 0.1357, "rms_error": rms, "hours": hours, "settings_diff": diff
+        }});
+        s
+    }
+
+    #[test]
+    fn tariff_settings_that_differ_from_the_price_sensor() {
+        let h = health(&with_tariff_fit(0.0002, 48, 0.0057)).unwrap();
+        assert_eq!(state_of(&h, "tariff"), "degraded");
+        assert_eq!(h["status"], "degraded");
+        let problem = h["problems"][0].as_str().unwrap();
+        assert_eq!(
+            problem,
+            "tariff: the price sensor follows 1.210 × wholesale + 0.1357, the Tariff settings have \
+             1.210 × wholesale + 0.1300: prices not published yet are off by 0.0057 per kWh"
+        );
+        assert_eq!(h["issues"], json!([]), "no repair issue: it only reports");
+        // At the limit it is still fine, just over it is not.
+        let at = |diff: f64| state_of(&health(&with_tariff_fit(0.0, 48, diff)).unwrap(), "tariff");
+        assert_eq!(at(0.0), "ok");
+        assert_eq!(at(TARIFF_DIFF), "ok");
+        assert_eq!(at(TARIFF_DIFF + 1e-6), "degraded");
+    }
+
+    #[test]
+    fn tariff_check_says_nothing_without_a_clear_fit() {
+        let state = |s: &Value| state_of(&health(s).unwrap(), "tariff");
+        // A healthy snapshot's plan has no fit at all (a plan from before the check).
+        assert_eq!(state(&snap()), "ok");
+        // Too few hours, or sensor prices that aren't a line through the wholesale prices.
+        assert_eq!(
+            state(&with_tariff_fit(0.0, TARIFF_MIN_HOURS as u32 - 1, 0.05)),
+            "ok"
+        );
+        assert_eq!(
+            state(&with_tariff_fit(0.0, TARIFF_MIN_HOURS as u32, 0.05)),
+            "degraded"
+        );
+        assert_eq!(state(&with_tariff_fit(TARIFF_FIT_RMS + 1e-6, 48, 0.05)), "ok");
+        assert_eq!(state(&with_tariff_fit(TARIFF_FIT_RMS, 48, 0.05)), "degraded");
+        // No fit (no wholesale prices, or none that vary), no plan, or no tariff in the settings.
+        let mut s = with_tariff_fit(0.0, 48, 0.05);
+        s["plan"]["inputs"]["tariff_fit"] = Value::Null;
+        assert_eq!(state(&s), "ok");
+        let mut s = with_tariff_fit(0.0, 48, 0.05);
+        s["plan"] = Value::Null;
+        assert_eq!(state(&s), "ok");
+        let mut s = with_tariff_fit(0.0, 48, 0.05);
+        s["cfg"].as_object_mut().unwrap().remove("tariff_b");
+        assert_eq!(state(&s), "ok");
+        // A fit with a field missing or not a number is no fit.
+        let mut s = with_tariff_fit(0.0, 48, 0.05);
+        s["plan"]["inputs"]["tariff_fit"]["rms_error"] = json!("?");
+        assert_eq!(state(&s), "ok");
     }
 
     #[test]

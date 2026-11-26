@@ -14,7 +14,7 @@ A home energy manager for Home Assistant. A Rust core does the forecasting (sola
 | `crates/vulpes-sources` | Open-Meteo, EnergyZero and ENTSO-E clients |
 | `crates/vulpes-solar` | Solar position, Perez transposition, PV model, calibration |
 | `crates/vulpes-load` | Similar-day load profile, NL calendar, temperature correction |
-| `crates/vulpes-price` | Tariff fit; wholesale forecast (profile + wind/solar regression, shared by the engine and `eval-price`) |
+| `crates/vulpes-price` | Tariff fit; wholesale forecast (profile + wind/solar regression + anchor to the latest known prices, shared by the engine and `eval-price`) |
 | `crates/vulpes-opt` | Slot physics (`step`) and DP optimizer |
 | `crates/vulpes-engine` | JSON request → forecasts → plan, solar calibration, price reference-point weather (`price_drivers.rs`), and the history file (`history.rs`: record a tick, export) |
 | `crates/vulpes-ha` | Home Assistant adapter: settings and migrations, flow checks, input parsing, plan/calibration requests, control script variables, solar form (`vulpes_ems.ha`, `plan_ha`, `calibrate_ha`) |
@@ -145,6 +145,7 @@ All three must be green before a release.
 
 - **Hybrid inverters:** PV behind a DC-coupled battery is limited by the PV input, not the AC output. The form's inverter limit is a single number; a separate AC limit for (PV − battery charge) is not modelled.
 - **Per-phase limits:** a single-phase inverter is limited by its phase fuse together with the house load on that phase. Not modelled; parked until needed.
+- **Quarter-hour price shape:** unpublished prices are forecast per hour, while published prices are per 15 minutes. The first and last quarter of an hour usually differ most from the hour's mean, so a small step remains where the published prices end. Spreading each hourly forecast over its quarters along the slope to the neighbouring hours, keeping the hour's mean, is parked until it is measured on 15-minute price history (`backfill-entsoe`).
 - **ML forecast corrections are parked.** The oracle replay (`vulpes-cli replay`, the "optimizer + actual …" rows) on a test household over one year showed that even a perfect load or PV forecast each saves only about a tenth of what the optimizer already saves over self-consumption, and a perfect forecast of unpublished prices nothing measurable. Before picking ML up again, run the oracle replay on the house in question and check that the gain justifies the work. Simpler levers (planning horizon, intraday scaling of the forecasts) come first.
 - **Monitoring limits** (`docs/monitoring.md`): the actual cost uses hourly statistics, so the hour's mean price; measured PV is after curtailment; past days are reviewed with the current battery settings.
 

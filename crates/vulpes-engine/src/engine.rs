@@ -339,7 +339,8 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
     let mut load_fallback = 0;
 
     // Prices: published where known, else forecast wholesale through the tariff:
-    // the similar-day profile, corrected for wind and solar when that has done better lately.
+    // the similar-day profile, corrected for wind and solar when that has done better
+    // lately, and anchored to the latest wholesale prices.
     let price_fc = (!req.wholesale_history.is_empty()).then(|| {
         let (past, ahead) = match &req.price_drivers {
             Some(d) => (Drivers::from_rows(&d.past), Drivers::from_rows(&d.ahead)),
@@ -348,6 +349,7 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
         WholesaleForecaster::new(&req.wholesale_history, past, ahead, tz, req.now)
     });
     let (mut forecast_slots, mut corrected_slots, mut published_slots) = (0usize, 0usize, 0usize);
+    let mut first_forecast_hour = None;
     // One wholesale forecast per hour, shared by the hour's slots.
     let mut last_hour: Option<(i64, Option<(f64, bool)>)> = None;
     let mut hour_fc = |hour: i64| match last_hour {
@@ -405,6 +407,7 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
             (None, None) => match hour_fc(hour) {
                 Some((w, corrected)) => {
                     corrected_slots += usize::from(corrected);
+                    first_forecast_hour.get_or_insert(hour);
                     req.tariff.price(w)
                 }
                 None => {
@@ -446,6 +449,11 @@ pub fn plan(req: &PlanRequest) -> Result<PlanResponse> {
         &mut warnings,
     );
     price_forecast.published_slots = published_slots;
+    price_forecast.anchor_offset = price_fc
+        .as_ref()
+        .and_then(WholesaleForecaster::anchor)
+        .zip(first_forecast_hour)
+        .map(|(anchor, hour)| anchor.at(hour));
 
     let terminal = {
         let mut v: Vec<f64> = inputs.iter().map(|s| s.import_price).collect();
@@ -541,6 +549,7 @@ fn price_forecast(
         check_days: check.map(|c| c.days),
         profile_mae: check.map(|c| c.profile_mae),
         regression_mae: check.map(|c| c.regression_mae),
+        anchor_offset: None,
     }
 }
 
@@ -702,7 +711,8 @@ mod tests {
 
     /// serde_json writes NaN and infinity as null: no nulls in a plan, except
     /// the day figures that are null by design when the weather doesn't cover a
-    /// day, and the price check without enough history.
+    /// day, the price check without enough history and the anchor without a
+    /// forecast slot (an anchor itself is always finite).
     fn assert_no_nan(out: &str) {
         let mut v: serde_json::Value = serde_json::from_str(out).unwrap();
         for k in [
@@ -715,7 +725,7 @@ mod tests {
         }
         // The price check is null by design with too little history.
         if let Some(pf) = v["price_forecast"].as_object_mut() {
-            for k in ["check_days", "profile_mae", "regression_mae"] {
+            for k in ["check_days", "profile_mae", "regression_mae", "anchor_offset"] {
                 pf.remove(k);
             }
         }
@@ -1580,9 +1590,89 @@ mod tests {
 
     #[test]
     fn all_prices_published_needs_no_forecast() {
-        let resp = plan(&request(1_781_000_000)).unwrap();
+        let mut r = request(1_781_000_000);
+        let resp = plan(&r).unwrap();
         let pf = resp.price_forecast.unwrap();
         assert_eq!((pf.method, pf.slots), (PriceMethod::Published, 0));
+        assert_eq!(pf.anchor_offset, None);
+        // Also with a wholesale history whose level moved: no slot is forecast.
+        r.wholesale_history = risen_history(&r);
+        let pf = plan(&r).unwrap().price_forecast.unwrap();
+        assert_eq!((pf.slots, pf.anchor_offset), (0, None));
+    }
+
+    /// 30 days of wholesale prices up to the end of the first 6 (published)
+    /// hours: 0.10, and 0.15 over the last two days.
+    fn risen_history(r: &PlanRequest) -> Vec<(i64, f64)> {
+        let end = r.now - r.now.rem_euclid(3600) + 6 * 3600;
+        (1..=(24 * 30))
+            .map(|h| end - h * 3600)
+            .map(|t| (t, if t >= end - 2 * 86_400 { 0.15 } else { 0.10 }))
+            .collect()
+    }
+
+    #[test]
+    fn forecast_prices_connect_to_the_latest_wholesale_price() {
+        // The market rose two days ago: the profile is still close to 0.10,
+        // the latest published hours are at 0.15.
+        let mut r = request(1_781_000_000);
+        r.known_prices.truncate(6);
+        r.wholesale_history = risen_history(&r);
+        let resp = plan(&r).unwrap();
+        let pf = resp.price_forecast.clone().unwrap();
+        let offset = pf.anchor_offset.expect("an anchor");
+        assert!(offset > 0.03 && offset < 0.05, "{offset}");
+        let forecast = &resp.slots[6 * 4..];
+        assert!(forecast.iter().all(|s| !s.price_known));
+        let at_latest_level = 1.21 * 0.15 + 0.13;
+        // The first forecast hour continues at the level of the latest prices,
+        assert!(
+            (forecast[0].import_price - at_latest_level).abs() < 0.005,
+            "{} vs {at_latest_level}",
+            forecast[0].import_price
+        );
+        // and from there the forecast returns towards the profile.
+        let last = forecast.last().unwrap().import_price;
+        assert!(last < forecast[0].import_price - 0.01, "{last}");
+        for s in forecast {
+            let p = s.import_price;
+            assert!(p > 1.21 * 0.10 + 0.13 && p < at_latest_level + 1e-9, "{s:?}");
+        }
+        assert!(
+            forecast
+                .iter()
+                .all(|s| s.import_price.is_finite() && s.export_price.is_finite())
+        );
+        // Without the rise there is nothing to add.
+        r.wholesale_history.iter_mut().for_each(|x| x.1 = 0.10);
+        let pf = plan(&r).unwrap().price_forecast.unwrap();
+        assert!(pf.anchor_offset.unwrap().abs() < 1e-12);
+    }
+
+    #[test]
+    fn anchor_offset_json_round_trip() {
+        let mut r = request(1_781_000_000);
+        r.known_prices.truncate(6);
+        r.wholesale_history = risen_history(&r);
+        let json = serde_json::to_string(&r).unwrap();
+        let resp: serde_json::Value = serde_json::from_str(&crate::plan_json(&json).unwrap()).unwrap();
+        let offset = resp["price_forecast"]["anchor_offset"].as_f64().unwrap();
+        assert!(offset > 0.03, "{offset}");
+        let back: PlanResponse = serde_json::from_value(resp.clone()).unwrap();
+        assert_eq!(back.price_forecast.unwrap().anchor_offset, Some(offset));
+        // A response from before the field parses without it.
+        let mut old = resp;
+        old["price_forecast"]
+            .as_object_mut()
+            .unwrap()
+            .remove("anchor_offset");
+        let old: PlanResponse = serde_json::from_value(old).unwrap();
+        assert_eq!(old.price_forecast.unwrap().anchor_offset, None);
+        // No wholesale history: the mean known price, and no anchor.
+        r.wholesale_history.clear();
+        let resp: serde_json::Value =
+            serde_json::from_str(&crate::plan_json(&serde_json::to_string(&r).unwrap()).unwrap()).unwrap();
+        assert!(resp["price_forecast"]["anchor_offset"].is_null());
     }
 
     #[test]

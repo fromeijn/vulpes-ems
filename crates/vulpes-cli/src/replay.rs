@@ -324,6 +324,61 @@ fn published_at(tz: Tz, h: i64) -> i64 {
     midnight(tz, day).unwrap_or(h) - 12 * 3600
 }
 
+/// End of the prices published at `t`: the end of the local day, or of the
+/// next one once its prices are out.
+fn published_until(tz: Tz, t: i64) -> Result<i64> {
+    let today = tz.timestamp_opt(t, 0).single().context("tz")?.date_naive();
+    let tomorrow = today.succ_opt().context("date")?;
+    let end_of_today = midnight(tz, tomorrow)?;
+    if published_at(tz, end_of_today) <= t {
+        midnight(tz, tomorrow.succ_opt().context("date")?)
+    } else {
+        Ok(end_of_today)
+    }
+}
+
+/// The wholesale forecasters as the planner has them at `t`: the price
+/// profile alone, and with the wind/solar regression when `drivers` has
+/// leads. Both know the last [`wholesale::HISTORY_DAYS`] days of prices up to
+/// the end of the published ones, as the engine does live, and are anchored
+/// to the latest of them.
+///
+/// The drivers are the day-ahead forecasts for the hours before today (the
+/// history), and for the published hours from today on the freshest forecast
+/// issued by `t`.
+fn price_forecasters(
+    price_hist: &[(i64, f64)],
+    drivers: &[Drivers],
+    tz: Tz,
+    t: i64,
+) -> Result<(WholesaleForecaster, Option<WholesaleForecaster>)> {
+    let today = tz.timestamp_opt(t, 0).single().context("tz")?.date_naive();
+    let (cut, until) = (midnight(tz, today)?, published_until(tz, t)?);
+    let from = cut - wholesale::HISTORY_DAYS * 86_400;
+    let known: Vec<(i64, f64)> = price_hist
+        .iter()
+        .copied()
+        .filter(|&(x, _)| from <= x && x < until)
+        .collect();
+    let profile = WholesaleForecaster::new(&known, Drivers::default(), Drivers::default(), tz, cut);
+    let regression = drivers.first().map(|day_ahead| {
+        let before = |m: &HashMap<i64, f64>| m.iter().filter(|e| *e.0 < cut).map(|(&h, &v)| (h, v)).collect();
+        let past = Drivers {
+            wind: before(&day_ahead.wind),
+            solar: before(&day_ahead.solar),
+        };
+        let rows: Vec<_> = (cut..until)
+            .step_by(3600)
+            .map(|h| {
+                let (wind, solar) = driver_forecast(drivers, t, h);
+                (h, wind, solar)
+            })
+            .collect();
+        WholesaleForecaster::new(&known, past, Drivers::from_rows(&rows), tz, cut)
+    });
+    Ok((profile, regression))
+}
+
 /// Value of stored energy after the horizon: median import price × discharge efficiency.
 fn terminal_value(slots: &[SlotInput], discharge_eff: f64) -> f64 {
     let mut v: Vec<f64> = slots.iter().map(|x| x.import_price).collect();
@@ -425,12 +480,9 @@ fn simulate(
     if regression && data.price_drivers.is_empty() {
         bail!("the price regression needs price drivers");
     }
-    let mut day_cache: Option<(
-        NaiveDate,
-        ProfileForecaster,
-        ProfileForecaster,
-        Option<WholesaleForecaster>,
-    )> = None;
+    let mut load_cache: Option<(NaiveDate, ProfileForecaster)> = None;
+    // Keyed by the local day and the end of the published prices.
+    let mut price_cache: Option<((NaiveDate, i64), WholesaleForecaster, Option<WholesaleForecaster>)> = None;
     let (mut hours, mut short_hours) = (0usize, 0usize);
     // Per local day with a replayed hour: the day, its replayed hours and the cost per strategy.
     let mut days: Vec<(NaiveDate, usize, Vec<f64>)> = Vec::new();
@@ -440,41 +492,25 @@ fn simulate(
             t += 3600;
             continue;
         };
-        // Forecasters are refit once per local day on data before its midnight.
+        // The load forecaster is refit once per local day on data before its midnight.
         let today = tz.timestamp_opt(t, 0).single().context("tz")?.date_naive();
-        if day_cache.as_ref().is_none_or(|c| c.0 != today) {
+        if load_cache.as_ref().is_none_or(|c| c.0 != today) {
             let cut = midnight(tz, today)?;
-            let before = |h: &[(i64, f64)]| -> Vec<(i64, f64)> {
-                h.iter().copied().filter(|&(x, _)| x < cut).collect()
-            };
-            day_cache = Some((
+            let before: Vec<(i64, f64)> = load_hist.iter().copied().filter(|&(x, _)| x < cut).collect();
+            load_cache = Some((
                 today,
-                ProfileForecaster::new(
-                    &before(&load_hist),
-                    tz,
-                    Country::Netherlands,
-                    ProfileOptions::default(),
-                ),
-                wholesale::profile(&before(&price_hist), tz),
-                regression.then(|| {
-                    // The window of wholesale history the engine gets live.
-                    let from = cut - wholesale::HISTORY_DAYS * 86_400;
-                    let recent: Vec<(i64, f64)> = price_hist
-                        .iter()
-                        .copied()
-                        .filter(|&(x, _)| from <= x && x < cut)
-                        .collect();
-                    WholesaleForecaster::new(
-                        &recent,
-                        data.price_drivers[0].clone(),
-                        Drivers::default(),
-                        tz,
-                        cut,
-                    )
-                }),
+                ProfileForecaster::new(&before, tz, Country::Netherlands, ProfileOptions::default()),
             ));
         }
-        let (_, load_fc, price_fc, wholesale_fc) = day_cache.as_ref().expect("cache set");
+        // The price forecasters also when more prices are published.
+        let key = (today, published_until(tz, t)?);
+        if price_cache.as_ref().is_none_or(|c| c.0 != key) {
+            let drivers: &[Drivers] = if regression { &data.price_drivers } else { &[] };
+            let (profile, with_regression) = price_forecasters(&price_hist, drivers, tz, t)?;
+            price_cache = Some((key, profile, with_regression));
+        }
+        let (_, load_fc) = load_cache.as_ref().expect("cache set");
+        let (_, price_fc, wholesale_fc) = price_cache.as_ref().expect("cache set");
         // Forecast inputs as known at t, and the actual values for the perfect-foresight bound.
         let mut fc = Vec::new();
         let mut fc_reg = Vec::new();
@@ -484,7 +520,7 @@ fn simulate(
             let w = if published {
                 price.get(&h).copied()
             } else {
-                price_fc.forecast(h)
+                price_fc.forecast(h).map(|x| x.0)
             };
             let (Some(w), Some(l), Some(p)) = (w, load_fc.forecast(h), pv_forecast(&data.pv_fc, t, h)) else {
                 break;
@@ -912,6 +948,106 @@ mod tests {
         assert_eq!(published_at(TZ, h), 1_794_049_200); // 2026-11-07 11:00 UTC
         // 23:30 UTC on 8 Nov is already 9 Nov locally.
         assert_eq!(published_at(TZ, 1_794_180_600), 1_794_049_200 + 86_400);
+    }
+
+    #[test]
+    fn published_until_moves_a_day_at_publication() {
+        // October is UTC+2: local midnight is 22:00 UTC, publication 10:00 UTC.
+        let (today, tomorrow, after) = (
+            midnight(TZ, day(10)).unwrap(),
+            midnight(TZ, day(11)).unwrap(),
+            midnight(TZ, day(12)).unwrap(),
+        );
+        let published = published_at(TZ, tomorrow);
+        assert_eq!(published, tomorrow - 12 * 3600);
+        assert_eq!(published_until(TZ, today).unwrap(), tomorrow);
+        assert_eq!(published_until(TZ, published - 3600).unwrap(), tomorrow);
+        assert_eq!(published_until(TZ, published).unwrap(), after);
+        assert_eq!(published_until(TZ, tomorrow - 3600).unwrap(), after);
+        // The 25-hour day (25 Oct): its end is 25 hours after its start.
+        let dst = midnight(TZ, day(25)).unwrap();
+        assert_eq!(published_until(TZ, dst).unwrap(), dst + 25 * 3600);
+        // Every hour the replay calls published is before that end, and the next one is not.
+        for t in (today..after).step_by(3600) {
+            let until = published_until(TZ, t).unwrap();
+            assert!(published_at(TZ, until - 3600) <= t && published_at(TZ, until) > t);
+        }
+    }
+
+    #[test]
+    fn price_forecasters_know_the_published_prices_and_nothing_later() {
+        let base = sorted(&data(40).price);
+        // Tuesday 20 Oct, before publication; the days after it are workdays too.
+        let morning = midnight(TZ, day(20)).unwrap() + 8 * 3600;
+        let until = published_until(TZ, morning).unwrap();
+        assert_eq!(until, midnight(TZ, day(21)).unwrap());
+        let forecast = |prices: &[(i64, f64)], t: i64, h: i64| {
+            let (profile, regression) = price_forecasters(prices, &[], TZ, t).unwrap();
+            assert!(regression.is_none(), "no drivers, no regression");
+            profile.forecast(h).unwrap().0
+        };
+        let changed = |from: i64, to: i64, add: f64| -> Vec<(i64, f64)> {
+            base.iter()
+                .map(|&(h, p)| (h, if from <= h && h < to { p + add } else { p }))
+                .collect()
+        };
+        let first = forecast(&base, morning, until);
+        // Prices that aren't published yet change nothing.
+        assert_eq!(forecast(&changed(until, i64::MAX, 1.0), morning, until), first);
+        // The latest published hour does: the forecast is anchored to it.
+        let risen = forecast(&changed(until - 3600, until, 0.10), morning, until);
+        assert!(risen > first + 0.08, "{risen} vs {first}");
+        // So does the rest of today, through the profile of the days after it.
+        let day_after = until + 86_400 + 3 * 3600;
+        let today_start = midnight(TZ, day(20)).unwrap();
+        assert!(
+            forecast(&changed(today_start, until - 3600, 0.10), morning, day_after)
+                > forecast(&base, morning, day_after) + 0.01
+        );
+        // Tomorrow's prices count from their publication on.
+        let tomorrow_risen = changed(until, until + 86_400, 0.10);
+        assert_eq!(
+            forecast(&tomorrow_risen, morning, day_after),
+            forecast(&base, morning, day_after)
+        );
+        let afternoon = published_at(TZ, until);
+        assert_eq!(published_until(TZ, afternoon).unwrap(), until + 86_400);
+        assert!(
+            forecast(&tomorrow_risen, afternoon, day_after) > forecast(&base, afternoon, day_after) + 0.05
+        );
+    }
+
+    #[test]
+    fn price_forecasters_use_the_driver_forecasts_issued_by_then() {
+        let d = windy_data(60);
+        let prices = sorted(&d.price);
+        let t = midnight(TZ, day(1) + chrono::Duration::days(54)).unwrap() + 8 * 3600;
+        let until = published_until(TZ, t).unwrap();
+        let (_, regression) = price_forecasters(&prices, &d.price_drivers, TZ, t).unwrap();
+        let regression = regression.expect("drivers give a regression");
+        assert_eq!(regression.method(), wholesale::Method::Regression);
+        let h = until + 5 * 3600;
+        let with_wind = |w: f64| regression.forecast_with(h, Some(w), Some(0.0)).unwrap().0;
+        assert!(with_wind(1.0) < with_wind(0.0) - 0.2, "wind lowers the price");
+        // Driver forecasts for hours after the published ones are not read, at any lead,
+        // and neither are the day-ahead forecasts issued later for the published hours.
+        let mut later = d.price_drivers.clone();
+        for (lead, drivers) in later.iter_mut().enumerate() {
+            for (hour, w) in drivers.wind.iter_mut() {
+                let issued = hour - (lead as i64 + 1) * 86_400;
+                if *hour >= until || (issued > t && *hour >= t) {
+                    *w = 9.0;
+                }
+            }
+        }
+        let (_, other) = price_forecasters(&prices, &later, TZ, t).unwrap();
+        let other = other.unwrap();
+        assert_eq!(other.model(), regression.model());
+        assert_eq!(other.anchor(), regression.anchor());
+        assert_eq!(
+            other.forecast_with(h, Some(0.5), Some(0.0)),
+            regression.forecast_with(h, Some(0.5), Some(0.0))
+        );
     }
 
     #[test]

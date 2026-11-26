@@ -34,6 +34,8 @@ How to read the coefficients:
 
 Fitting import and export compensation separately shows whether export is paid at the import price (net metering) or not.
 
+In Home Assistant, the health check `tariff` compares the Tariff settings with the tariff the price sensor itself follows (see [monitoring.md](monitoring.md#health)).
+
 Export has its own `a` and `b`. Under net metering they equal the import values. Without it, export is typically paid at the wholesale price without VAT (`a` close to 1), minus any feed-in fee per kWh (a negative `b`). The planner gets the wholesale price of a published slot back from its import price. A fixed import price (`a` = 0) doesn't allow that, so it only goes with a fixed export price (export `a` = 0, the price in `b`).
 
 ## Wholesale forecast
@@ -51,6 +53,14 @@ Windy or sunny hours after calm, dull reference days are cheaper than the profil
 - The regression needs 14 days of rows.
 - It trains on day-ahead residuals: for each past day, the profile of the days before it, against that day's prices.
 - Live, it trains on every complete day of the wholesale history that has the profile's full look-back behind it.
+
+**Anchor to the latest known prices.** The profile is a mean over four weeks, so its level lags when the market has moved in the last days. Without a correction, that shows as a step where the published prices end, and the planner would charge or discharge around a step that isn't there. The forecast's error in the last known hour says how large the step is:
+- the forecast of each later hour gets that error added, fading with a time constant of 12 hours (`ANCHOR_HOURS`, `ANCHOR_FADE_H`);
+- the first forecast hour so continues at the level of the last published one, and a day later 13 % of the offset is left;
+- it applies to the profile and to the corrected forecast alike, and has nothing to train;
+- when the wholesale history ends before the published prices do (a failed fetch), the fade counts from the history's end, so an old error has no effect.
+
+The plan's `price_forecast.anchor_offset` is what the anchor adds to the first forecast hour, before the tariff.
 
 **Drivers.** Open-Meteo forecasts at public reference points, one model (`ecmwf_ifs025`) for training and forecasting:
 
@@ -84,6 +94,9 @@ A failed fetch keeps the cached data. The health check `price_drivers` reports a
 | Copy last known day | What simple setups do while tomorrow's prices are unknown. |
 | Profile | As above. |
 | Profile + wind/solar regression | As above, with the drivers as forecast `--lead-days` ahead for the day being forecast. |
+| Profile + anchor, profile + wind/solar regression + anchor | The two above with the anchor on their error in the last known hour, the last hour of the issue day. |
+
+`--weeks even` or `--weeks odd` scores only the days in those ISO weeks, to choose a setting on one half and check it on the other. The regression still learns from every past day.
 
 **Scoring:** besides MAE and RMSE, it reports what matters for storage:
 - the within-day rank correlation;
@@ -100,5 +113,6 @@ A failed fetch keeps the cached data. The health check `price_drivers` reports a
 
 - For picking the very cheapest 4 hours, the plain profile scores slightly better, by up to 0.2 of an hour per day (at 4 days ahead).
 - ICON-D2 drivers give similar results a day ahead, but ICON-D2 has no archive beyond one day ahead.
+- The anchor lowers the day-ahead MAE by a further 9 % with the regression and by 14 % for the profile alone, with the same rank correlation and the same hits on the cheapest and priciest hours. Two days ahead it gains 1 %, beyond that nothing. Its two settings were chosen on the even ISO weeks; the odd weeks gave the same gain.
 
-**What it is worth.** The replay ([optimizer.md](optimizer.md#replay)) runs the optimizer with each price forecast and settles at actual prices. On a test household with export at the wholesale price, the 84-hour plan with the correction cost about the same as with the profile alone, within the replay's interval. A perfect forecast of the unpublished prices also saved little there. The battery cycles mostly within the day, which the published prices already show. The correction matters more where the battery shifts energy across days: when export earns little, or with a large battery and a small daily load.
+**What it is worth.** The replay ([optimizer.md](optimizer.md#replay)) runs the optimizer with each price forecast and settles at actual prices. On a test household with export at the wholesale price, the 84-hour plan with the correction cost about the same as with the profile alone, within the replay's interval. A perfect forecast of the unpublished prices also saved little there. The anchor made no difference in cost there either. The battery cycles mostly within the day, which the published prices already show. The correction matters more where the battery shifts energy across days: when export earns little, or with a large battery and a small daily load.

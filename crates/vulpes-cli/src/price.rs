@@ -1,12 +1,15 @@
 //! Tariff fitting and price forecast evaluation commands.
 
+use crate::solar::Weeks;
 use anyhow::{Result, bail};
 use chrono::{DateTime, Datelike};
 use std::collections::{BTreeMap, HashMap};
 use vulpes_core::{ErrorStats, Store};
 use vulpes_price::ridge::Ridge;
 use vulpes_price::tariff::{TariffSample, fit};
-use vulpes_price::wholesale::{self, Drivers, Row, day_hours, day_rows, features, local_midnight};
+use vulpes_price::wholesale::{
+    self, ANCHOR_HOURS, Anchor, Drivers, Row, day_hours, day_rows, features, local_midnight,
+};
 
 fn series(store: &Store, key: &str) -> Result<HashMap<i64, f64>> {
     Ok(store.samples(key, 3600, 0, i64::MAX / 2)?.into_iter().collect())
@@ -119,6 +122,8 @@ pub(crate) struct PricePoints {
     pub solar: Vec<String>,
     /// Forecast lead in days: 1 is the day-ahead forecast before the auction.
     pub lead_days: u8,
+    /// Score only the days in these ISO weeks; the models learn from every past day.
+    pub weeks: Weeks,
 }
 
 /// The source of the same forecast `lead_days` ahead: `open-meteo-day1:…` becomes
@@ -170,7 +175,7 @@ pub(crate) fn evaluate(
         .transpose()?;
     let ahead = later.as_ref().unwrap_or(&past);
     let with_points = !(points.wind.is_empty() && points.solar.is_empty());
-    let e = evaluate_days(&all, &past, ahead, lead, with_points, from, to, tz);
+    let e = evaluate_days(&all, &past, ahead, lead, with_points, points.weeks, from, to, tz);
     let scores = &e.scores;
     let d = scores[0].days.max(1) as f64;
     let issued = match lead {
@@ -182,13 +187,13 @@ pub(crate) fn evaluate(
         scores[0].days
     );
     println!(
-        "{:34} {:>9} {:>9} {:>8} {:>10} {:>12} {:>12}",
+        "{:40} {:>9} {:>9} {:>8} {:>10} {:>12} {:>12}",
         "method", "MAE ct", "RMSE ct", "bias", "rank corr", "cheapest-4", "priciest-4"
     );
     for (name, s) in PRICE_METHODS.iter().zip(scores) {
         let n = s.err.n.max(1) as f64;
         println!(
-            "{name:34} {:9.2} {:9.2} {:+8.2} {:10.2} {:9.2} / 4 {:9.2} / 4",
+            "{name:40} {:9.2} {:9.2} {:+8.2} {:10.2} {:9.2} / 4 {:9.2} / 4",
             100.0 * s.err.abs / n,
             100.0 * (s.err.sq / n).sqrt(),
             100.0 * s.err.sum / n,
@@ -207,10 +212,12 @@ pub(crate) fn evaluate(
     Ok(())
 }
 
-const PRICE_METHODS: [&str; 3] = [
+const PRICE_METHODS: [&str; 5] = [
     "copy last known day",
     "profile (28 d, half-life 7 d)",
     "profile + wind/solar regression",
+    "profile + anchor",
+    "profile + wind/solar regression + anchor",
 ];
 
 struct PriceEval {
@@ -224,7 +231,11 @@ struct PriceEval {
 /// `past` holds the drivers as forecast a day ahead (training and the
 /// profile's reference days); `ahead` the drivers as forecast `lead` days
 /// ahead (the day being forecast). With reference points (`with_points`), a
-/// day is scored once the regression has 14 days of past residuals.
+/// day is scored once the regression has 14 days of past residuals. Only days
+/// in `weeks` are scored; the regression learns from every day.
+///
+/// The anchored methods add the [`Anchor`] of their forecast's error in the
+/// last known hours, as the live forecaster does.
 #[allow(clippy::too_many_arguments)]
 fn evaluate_days(
     all: &[(i64, f64)],
@@ -232,6 +243,7 @@ fn evaluate_days(
     ahead: &Drivers,
     lead: u8,
     with_points: bool,
+    weeks: Weeks,
     from: chrono::NaiveDate,
     to: chrono::NaiveDate,
     tz: chrono_tz::Tz,
@@ -266,6 +278,24 @@ fn evaluate_days(
             .cloned()
             .collect();
         let model = wholesale::fit(&usable, start);
+        // The error of both forecasts in the last known hours, with the
+        // drivers as forecast a day ahead of them.
+        let known_error = |k: i64| {
+            let t = known_until - k * 3600;
+            let (p, x) = features(&profile, past, past, t)?;
+            let corrected = match (&model, &x) {
+                (Some(m), Some(x)) => p + m.predict(x),
+                _ => p,
+            };
+            let a = actual.get(&t)?;
+            Some(((t, a - p), (t, a - corrected)))
+        };
+        // As live: no anchor when the latest known hour has no forecast.
+        let (profile_errors, regression_errors): (Vec<_>, Vec<_>) = known_error(1)
+            .into_iter()
+            .chain((2..=ANCHOR_HOURS as i64).map_while(known_error))
+            .unzip();
+        let anchor = |errors: &[(i64, f64)], t: i64| Anchor::new(errors).map_or(0.0, |a| a.at(t));
         let mut f: Vec<Vec<f64>> = vec![Vec::new(); PRICE_METHODS.len()];
         let mut a = Vec::new();
         let mut ok = true;
@@ -282,6 +312,8 @@ fn evaluate_days(
             f[0].push(last_known.unwrap_or(p));
             f[1].push(p);
             f[2].push(corrected);
+            f[3].push(p + anchor(&profile_errors, t));
+            f[4].push(corrected + anchor(&regression_errors, t));
             a.push(actual[&t]);
         }
         // Training rows are day-ahead residuals, as live: the profile knows
@@ -300,7 +332,7 @@ fn evaluate_days(
         past_rows.extend(rows);
         // With reference points, wait for the regression's warm-up so all
         // methods are scored on the same days; without, it never trains.
-        if ok && (model.is_some() || !with_points) {
+        if ok && (model.is_some() || !with_points) && weeks.includes(start + 12 * 3600) {
             for (m, s) in scores.iter_mut().enumerate() {
                 for (fv, av) in f[m].iter().zip(&a) {
                     s.err.add(*fv, *av);
@@ -400,6 +432,7 @@ mod tests {
             &none,
             1,
             false,
+            Weeks::All,
             date("2026-01-20"),
             date("2026-01-29"),
             TZ,
@@ -410,6 +443,87 @@ mod tests {
         assert!((copy.rho / copy.days as f64 - 1.0).abs() < 1e-12);
         assert_eq!((copy.cheap_hits, copy.dear_hits), (4 * 10, 4 * 10));
         assert!(e.last_model.is_none());
+        // Nothing to anchor on either: every method is exact.
+        assert_eq!(e.scores.len(), PRICE_METHODS.len());
+        for s in &e.scores {
+            assert!(s.err.abs < 1e-12 && s.days == 10);
+        }
+    }
+
+    /// Hour-of-day prices that rise by 5 ct on 2026-02-10 and stay there.
+    fn risen_market() -> Vec<(i64, f64)> {
+        let rise = midnight(date("2026-02-10"));
+        series(70, |t| {
+            0.10 + 0.01 * local_hour(t) + if t >= rise { 0.05 } else { 0.0 }
+        })
+    }
+
+    #[test]
+    fn anchor_follows_a_level_shift_a_day_ahead() {
+        let all = risen_market();
+        let none = Drivers::default();
+        let run = |lead: u8| {
+            evaluate_days(
+                &all,
+                &none,
+                &none,
+                lead,
+                false,
+                Weeks::All,
+                date("2026-02-11"),
+                date("2026-02-20"),
+                TZ,
+            )
+        };
+        let mae = |e: &PriceEval, k: usize| e.scores[k].err.mae().unwrap();
+        // A day ahead the profile lags the new level; the anchor closes most of the gap
+        // in the first hours. Without a model, the regression rows equal the profile rows.
+        let e = run(1);
+        assert!(mae(&e, 1) > 0.01, "the profile lags: {}", mae(&e, 1));
+        assert!(mae(&e, 3) < 0.8 * mae(&e, 1), "{} vs {}", mae(&e, 3), mae(&e, 1));
+        assert_eq!(mae(&e, 2), mae(&e, 1));
+        assert_eq!(mae(&e, 4), mae(&e, 3));
+        // The shape within the day is still right.
+        assert!(e.scores[3].rho / e.scores[3].days as f64 > 0.99);
+        // Three days ahead the latest known hour is two days before the day: next to nothing is left.
+        let e = run(3);
+        assert!((mae(&e, 3) - mae(&e, 1)).abs() < 0.03 * mae(&e, 1));
+    }
+
+    #[test]
+    fn weeks_split_the_scored_days_only() {
+        let wind_speed = |t: i64| 3.0 + ((t / 86_400 * 5) % 10) as f64;
+        let all = series(90, |t| {
+            0.20 + 0.005 * local_hour(t) - 0.10 * wind_power(wind_speed(t))
+        });
+        let wind: HashMap<i64, f64> = all.iter().map(|&(t, _)| (t, wind_speed(t))).collect();
+        let solar: HashMap<i64, f64> = all.iter().map(|&(t, _)| (t, 0.0)).collect();
+        let drivers = Drivers::from_points(&[wind], &[solar]);
+        let run = |weeks: Weeks| {
+            evaluate_days(
+                &all,
+                &drivers,
+                &drivers,
+                1,
+                true,
+                weeks,
+                date("2026-01-30"),
+                date("2026-03-25"),
+                TZ,
+            )
+        };
+        let (every, even, odd) = (run(Weeks::All), run(Weeks::Even), run(Weeks::Odd));
+        for k in 0..PRICE_METHODS.len() {
+            let (a, e, o) = (&every.scores[k], &even.scores[k], &odd.scores[k]);
+            assert!(e.days > 0 && o.days > 0);
+            assert_eq!(e.days + o.days, a.days);
+            assert_eq!(e.err.n + o.err.n, a.err.n);
+            assert!((e.err.abs + o.err.abs - a.err.abs).abs() < 1e-9);
+        }
+        // The regression learns from every day, whichever weeks are scored.
+        assert!(even.last_model.is_some() && odd.last_model.is_some());
+        let last_even_day = run(Weeks::Even).last_model;
+        assert_eq!(even.last_model, last_even_day);
     }
 
     #[test]
@@ -428,6 +542,7 @@ mod tests {
             &drivers,
             1,
             true,
+            Weeks::All,
             date("2026-01-30"),
             date("2026-03-25"),
             TZ,
@@ -463,6 +578,7 @@ mod tests {
                 &none,
                 1,
                 false,
+                Weeks::All,
                 date("2026-01-25"),
                 date("2026-02-10"),
                 TZ,
@@ -499,6 +615,7 @@ mod tests {
                 &none,
                 lead,
                 false,
+                Weeks::All,
                 date("2026-02-10"),
                 date("2026-02-10"),
                 TZ,
@@ -526,8 +643,8 @@ mod tests {
         let calm: HashMap<i64, f64> = all.iter().map(|&(t, _)| (t, 0.0)).collect();
         let ahead = Drivers::from_points(&[calm], &[solar]);
         let (a, b) = (date("2026-02-15"), date("2026-03-25"));
-        let good = evaluate_days(&all, &past, &past, 2, true, a, b, TZ);
-        let bad = evaluate_days(&all, &past, &ahead, 2, true, a, b, TZ);
+        let good = evaluate_days(&all, &past, &past, 2, true, Weeks::All, a, b, TZ);
+        let bad = evaluate_days(&all, &past, &ahead, 2, true, Weeks::All, a, b, TZ);
         let mae = |e: &PriceEval| e.scores[2].err.mae().unwrap();
         assert!(mae(&good) < 0.5 * mae(&bad), "{} vs {}", mae(&good), mae(&bad));
         assert_eq!(good.scores[2].days, bad.scores[2].days);

@@ -75,6 +75,9 @@ def test_plan_returns_a_response():
     assert resp["summary"]["mode_now"] in ("charge", "self_consume")
     assert all(s["price_known"] for s in resp["slots"])
     assert resp["version"] == vulpes_ems.__version__
+    # Every price is published: nothing is forecast, so nothing is anchored.
+    assert resp["price_forecast"]["method"] == "published"
+    assert resp["price_forecast"]["anchor_offset"] is None
     # The hourly solar forecast for the Energy dashboard: [hour_start, Wh] pairs.
     assert resp["pv_hourly"]
     for start, wh in resp["pv_hourly"]:
@@ -386,6 +389,8 @@ def test_plan_ha_offline():
         "published_price_slots": 0,
         "wholesale_hours": 0,
         "price_driver_hours": 0,
+        # No wholesale prices to compare the price sensor with.
+        "tariff_fit": None,
     }
     # No wholesale history: the hours after the published ones take the mean known price.
     assert plan["price_forecast"]["method"] == "mean_known"
@@ -503,4 +508,5 @@ def test_health_op():
              price_attributes=[["today", [{"start": NOW - 3600, "price": 0.2}, {"start": NOW, "price": 0.2}]]])
     assert out["status"] == "ok", out
     assert out["problems"] == []
+    assert {"check": "tariff", "state": "ok", "detail": ""} in out["checks"]
     assert ha("issue_ids") == ["soc_unavailable", "no_plan", "energy_stopped", "script_failing"]

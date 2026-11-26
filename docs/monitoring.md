@@ -73,6 +73,7 @@ The Status sensor is the worst state of these checks (`not_enough_data` counts a
 | `plan` | the last refresh failed | no successful plan for 30 minutes |
 | `soc` | not reported for an hour while the plan moves the battery 10 points or more in the coming hour | not a state of charge (unavailable, out of range) |
 | `prices` | no prices for tomorrow after 15:00 local time, or the price sensor has none and the published EnergyZero prices fill in (see `docs/price.md`) | no price for now, neither from the sensor nor published |
+| `tariff` | the price sensor's prices follow `a × wholesale + b` with other values than the Tariff settings have, by more than 0.002 per kWh on average: prices the sensor doesn't have yet are off by that much, which shows as a step where its prices end. The detail gives both; put the sensor's values in the Tariff settings | – |
 | `energy_data` | the newest complete hour of energy statistics ended more than 3 hours ago | more than 24 hours ago |
 | `wholesale` (EnergyZero only) | not fetched for 24 hours | – |
 | `price_drivers` (EnergyZero only) | the wind and solar forecast at the price reference points not fetched for 24 hours: the cached forecast is used as far as it reaches, and unpublished prices beyond it fall back to the plain profile (see `docs/price.md`) | – |
@@ -84,6 +85,8 @@ The Status sensor is the worst state of these checks (`not_enough_data` counts a
 | `coverage` | PV planes without solar energy statistics (no load, no savings), or no battery charge/discharge statistics (no savings) | – |
 
 After a start, the first plan runs once Home Assistant has started. Until it is done, for at most 30 minutes, the checks of what it fetches, records or sends (`plan`, `energy_data`, `wholesale`, `price_drivers`, `control`) are ok with the detail "waiting for the first plan".
+
+The `tariff` check fits a line through the hours that have both a price from the sensor (the mean of its quarter hours) and a wholesale price; the plan's `inputs.tariff_fit` holds the result. It needs 12 such hours, and it says nothing when the line doesn't fit within 0.002 per kWh, as with a sensor from another market or a contract that isn't linear in the wholesale price. It can't check the export tariff: the sensor has import prices only.
 
 A silent SOC sensor only counts while the plan expects the battery to move, because a full or empty battery can legitimately report nothing new for hours.
 

@@ -226,6 +226,10 @@ enum Cmd {
         /// forecasts are used for the day being forecast.
         #[arg(long, default_value_t = 1)]
         lead_days: u8,
+        /// Score only days in even or odd ISO weeks: choose settings on one half
+        /// and check them on the other. The models still learn from every day.
+        #[arg(long, value_enum, default_value_t = solar::Weeks::All)]
+        weeks: solar::Weeks,
     },
     /// Replay history hour by hour, comparing control strategies on actual data.
     Replay {
@@ -444,6 +448,7 @@ fn main() -> Result<()> {
             solar,
             wholesale,
             lead_days,
+            weeks,
         } => price::evaluate(
             &store,
             from,
@@ -453,6 +458,7 @@ fn main() -> Result<()> {
                 wind,
                 solar,
                 lead_days,
+                weeks,
             },
             &wholesale,
         ),
